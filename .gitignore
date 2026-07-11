@@ -1,0 +1,13 @@
+.karoz/
+/karoz
+dist/
+tmp/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.pem
+*.key
+*.p12
+*.pfx

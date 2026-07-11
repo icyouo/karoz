@@ -1,0 +1,16 @@
+services:
+  karoz:
+    build: .
+    ports:
+      - "127.0.0.1:${KAROZ_PORT:-8088}:8088"
+    environment:
+      KAROZ_ADDR: ":8088"
+      KAROZ_DATA_DIR: "/data"
+      KAROZ_PROJECTS_ROOT: "/workspace"
+      KAROZ_CODEX_AUTH_PATH: "/host/config/codex/auth.json"
+      CODEX_HOME: "/host/config/codex"
+      HOME: "/home/karoz"
+    volumes:
+      - "${KAROZ_PROJECTS_ROOT:-./projects}:/workspace"
+      - "${HOME}/.codex:/host/config/codex"
+      - "./.karoz:/data"

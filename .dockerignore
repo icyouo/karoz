@@ -1,0 +1,15 @@
+.git
+.github
+.karoz
+dist
+tmp
+.DS_Store
+.env
+.env.*
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
+karoz
+
