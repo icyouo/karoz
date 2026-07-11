@@ -195,6 +195,7 @@ func TestCreateAgentTeamCreatesGroupedAgentsAndRoutes(t *testing.T) {
 		agentRoutes:   map[string][]AgentRoute{},
 		agentMessages: map[string][]AgentMessage{},
 		agentSessions: map[string]AgentSessionState{},
+		inbox:         map[string][]AgentInboxMessage{},
 	}
 	resp, err := a.createAgentTeam(project, AgentTeamCreateRequest{TemplateID: "build-lane", Instance: "ship"})
 	if err != nil {
@@ -208,8 +209,32 @@ func TestCreateAgentTeamCreatesGroupedAgentsAndRoutes(t *testing.T) {
 			t.Fatalf("agent missing group tag: %+v", agent)
 		}
 	}
-	if len(resp.Routes) != 7 {
+	if len(resp.Routes) != 9 {
 		t.Fatalf("routes = %+v", resp.Routes)
+	}
+	var reviewer, architect Agent
+	for _, agent := range resp.Agents {
+		switch agent.GroupRole {
+		case "reviewer":
+			reviewer = agent
+		case "architect":
+			architect = agent
+		}
+	}
+	if !a.agentRouteAllowed(project.ID, architect.ID, reviewer.ID, "handoff") {
+		t.Fatal("report_to/accept_from topology did not create architect -> reviewer route")
+	}
+	a.inbox[agentMessageKey(project.ID, architect.ID)] = []AgentInboxMessage{{
+		ID: "review-findings", ProjectID: project.ID, SourceAgentID: reviewer.ID, TargetAgentID: architect.ID,
+		MessageType: "handoff", Intent: "handoff", Subject: "Review findings", Body: "P0 state transition gap",
+		Status: HandoffDelivered, CreatedAt: time.Now().UTC(),
+	}}
+	prompt := a.buildResidentAgentPrompt(project, reviewer, "复查技术方案", "ask")
+	if !strings.Contains(prompt, "### Collaboration topology") ||
+		!strings.Contains(prompt, "nickname: "+architect.Nickname+"; default_intent: request") ||
+		!strings.Contains(prompt, "### Team activity") ||
+		!strings.Contains(prompt, "P0 state transition gap") {
+		t.Fatalf("group prompt missing ufoo-style collaboration metadata:\n%s", prompt)
 	}
 }
 
@@ -230,7 +255,7 @@ func TestKarozPromptRequiresSendToForAgentCoordination(t *testing.T) {
 	if !strings.Contains(prompt, "must call send_to") {
 		t.Fatalf("karoz prompt does not require send_to coordination:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "product-a") || !strings.Contains(prompt, "product-b") {
+	if !strings.Contains(prompt, "nickname: Product A") || !strings.Contains(prompt, "nickname: Product B") {
 		t.Fatalf("karoz prompt missing teammate routing context:\n%s", prompt)
 	}
 }
@@ -312,8 +337,8 @@ func TestAutoHandoffFallbackClosesCollaborationLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.completeUnhandledInboxAfterAutoResponse(project, a.agents["p1"][1], peerMsg, "Peer answer")
-	if got := a.pendingInboxFor(project.ID, "reviewer", 10); len(got) != 0 {
-		t.Fatalf("reviewer reply = %+v", got)
+	if got := a.pendingInboxFor(project.ID, "reviewer", 10); len(got) != 1 || got[0].MessageType != "reply" {
+		t.Fatalf("reviewer did not receive substantive peer result = %+v", got)
 	}
 	if entries := a.blackboardFor(project.ID, 10); len(entries) != 3 {
 		t.Fatalf("blackboard should contain one projection per original handoff, got %+v", entries)

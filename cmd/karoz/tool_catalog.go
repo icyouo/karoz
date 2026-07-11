@@ -132,8 +132,8 @@ func residentToolSpecs() []map[string]any {
 			"status":  map[string]any{"type": "string"},
 			"result":  map[string]any{"type": "string"},
 		}, []string{"task_id", "status"}),
-		residentToolSpec("send_to", "Queue one asynchronous handoff/request to another resident agent in this project.", map[string]any{
-			"target_agent_id":       map[string]any{"type": "string"},
+		residentToolSpec("send_to", "Queue one asynchronous peer handoff/request. Address peers by the unique nickname shown in collaboration topology; internal IDs are accepted only for compatibility.", map[string]any{
+			"target_agent_id":       map[string]any{"type": "string", "description": "Unique target nickname from collaboration topology (preferred), or an internal agent ID for compatibility."},
 			"intent":                map[string]any{"type": "string", "enum": []string{"note", "request", "handoff", "status", "question", "result", "reply"}},
 			"subject":               map[string]any{"type": "string"},
 			"body":                  map[string]any{"type": "string"},
@@ -143,9 +143,9 @@ func residentToolSpecs() []map[string]any {
 			"correlation_id":        map[string]any{"type": "string", "description": "Optional workflow correlation ID; generated when omitted."},
 			"thread_key":            map[string]any{"type": "string"},
 			"priority":              map[string]any{"type": "integer"},
-			"result_owner_agent_id": map[string]any{"type": "string", "description": "Optional agent that receives the terminal result when Karoz delegates on another agent's behalf."},
+			"result_owner_agent_id": map[string]any{"type": "string", "description": "Karoz-only optional unique nickname (preferred) or ID that receives a delegated result. Peer agents must omit this because peer results return directly to the source."},
 		}, []string{"target_agent_id", "body"}),
-		residentToolSpec("reply_to", "Reply once with a substantive answer/result to the source agent for an original inbox request. Replies are terminal and cannot be replied to; use send_to for genuinely new follow-up work.", map[string]any{
+		residentToolSpec("reply_to", "Reply once with a substantive answer/result to the source agent for an original peer request. The receiver reviews and acknowledges this delivery; any genuinely new follow-up uses send_to, never reply-to-reply.", map[string]any{
 			"inbox_message_id": map[string]any{"type": "string"},
 			"subject":          map[string]any{"type": "string"},
 			"body":             map[string]any{"type": "string"},
@@ -154,7 +154,7 @@ func residentToolSpecs() []map[string]any {
 			"inbox_message_id": map[string]any{"type": "string"},
 			"reason":           map[string]any{"type": "string"},
 		}, []string{"inbox_message_id", "reason"}),
-		residentToolSpec("ack_inbox", "Acknowledge one inbox handoff after handling it when there is no useful detail to send back. This marks it consumed and should not be used for substantive results.", map[string]any{
+		residentToolSpec("ack_inbox", "Silently consume one inbox delivery after handling it when there is no useful detail to send back. Ack is internal state only: it never creates a peer message and must not be used for substantive results.", map[string]any{
 			"inbox_message_id": map[string]any{"type": "string"},
 			"note":             map[string]any{"type": "string"},
 		}, []string{"inbox_message_id"}),

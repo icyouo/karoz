@@ -84,7 +84,7 @@ func TestHandoffProtocolCarriesRunCorrelationAndCloses(t *testing.T) {
 		t.Fatalf("reply result = %s", replyResult)
 	}
 	replied, _ := a.inboxMessage(project.ID, target.ID, original.ID)
-	if replied.Status != HandoffClosed || replied.RepliedAt == nil || replied.ClosedAt == nil || replied.Result != "Mockup complete" || replied.ResultMessageID == "" {
+	if replied.Status != HandoffReplied || replied.RepliedAt == nil || replied.Result != "Mockup complete" || replied.ResultMessageID == "" {
 		t.Fatalf("replied handoff = %+v", replied)
 	}
 	duplicate, err := a.executeResidentTool(context.Background(), ResidentToolContext{Project: project, Agent: target}, codexToolCall{Name: "reply_to", Arguments: string(replyArgs)})
@@ -93,8 +93,8 @@ func TestHandoffProtocolCarriesRunCorrelationAndCloses(t *testing.T) {
 	}
 
 	replies := a.pendingInboxFor(project.ID, source.ID, 10)
-	if len(replies) != 0 {
-		t.Fatalf("terminal reply left pending = %+v", replies)
+	if len(replies) != 1 || replies[0].MessageType != "reply" {
+		t.Fatalf("substantive peer reply was not delivered = %+v", replies)
 	}
 	var replyPayload struct {
 		MessageID string `json:"message_id"`
@@ -102,9 +102,24 @@ func TestHandoffProtocolCarriesRunCorrelationAndCloses(t *testing.T) {
 	if err := json.Unmarshal([]byte(replyResult), &replyPayload); err != nil || replyPayload.MessageID == "" {
 		t.Fatalf("reply result = %s err=%v", replyResult, err)
 	}
+	ackArgs, _ := json.Marshal(map[string]any{"inbox_message_id": replyPayload.MessageID})
+	if _, err := a.executeResidentTool(context.Background(), ResidentToolContext{Project: project, Agent: source}, codexToolCall{Name: "ack_inbox", Arguments: string(ackArgs)}); err != nil {
+		t.Fatal(err)
+	}
 	replyNotice, ok := a.inboxMessage(project.ID, source.ID, replyPayload.MessageID)
 	if !ok || replyNotice.Status != HandoffClosed || replyNotice.AckedAt == nil || replyNotice.ReplyToID != original.ID {
 		t.Fatalf("reply notification = %+v ok=%v", replyNotice, ok)
+	}
+	replied, _ = a.inboxMessage(project.ID, target.ID, original.ID)
+	if replied.Status != HandoffClosed || replied.ClosedAt == nil || replied.Result != "Mockup complete" {
+		t.Fatalf("acked original handoff = %+v", replied)
+	}
+	for _, agentID := range []string{source.ID, target.ID} {
+		for _, message := range a.agentMessagesFor(project.ID, agentID) {
+			if message.Intent == "ack" {
+				t.Fatalf("ack must remain internal state, got visible message %+v", message)
+			}
+		}
 	}
 	if got := a.scheduledAgentRunCount(project.ID, source.ID); got != 0 {
 		t.Fatalf("terminal reply scheduled %d agent runs", got)
@@ -136,7 +151,7 @@ func TestReplyToReplyIsRejectedAndConsumed(t *testing.T) {
 	}
 }
 
-func TestScheduledReplyIsConsumedWithoutModelTurn(t *testing.T) {
+func TestScheduledReplyIsReviewedThenAckedWithoutReplyLoop(t *testing.T) {
 	a, project, source, target := newHandoffTestApp(t)
 	reply := AgentInboxMessage{
 		ID: "reply-recovered", ProjectID: project.ID, SourceAgentID: target.ID, TargetAgentID: source.ID,
@@ -163,8 +178,40 @@ func TestScheduledReplyIsConsumedWithoutModelTurn(t *testing.T) {
 	if !ok || consumed.Status != HandoffClosed || consumed.AckedAt == nil {
 		t.Fatalf("scheduled reply = %+v ok=%v", consumed, ok)
 	}
-	if messages := a.agentMessagesFor(project.ID, source.ID); len(messages) != 0 {
-		t.Fatalf("terminal reply invoked model turn: %+v", messages)
+	messages := a.agentMessagesFor(project.ID, source.ID)
+	foundAck, foundReply := false, false
+	for _, message := range messages {
+		if message.Role == "tool_call" && message.Intent == "ack_inbox" {
+			foundAck = true
+		}
+		if message.Role == "tool_call" && message.Intent == "reply_to" {
+			foundReply = true
+		}
+	}
+	if !foundAck || foundReply {
+		t.Fatalf("peer result must be reviewed and acked without reply loop: %+v", messages)
+	}
+}
+
+func TestPeerRouteUsesNicknameAndDoesNotAuthorizeByIntent(t *testing.T) {
+	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
+	a, project, source, target := newHandoffTestApp(t)
+	a.agentRoutes[project.ID] = []AgentRoute{{
+		ID: "route-1", ProjectID: project.ID, FromAgentID: source.ID, ToAgentID: target.ID,
+		Intent: "request", Enabled: true,
+	}}
+	args, _ := json.Marshal(map[string]any{
+		"target_agent_id": target.Nickname,
+		"intent":          "handoff",
+		"body":            "Review the plan",
+	})
+	result, err := a.executeResidentTool(context.Background(), ResidentToolContext{Project: project, Agent: source}, codexToolCall{Name: "send_to", Arguments: string(args)})
+	if err != nil || strings.Contains(result, "route_denied") {
+		t.Fatalf("nickname peer route rejected semantic intent: result=%s err=%v", result, err)
+	}
+	pending := a.pendingInboxFor(project.ID, target.ID, 10)
+	if len(pending) != 1 || pending[0].TargetAgentID != target.ID || pending[0].Intent != "handoff" {
+		t.Fatalf("nickname was not resolved to canonical target: %+v", pending)
 	}
 }
 
@@ -249,15 +296,15 @@ func TestKarozDelegationReportsToCoordinatorAndDeliversResultOwner(t *testing.T)
 	if closedUpstream.Status != HandoffClosed || closedUpstream.Result != closedDelegation.Result {
 		t.Fatalf("closed upstream = %+v", closedUpstream)
 	}
-	if pending := a.pendingInboxFor(project.ID, architect.ID, 10); len(pending) != 0 {
-		t.Fatalf("result delivery requires response: %+v", pending)
+	if pending := a.pendingInboxFor(project.ID, architect.ID, 10); len(pending) != 1 || pending[0].MessageType != "result" {
+		t.Fatalf("result owner was not awakened with peer result: %+v", pending)
 	}
 	architectMessages := a.agentMessagesFor(project.ID, architect.ID)
 	if len(architectMessages) != 1 || architectMessages[0].Intent != "result" || !strings.Contains(architectMessages[0].Body, "P0 issues documented") {
 		t.Fatalf("architect result messages = %+v", architectMessages)
 	}
-	if a.scheduledAgentRunCount(project.ID, karoz.ID) != 0 || a.scheduledAgentRunCount(project.ID, architect.ID) != 0 {
-		t.Fatal("report delivery scheduled an agent response")
+	if a.scheduledAgentRunCount(project.ID, karoz.ID) != 0 {
+		t.Fatal("report delivery scheduled a coordinator response")
 	}
 }
 

@@ -9,15 +9,6 @@ import (
 )
 
 func (a *app) triggerAgentHandoffResponse(project Project, target Agent, msg AgentInboxMessage) {
-	// A reply is a terminal delivery for its correlation. Consuming it here keeps
-	// the protocol at request -> reply -> close and prevents reply-to-reply loops
-	// before another model turn can be scheduled.
-	if handoffMessageIsReply(msg) {
-		if !a.markInboxAcked(project.ID, target.ID, msg.ID) {
-			log.Printf("auto consume reply failed project=%s target=%s inbox=%s", project.ID, target.ID, msg.ID)
-		}
-		return
-	}
 	if strings.EqualFold(os.Getenv("KAROZ_AGENT_AUTO_RESPOND"), "0") || strings.EqualFold(os.Getenv("KAROZ_AGENT_AUTO_RESPOND"), "false") {
 		return
 	}
@@ -50,7 +41,7 @@ func (a *app) completeUnhandledInboxAfterAutoResponse(project Project, target Ag
 		}
 		return
 	}
-	if out == "" || current.MessageType == "reply" || current.MessageType == "decline" || current.MessageType == "failure" || current.Intent == "reply" {
+	if out == "" || handoffMessageIsTerminalDelivery(current) {
 		if !a.markInboxAcked(project.ID, target.ID, current.ID) {
 			log.Printf("auto ack failed project=%s target=%s inbox=%s", project.ID, target.ID, current.ID)
 		}

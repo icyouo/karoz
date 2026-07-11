@@ -23,6 +23,15 @@ func handoffMessageIsReply(msg AgentInboxMessage) bool {
 	return strings.EqualFold(strings.TrimSpace(msg.MessageType), "reply")
 }
 
+func handoffMessageIsTerminalDelivery(msg AgentInboxMessage) bool {
+	switch strings.ToLower(strings.TrimSpace(msg.MessageType)) {
+	case "reply", "result", "decline", "failure":
+		return true
+	default:
+		return strings.EqualFold(strings.TrimSpace(msg.Intent), "reply")
+	}
+}
+
 func (a *app) collaborationCorrelationMessageCount(projectID, correlationID string) int {
 	correlationID = strings.TrimSpace(correlationID)
 	if correlationID == "" {

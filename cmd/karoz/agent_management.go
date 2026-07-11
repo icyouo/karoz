@@ -39,13 +39,33 @@ func (a *app) projectAgents(project Project) []Agent {
 	return agents
 }
 
-func (a *app) projectAgent(project Project, agentID string) (Agent, bool) {
-	for _, agent := range a.projectAgents(project) {
-		if agent.ID == agentID {
+func (a *app) projectAgent(project Project, agentRef string) (Agent, bool) {
+	agentRef = strings.TrimSpace(agentRef)
+	if agentRef == "" {
+		return Agent{}, false
+	}
+	agents := a.projectAgents(project)
+	// Internal callers persist canonical IDs, so preserve exact-ID lookup first.
+	for _, agent := range agents {
+		if agent.ID == agentRef {
+			return agent, true
+		}
+	}
+	// Collaboration tools and prompts address agents by their unique nickname.
+	// IDs remain an internal persistence detail and a compatibility fallback.
+	for _, agent := range agents {
+		if strings.EqualFold(strings.TrimSpace(agent.Nickname), agentRef) {
 			return agent, true
 		}
 	}
 	return Agent{}, false
+}
+
+func (a *app) agentNickname(project Project, agentID string) string {
+	if agent, ok := a.projectAgent(project, agentID); ok {
+		return firstNonEmpty(agent.Nickname, agent.DisplayName, agent.Name, agent.ID)
+	}
+	return agentID
 }
 
 func (a *app) agentWithRuntimeState(project Project, agent Agent) Agent {
@@ -183,52 +203,57 @@ func (a *app) createAgentTeam(project Project, req AgentTeamCreateRequest) (Agen
 	}
 	routes := a.routesForProject(project.ID)
 	routeSeen := map[string]bool{}
+	routeDirectionSeen := map[string]bool{}
 	for _, route := range routes {
 		routeSeen[route.FromAgentID+"->"+route.ToAgentID+"#"+route.Intent] = true
+		routeDirectionSeen[route.FromAgentID+"->"+route.ToAgentID] = true
 	}
 	now := time.Now().UTC()
+	appendRoute := func(from, to, intent string) {
+		if from == "" || to == "" || from == to {
+			return
+		}
+		directionKey := from + "->" + to
+		if routeDirectionSeen[directionKey] {
+			return
+		}
+		if intent == "" {
+			intent = "request"
+		}
+		key := directionKey + "#" + intent
+		if routeSeen[key] {
+			return
+		}
+		routes = append(routes, AgentRoute{
+			ID: randomID(), ProjectID: project.ID, FromAgentID: from, ToAgentID: to,
+			Intent: intent, Enabled: true, CreatedAt: now, UpdatedAt: now,
+		})
+		routeSeen[key] = true
+		routeDirectionSeen[directionKey] = true
+	}
 	for _, member := range agents {
 		if member.ID == "karoz" {
 			continue
 		}
-		key := "karoz->" + member.ID + "#request"
-		if routeSeen[key] {
-			continue
-		}
-		routes = append(routes, AgentRoute{
-			ID:          randomID(),
-			ProjectID:   project.ID,
-			FromAgentID: "karoz",
-			ToAgentID:   member.ID,
-			Intent:      "request",
-			Enabled:     true,
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		})
-		routeSeen[key] = true
+		appendRoute("karoz", member.ID, "request")
 	}
+	// Edge kinds provide the preferred semantic intent for the explicit workflow.
 	for _, edge := range team.Edges {
 		from := memberIDToAgentID[edge.From]
 		to := memberIDToAgentID[edge.To]
-		if from == "" || to == "" {
-			continue
+		appendRoute(from, to, teamEdgeIntent(edge.Kind))
+	}
+	// Like ufoo, report_to and accept_from are also real collaboration topology,
+	// not documentation-only metadata. Union them with explicit workflow edges.
+	for _, member := range team.Agents {
+		from := memberIDToAgentID[member.ID]
+		for _, targetMemberID := range member.ReportTo {
+			appendRoute(from, memberIDToAgentID[targetMemberID], "request")
 		}
-		intent := teamEdgeIntent(edge.Kind)
-		key := from + "->" + to + "#" + intent
-		if routeSeen[key] {
-			continue
+		to := memberIDToAgentID[member.ID]
+		for _, sourceMemberID := range member.AcceptFrom {
+			appendRoute(memberIDToAgentID[sourceMemberID], to, "request")
 		}
-		routes = append(routes, AgentRoute{
-			ID:          randomID(),
-			ProjectID:   project.ID,
-			FromAgentID: from,
-			ToAgentID:   to,
-			Intent:      intent,
-			Enabled:     true,
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		})
-		routeSeen[key] = true
 	}
 	routes, err := a.updateAgentRoutes(project, routes)
 	if err != nil {

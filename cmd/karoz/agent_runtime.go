@@ -78,7 +78,11 @@ func (a *app) agentRouteAllowed(projectID, fromAgentID, toAgentID, intent string
 		if route.FromAgentID != fromAgentID || route.ToAgentID != toAgentID {
 			continue
 		}
-		return route.Intent == intent || route.Intent == "request" && intent == ""
+		// A route is the peer relationship/acceptance boundary. Intent describes
+		// the message, not a second authorization dimension. Treating request and
+		// handoff as different permissions made valid team edges impossible for an
+		// agent to use without knowing an internal route encoding.
+		return true
 	}
 	return false
 }
