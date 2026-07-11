@@ -43,6 +43,13 @@ func (a *app) completeUnhandledInboxAfterAutoResponse(project Project, target Ag
 		return
 	}
 	out = strings.TrimSpace(out)
+	if current.SourceAgentID == "karoz" && !handoffMessageIsReply(current) {
+		a.appendBlackboardEntry(project.ID, target, "done", firstNonEmpty(out, "Coordinator handoff completed"), "", current.ID)
+		if _, err := a.completeCoordinatorHandoff(current, target, "done", firstNonEmpty(out, "Coordinator handoff completed")); err != nil {
+			log.Printf("auto report to coordinator failed project=%s target=%s inbox=%s: %v", project.ID, target.ID, current.ID, err)
+		}
+		return
+	}
 	if out == "" || current.MessageType == "reply" || current.MessageType == "decline" || current.MessageType == "failure" || current.Intent == "reply" {
 		if !a.markInboxAcked(project.ID, target.ID, current.ID) {
 			log.Printf("auto ack failed project=%s target=%s inbox=%s", project.ID, target.ID, current.ID)

@@ -190,6 +190,77 @@ func TestCollaborationCorrelationMessageLimit(t *testing.T) {
 	}
 }
 
+func TestKarozDelegationReportsToCoordinatorAndDeliversResultOwner(t *testing.T) {
+	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
+	a, project, _, _ := newHandoffTestApp(t)
+	karoz := Agent{ID: "karoz", ProjectID: project.ID, Nickname: "Karoz"}
+	architect := Agent{ID: "architect", ProjectID: project.ID, Nickname: "Architect"}
+	reviewer := Agent{ID: "reviewer", ProjectID: project.ID, Nickname: "Reviewer"}
+	a.agents[project.ID] = []Agent{karoz, architect, reviewer}
+	upstream := AgentInboxMessage{
+		ID: "architect-request", ProjectID: project.ID, SourceAgentID: architect.ID, TargetAgentID: karoz.ID,
+		CorrelationID: "corr-delegated", MessageType: "handoff", Intent: "request", Subject: "Coordinate review", Body: "Get a review",
+		Status: HandoffQueued, CreatedAt: time.Now().UTC(),
+	}
+	if err := a.queueInboxMessage(project.ID, upstream); err != nil {
+		t.Fatal(err)
+	}
+	run, started := a.beginAgentRun(AgentRunInput{
+		RunID: "karoz-run", ProjectID: project.ID, AgentID: karoz.ID, Trigger: RunTriggerHandoff,
+		SourceID: architect.ID, MessageID: upstream.ID,
+	})
+	if !started {
+		t.Fatal("karoz run did not start")
+	}
+	sendArgs, _ := json.Marshal(map[string]any{
+		"target_agent_id": reviewer.ID,
+		"subject":         "Review document",
+		"body":            "Review it",
+		"correlation_id":  upstream.CorrelationID,
+	})
+	sendResult, err := a.executeResidentTool(context.Background(), ResidentToolContext{Project: project, Agent: karoz, RunID: run.ID}, codexToolCall{Name: "send_to", Arguments: string(sendArgs)})
+	if err != nil || strings.Contains(sendResult, `"error"`) {
+		t.Fatalf("delegate result = %s err=%v", sendResult, err)
+	}
+	delegated := a.pendingInboxFor(project.ID, reviewer.ID, 10)
+	if len(delegated) != 1 || delegated[0].ResultOwnerID != architect.ID || delegated[0].UpstreamID != upstream.ID {
+		t.Fatalf("delegated handoff = %+v", delegated)
+	}
+	replyArgs, _ := json.Marshal(map[string]any{"inbox_message_id": delegated[0].ID, "body": "review complete"})
+	replyResult, err := a.executeResidentTool(context.Background(), ResidentToolContext{Project: project, Agent: reviewer}, codexToolCall{Name: "reply_to", Arguments: string(replyArgs)})
+	if err != nil || !strings.Contains(replyResult, "coordinator_requires_report") {
+		t.Fatalf("reply to coordinator = %s err=%v", replyResult, err)
+	}
+	reportArgs, _ := json.Marshal(map[string]any{
+		"inbox_message_id": delegated[0].ID,
+		"activity_kind":    "done",
+		"summary":          "review complete",
+		"detail":           "P0 issues documented",
+	})
+	reportResult, err := a.executeResidentTool(context.Background(), ResidentToolContext{Project: project, Agent: reviewer}, codexToolCall{Name: "report_activity", Arguments: string(reportArgs)})
+	if err != nil || strings.Contains(reportResult, `"error"`) {
+		t.Fatalf("report result = %s err=%v", reportResult, err)
+	}
+	closedDelegation, _ := a.inboxMessage(project.ID, reviewer.ID, delegated[0].ID)
+	if closedDelegation.Status != HandoffClosed || closedDelegation.ReportedAt == nil || closedDelegation.Result != "review complete\n\nP0 issues documented" {
+		t.Fatalf("closed delegation = %+v", closedDelegation)
+	}
+	closedUpstream, _ := a.inboxMessage(project.ID, karoz.ID, upstream.ID)
+	if closedUpstream.Status != HandoffClosed || closedUpstream.Result != closedDelegation.Result {
+		t.Fatalf("closed upstream = %+v", closedUpstream)
+	}
+	if pending := a.pendingInboxFor(project.ID, architect.ID, 10); len(pending) != 0 {
+		t.Fatalf("result delivery requires response: %+v", pending)
+	}
+	architectMessages := a.agentMessagesFor(project.ID, architect.ID)
+	if len(architectMessages) != 1 || architectMessages[0].Intent != "result" || !strings.Contains(architectMessages[0].Body, "P0 issues documented") {
+		t.Fatalf("architect result messages = %+v", architectMessages)
+	}
+	if a.scheduledAgentRunCount(project.ID, karoz.ID) != 0 || a.scheduledAgentRunCount(project.ID, architect.ID) != 0 {
+		t.Fatal("report delivery scheduled an agent response")
+	}
+}
+
 func TestHandoffWorkingFailureAndRetryLifecycle(t *testing.T) {
 	a, project, source, target := newHandoffTestApp(t)
 	msg := AgentInboxMessage{

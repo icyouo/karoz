@@ -81,8 +81,8 @@ func TestResidentToolsMemoryArchiveAndSendTo(t *testing.T) {
 		t.Fatalf("inbox = %+v", buildInbox)
 	}
 	buildCtx := ResidentToolContext{Project: project, Agent: build, Workdir: projectPath}
-	replyArgs, _ := json.Marshal(map[string]any{"inbox_message_id": buildInbox[0].ID, "body": "review complete", "subject": "review result"})
-	replyResult, err := a.executeResidentTool(context.Background(), buildCtx, codexToolCall{Name: "reply_to", Arguments: string(replyArgs)})
+	reportDoneArgs, _ := json.Marshal(map[string]any{"inbox_message_id": buildInbox[0].ID, "activity_kind": "done", "summary": "review complete"})
+	_, err = a.executeResidentTool(context.Background(), buildCtx, codexToolCall{Name: "report_activity", Arguments: string(reportDoneArgs)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,18 +93,8 @@ func TestResidentToolsMemoryArchiveAndSendTo(t *testing.T) {
 	if len(karozInbox) != 0 {
 		t.Fatalf("terminal reply left pending inbox = %+v", karozInbox)
 	}
-	var replyPayload struct {
-		MessageID string `json:"message_id"`
-	}
-	if err := json.Unmarshal([]byte(replyResult), &replyPayload); err != nil || replyPayload.MessageID == "" {
-		t.Fatalf("reply result = %s err=%v", replyResult, err)
-	}
-	replyNotice, ok := a.inboxMessage(project.ID, "karoz", replyPayload.MessageID)
-	if !ok || replyNotice.Status != HandoffClosed || replyNotice.AckedAt == nil || replyNotice.Body != "review complete" {
-		t.Fatalf("reply notification was not consumed = %+v ok=%v", replyNotice, ok)
-	}
 	original, _ := a.inboxMessage(project.ID, build.ID, buildInbox[0].ID)
-	if original.Status != HandoffClosed || original.Result != "review complete" {
+	if original.Status != HandoffClosed || original.Result != "review complete" || original.ReportedAt == nil {
 		t.Fatalf("original handoff = %+v", original)
 	}
 	if _, err := a.updateAgentRoutes(project, []AgentRoute{{FromAgentID: build.ID, ToAgentID: "karoz", Intent: "request", Enabled: true}}); err != nil {
@@ -129,7 +119,7 @@ func TestResidentToolsMemoryArchiveAndSendTo(t *testing.T) {
 	if len(reportInbox) != 1 {
 		t.Fatalf("expected report inbox, got %+v", reportInbox)
 	}
-	reportArgs, _ := json.Marshal(map[string]any{"activity_kind": "done", "summary": "reported done", "inbox_message_id": reportInbox[0].ID})
+	reportArgs, _ := json.Marshal(map[string]any{"activity_kind": "progress", "summary": "reported progress", "inbox_message_id": reportInbox[0].ID})
 	if _, err := a.executeResidentTool(context.Background(), buildCtx, codexToolCall{Name: "report_activity", Arguments: string(reportArgs)}); err != nil {
 		t.Fatal(err)
 	}
@@ -280,15 +270,28 @@ func TestAutoHandoffFallbackClosesCollaborationLoop(t *testing.T) {
 	}
 	a.completeUnhandledInboxAfterAutoResponse(project, a.agents["p1"][1], msg, "Here is the result")
 	workerInbox, ok := a.inboxMessage(project.ID, "worker", msg.ID)
-	if !ok || workerInbox.Status != HandoffClosed || workerInbox.RepliedAt == nil || workerInbox.ClosedAt == nil || workerInbox.Result != "Here is the result" {
+	if !ok || workerInbox.Status != HandoffClosed || workerInbox.ReportedAt == nil || workerInbox.ClosedAt == nil || workerInbox.Result != "Here is the result" {
 		t.Fatalf("worker inbox = %+v ok=%v", workerInbox, ok)
 	}
 	karozPending := a.pendingInboxFor(project.ID, "karoz", 10)
 	if len(karozPending) != 0 {
 		t.Fatalf("karoz pending reply = %+v", karozPending)
 	}
-	if entries := a.blackboardFor(project.ID, 10); len(entries) != 1 || !entries[0].Derived || entries[0].SourceType != blackboardSourceHandoff || entries[0].SourceInboxMessageID != msg.ID || entries[0].Status != HandoffClosed {
+	entries := a.blackboardFor(project.ID, 10)
+	if len(entries) != 2 {
 		t.Fatalf("blackboard = %+v", entries)
+	}
+	foundProjection, foundReport := false, false
+	for _, entry := range entries {
+		if entry.Derived && entry.SourceType == blackboardSourceHandoff && entry.SourceInboxMessageID == msg.ID && entry.Status == HandoffClosed {
+			foundProjection = true
+		}
+		if !entry.Derived && entry.SourceType == blackboardSourceAgentReport && entry.SourceInboxMessageID == msg.ID && entry.ActivityKind == "done" {
+			foundReport = true
+		}
+	}
+	if !foundProjection || !foundReport {
+		t.Fatalf("blackboard missing projection/report = %+v", entries)
 	}
 	peer := Agent{ID: "reviewer", ProjectID: "p1", Nickname: "Reviewer"}
 	a.agents["p1"] = append(a.agents["p1"], peer)
@@ -312,7 +315,7 @@ func TestAutoHandoffFallbackClosesCollaborationLoop(t *testing.T) {
 	if got := a.pendingInboxFor(project.ID, "reviewer", 10); len(got) != 0 {
 		t.Fatalf("reviewer reply = %+v", got)
 	}
-	if entries := a.blackboardFor(project.ID, 10); len(entries) != 2 {
+	if entries := a.blackboardFor(project.ID, 10); len(entries) != 3 {
 		t.Fatalf("blackboard should contain one projection per original handoff, got %+v", entries)
 	}
 }

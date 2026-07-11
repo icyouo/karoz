@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -46,6 +47,16 @@ func (a *app) sendToAgent(projectID, sourceAgentID, parentRunID string, args map
 	if _, err := a.validateArtifactRefs(projectID, artifactIDs); err != nil {
 		return toolJSON(map[string]any{"error": "invalid_artifact", "message": err.Error()})
 	}
+	resultOwnerID := toolStringArg(args, "result_owner_agent_id", 128)
+	upstreamID := ""
+	if sourceAgentID == "karoz" && resultOwnerID == "" {
+		resultOwnerID, upstreamID = a.coordinatorDelegationContext(projectID, parentRunID)
+	}
+	if resultOwnerID != "" {
+		if owner, exists := a.projectAgent(project, resultOwnerID); !exists || owner.ID == targetAgentID {
+			return toolJSON(map[string]any{"error": "invalid_result_owner", "message": "result owner must be another agent in this project"})
+		}
+	}
 	msg := AgentInboxMessage{
 		ID:             randomID(),
 		ProjectID:      projectID,
@@ -61,6 +72,8 @@ func (a *app) sendToAgent(projectID, sourceAgentID, parentRunID string, args map
 		ExpectedOutput: firstNonEmpty(toolStringArg(args, "expected_output", 4000), "A concise response or concrete result that closes this handoff."),
 		ArtifactIDs:    artifactIDs,
 		ThreadKey:      threadKey,
+		ResultOwnerID:  resultOwnerID,
+		UpstreamID:     upstreamID,
 		Priority:       clampToolInt(args, "priority", 0, 0, 100),
 		Status:         HandoffQueued,
 		CreatedAt:      now,
@@ -87,6 +100,9 @@ func (a *app) replyToInboxMessage(projectID, sourceAgentID, parentRunID string, 
 	}
 	if !handoffStatusOpen(original.Status) {
 		return toolJSON(map[string]any{"error": "already_closed", "message": "handoff is no longer open", "status": original.Status})
+	}
+	if original.SourceAgentID == "karoz" && sourceAgentID != "karoz" {
+		return toolJSON(map[string]any{"error": "coordinator_requires_report", "message": "agents report progress and completion to Karoz with report_activity; they do not reply to the coordinator", "status": original.Status})
 	}
 	if handoffMessageIsReply(original) {
 		a.markInboxAcked(projectID, sourceAgentID, original.ID)
@@ -218,8 +234,113 @@ func (a *app) reportActivity(projectID string, agent Agent, args map[string]any)
 	if !validActivityKind(kind) {
 		return toolJSON(map[string]any{"error": "validation_error", "message": "invalid activity_kind"})
 	}
-	entry := a.appendBlackboardEntry(projectID, agent, kind, summary, toolStringArg(args, "detail", 8000), toolStringArg(args, "inbox_message_id", 128))
-	return toolJSON(map[string]any{"entry": entry})
+	detail := toolStringArg(args, "detail", 8000)
+	inboxMessageID := toolStringArg(args, "inbox_message_id", 128)
+	var msg AgentInboxMessage
+	if inboxMessageID != "" {
+		var ok bool
+		msg, ok = a.inboxMessage(projectID, agent.ID, inboxMessageID)
+		if !ok || msg.TargetAgentID != agent.ID {
+			return toolJSON(map[string]any{"error": "not_found", "message": "inbox message not found for this agent"})
+		}
+	}
+	entry := a.appendBlackboardEntry(projectID, agent, kind, summary, detail, inboxMessageID)
+	result := map[string]any{
+		"entry":    entry,
+		"delivery": map[string]any{"state": "reported", "coordinator_response": false},
+	}
+	if inboxMessageID == "" {
+		return toolJSON(result)
+	}
+	if msg.SourceAgentID != "karoz" || kind != "done" && kind != "error" {
+		return toolJSON(result)
+	}
+	completion := strings.TrimSpace(summary)
+	if strings.TrimSpace(detail) != "" {
+		completion += "\n\n" + strings.TrimSpace(detail)
+	}
+	delivery, err := a.completeCoordinatorHandoff(msg, agent, kind, completion)
+	if err != nil {
+		return toolJSON(map[string]any{"error": "report_delivery_failed", "message": err.Error(), "entry": entry})
+	}
+	result["handoff_status"] = delivery.HandoffStatus
+	result["result_owner"] = delivery.ResultOwnerID
+	result["result_message_id"] = delivery.ResultMessageID
+	return toolJSON(result)
+}
+
+func (a *app) coordinatorDelegationContext(projectID, parentRunID string) (string, string) {
+	run, ok := a.activeAgentRun(projectID, "karoz")
+	if !ok || strings.TrimSpace(parentRunID) == "" || run.ID != strings.TrimSpace(parentRunID) || strings.TrimSpace(run.MessageID) == "" {
+		return "", ""
+	}
+	upstream, ok := a.inboxMessage(projectID, "karoz", run.MessageID)
+	if !ok || upstream.SourceAgentID == "" || upstream.SourceAgentID == "karoz" {
+		return "", ""
+	}
+	return upstream.SourceAgentID, upstream.ID
+}
+
+type coordinatorReportDelivery struct {
+	HandoffStatus   string
+	ResultOwnerID   string
+	ResultMessageID string
+}
+
+func (a *app) completeCoordinatorHandoff(msg AgentInboxMessage, agent Agent, kind, completion string) (coordinatorReportDelivery, error) {
+	now := time.Now().UTC()
+	a.updateInboxMessage(msg.ProjectID, agent.ID, msg.ID, func(item *AgentInboxMessage) { item.ReportedAt = &now })
+	next := HandoffClosed
+	if kind == "error" {
+		next = HandoffFailed
+	}
+	closed, ok := a.transitionHandoff(msg.ProjectID, agent.ID, msg.ID, next, completion)
+	if !ok {
+		return coordinatorReportDelivery{}, fmt.Errorf("close coordinator handoff %s", msg.ID)
+	}
+	if msg.UpstreamID != "" {
+		a.transitionHandoff(msg.ProjectID, "karoz", msg.UpstreamID, HandoffClosed, completion)
+	}
+	delivery := coordinatorReportDelivery{HandoffStatus: closed.Status, ResultOwnerID: msg.ResultOwnerID}
+	if msg.ResultOwnerID == "" || msg.ResultOwnerID == "karoz" {
+		return delivery, nil
+	}
+	project, err := a.projectByID(msg.ProjectID)
+	if err != nil {
+		return delivery, err
+	}
+	owner, exists := a.projectAgent(project, msg.ResultOwnerID)
+	if !exists || owner.ID == agent.ID {
+		return delivery, fmt.Errorf("result owner %s not found", msg.ResultOwnerID)
+	}
+	notification := AgentInboxMessage{
+		ID:             randomID(),
+		ProjectID:      msg.ProjectID,
+		SourceAgentID:  agent.ID,
+		TargetAgentID:  owner.ID,
+		CorrelationID:  msg.CorrelationID,
+		ParentRunID:    msg.ParentRunID,
+		MessageType:    "result",
+		Intent:         "result",
+		Subject:        firstNonEmpty(msg.Subject, "Delegated result"),
+		Body:           completion,
+		Objective:      "Deliver the completed delegated result.",
+		ExpectedOutput: "No response required.",
+		ArtifactIDs:    append([]string{}, msg.ArtifactIDs...),
+		ThreadKey:      msg.ThreadKey,
+		Priority:       msg.Priority,
+		Status:         HandoffQueued,
+		CreatedAt:      now,
+	}
+	if err := a.queueInboxMessage(msg.ProjectID, notification); err != nil {
+		return delivery, err
+	}
+	if !a.markInboxAcked(msg.ProjectID, owner.ID, notification.ID) {
+		return delivery, fmt.Errorf("consume result delivery %s", notification.ID)
+	}
+	a.appendAgentMessage(msg.ProjectID, owner.ID, "system", "result", "Result from "+firstNonEmpty(agent.Nickname, agent.ID)+": "+notification.Subject+"\n\n"+completion)
+	delivery.ResultMessageID = notification.ID
+	return delivery, nil
 }
 
 func (a *app) markBlackboardActivity(projectID string, agent Agent, args map[string]any) string {

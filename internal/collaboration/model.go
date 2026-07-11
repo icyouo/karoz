@@ -80,6 +80,8 @@ type Handoff struct {
 	ArtifactIDs     []string   `json:"artifact_ids,omitempty"`
 	ThreadKey       string     `json:"thread_key"`
 	ReplyToID       string     `json:"reply_to_id,omitempty"`
+	ResultOwnerID   string     `json:"result_owner_agent_id,omitempty"`
+	UpstreamID      string     `json:"upstream_handoff_id,omitempty"`
 	Priority        int        `json:"priority"`
 	Status          string     `json:"status"`
 	Result          string     `json:"result,omitempty"`
