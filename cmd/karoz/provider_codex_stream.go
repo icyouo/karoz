@@ -137,7 +137,7 @@ func newCodexDirectRequestWithInput(ctx context.Context, input []map[string]any,
 		return nil, err
 	}
 	payload := map[string]any{
-		"model":               getenv("KAROZ_CODEX_MODEL", "gpt-5.3-codex-spark"),
+		"model":               getenv("KAROZ_CODEX_MODEL", "gpt-5.6-luna"),
 		"instructions":        "You are Karoz, a project-scoped resident agent. Keep responses concise and actionable.",
 		"stream":              true,
 		"store":               false,
