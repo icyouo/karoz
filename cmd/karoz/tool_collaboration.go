@@ -1,21 +1,22 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
 
 func (a *app) sendToAgent(projectID, sourceAgentID, parentRunID string, args map[string]any) string {
-	targetAgentID := toolStringArg(args, "target_agent_id", 128)
+	targetAgentRef := toolStringArg(args, "target_agent_id", 128)
 	body := toolStringArg(args, "body", 20000)
-	if targetAgentID == "" || body == "" {
-		return toolJSON(map[string]any{"error": "validation_error", "message": "target_agent_id and body are required"})
+	if targetAgentRef == "" || body == "" {
+		return toolJSON(map[string]any{"error": "validation_error", "message": "target nickname and body are required"})
 	}
 	project, err := a.projectByID(projectID)
 	if err != nil {
 		return toolJSON(map[string]any{"error": "project_not_found", "message": err.Error()})
 	}
-	target, ok := a.projectAgent(project, targetAgentID)
+	target, ok := a.projectAgent(project, targetAgentRef)
 	if !ok || target.ID == sourceAgentID {
 		return toolJSON(map[string]any{"error": "invalid_target", "message": "target agent must exist and differ from source"})
 	}
@@ -26,7 +27,7 @@ func (a *app) sendToAgent(projectID, sourceAgentID, parentRunID string, args map
 	if !validAgentIntent(intent) {
 		return toolJSON(map[string]any{"error": "validation_error", "message": "invalid intent"})
 	}
-	if !a.agentRouteAllowed(projectID, sourceAgentID, targetAgentID, intent) {
+	if !a.agentRouteAllowed(projectID, sourceAgentID, target.ID, intent) {
 		return toolJSON(map[string]any{"error": "route_denied", "message": "send_to is outside the configured agent acceptance range"})
 	}
 	subject := toolStringArg(args, "subject", 500)
@@ -46,11 +47,32 @@ func (a *app) sendToAgent(projectID, sourceAgentID, parentRunID string, args map
 	if _, err := a.validateArtifactRefs(projectID, artifactIDs); err != nil {
 		return toolJSON(map[string]any{"error": "invalid_artifact", "message": err.Error()})
 	}
+	resultOwnerRef := ""
+	if sourceAgentID == "karoz" {
+		resultOwnerRef = toolStringArg(args, "result_owner_agent_id", 128)
+	}
+	resultOwnerID := ""
+	if resultOwnerRef != "" {
+		owner, exists := a.projectAgent(project, resultOwnerRef)
+		if !exists {
+			return toolJSON(map[string]any{"error": "invalid_result_owner", "message": "result owner nickname was not found"})
+		}
+		resultOwnerID = owner.ID
+	}
+	upstreamID := ""
+	if sourceAgentID == "karoz" && resultOwnerID == "" {
+		resultOwnerID, upstreamID = a.coordinatorDelegationContext(projectID, parentRunID)
+	}
+	if resultOwnerID != "" {
+		if owner, exists := a.projectAgent(project, resultOwnerID); !exists || owner.ID == target.ID {
+			return toolJSON(map[string]any{"error": "invalid_result_owner", "message": "result owner must be another agent in this project"})
+		}
+	}
 	msg := AgentInboxMessage{
 		ID:             randomID(),
 		ProjectID:      projectID,
 		SourceAgentID:  sourceAgentID,
-		TargetAgentID:  targetAgentID,
+		TargetAgentID:  target.ID,
 		CorrelationID:  correlationID,
 		ParentRunID:    strings.TrimSpace(parentRunID),
 		MessageType:    "handoff",
@@ -61,6 +83,8 @@ func (a *app) sendToAgent(projectID, sourceAgentID, parentRunID string, args map
 		ExpectedOutput: firstNonEmpty(toolStringArg(args, "expected_output", 4000), "A concise response or concrete result that closes this handoff."),
 		ArtifactIDs:    artifactIDs,
 		ThreadKey:      threadKey,
+		ResultOwnerID:  resultOwnerID,
+		UpstreamID:     upstreamID,
 		Priority:       clampToolInt(args, "priority", 0, 0, 100),
 		Status:         HandoffQueued,
 		CreatedAt:      now,
@@ -68,9 +92,13 @@ func (a *app) sendToAgent(projectID, sourceAgentID, parentRunID string, args map
 	if err := a.queueInboxMessage(projectID, msg); err != nil {
 		return toolJSON(map[string]any{"error": "save_failed", "message": err.Error()})
 	}
-	a.appendAgentMessage(projectID, targetAgentID, "system", intent, "Handoff from "+sourceAgentID+": "+subject+"\n\n"+body)
+	sourceKind := "peer"
+	if sourceAgentID == "karoz" {
+		sourceKind = "coordinator"
+	}
+	a.appendAgentMessage(projectID, target.ID, "system", intent, "["+sourceKind+"]<from:"+a.agentNickname(project, sourceAgentID)+"> "+subject+"\n\n"+body)
 	a.triggerAgentHandoffResponse(project, target, msg)
-	return toolJSON(map[string]any{"message_id": msg.ID, "correlation_id": msg.CorrelationID, "parent_run_id": msg.ParentRunID, "status": HandoffDelivered, "target": map[string]any{"agent_id": targetAgentID}, "delivery": map[string]any{"state": HandoffDelivered, "retry_required": false, "auto_response": true}})
+	return toolJSON(map[string]any{"message_id": msg.ID, "correlation_id": msg.CorrelationID, "parent_run_id": msg.ParentRunID, "status": HandoffDelivered, "target": map[string]any{"nickname": firstNonEmpty(target.Nickname, target.ID)}, "delivery": map[string]any{"state": HandoffDelivered, "retry_required": false, "auto_response": true}})
 }
 
 func (a *app) replyToInboxMessage(projectID, sourceAgentID, parentRunID string, args map[string]any) string {
@@ -88,9 +116,12 @@ func (a *app) replyToInboxMessage(projectID, sourceAgentID, parentRunID string, 
 	if !handoffStatusOpen(original.Status) {
 		return toolJSON(map[string]any{"error": "already_closed", "message": "handoff is no longer open", "status": original.Status})
 	}
-	if handoffMessageIsReply(original) {
+	if original.SourceAgentID == "karoz" && sourceAgentID != "karoz" {
+		return toolJSON(map[string]any{"error": "coordinator_requires_report", "message": "agents report progress and completion to Karoz with report_activity; they do not reply to the coordinator", "status": original.Status})
+	}
+	if handoffMessageIsTerminalDelivery(original) {
 		a.markInboxAcked(projectID, sourceAgentID, original.ID)
-		return toolJSON(map[string]any{"error": "reply_is_terminal", "message": "a reply closes the current handoff and cannot be replied to; use send_to with a new handoff only when additional work is required", "status": HandoffClosed})
+		return toolJSON(map[string]any{"error": "reply_is_terminal", "message": "a peer reply/result is acknowledged and cannot be replied to; use send_to with a new handoff only when additional work is required", "status": HandoffClosed})
 	}
 	if a.collaborationCorrelationMessageCount(projectID, original.CorrelationID) >= maxCollaborationMessagesPerCorrelation {
 		a.markInboxAcked(projectID, sourceAgentID, original.ID)
@@ -140,9 +171,9 @@ func (a *app) replyToInboxMessage(projectID, sourceAgentID, parentRunID string, 
 		return toolJSON(map[string]any{"error": "save_failed", "message": err.Error()})
 	}
 	a.markInboxReplied(projectID, sourceAgentID, original.ID, body, msg.ID)
-	a.appendAgentMessage(projectID, original.SourceAgentID, "system", "reply", "Reply from "+sourceAgentID+" to "+original.ID+": "+subject+"\n\n"+body)
+	a.appendAgentMessage(projectID, original.SourceAgentID, "system", "reply", "[peer]<from:"+a.agentNickname(project, sourceAgentID)+"> "+subject+"\n\n"+body)
 	a.triggerAgentHandoffResponse(project, target, msg)
-	return toolJSON(map[string]any{"message_id": msg.ID, "reply_to_id": original.ID, "correlation_id": msg.CorrelationID, "parent_run_id": msg.ParentRunID, "status": HandoffDelivered, "target": map[string]any{"agent_id": original.SourceAgentID}, "delivery": map[string]any{"state": HandoffDelivered, "retry_required": false, "auto_response": true}})
+	return toolJSON(map[string]any{"message_id": msg.ID, "reply_to_id": original.ID, "correlation_id": msg.CorrelationID, "parent_run_id": msg.ParentRunID, "status": HandoffDelivered, "target": map[string]any{"nickname": a.agentNickname(project, original.SourceAgentID)}, "delivery": map[string]any{"state": HandoffDelivered, "retry_required": false, "auto_response": true}})
 }
 
 func (a *app) declineInboxHandoff(projectID, agentID string, args map[string]any) string {
@@ -192,17 +223,6 @@ func (a *app) ackInboxMessage(projectID, agentID string, args map[string]any) st
 	if !a.markInboxAcked(projectID, agentID, inboxMessageID) {
 		return toolJSON(map[string]any{"error": "not_found", "message": "inbox message not found for this agent"})
 	}
-	note := toolStringArg(args, "note", 1000)
-	if note != "" {
-		a.appendAgentMessage(projectID, agentID, "system", "ack", "Acked inbox "+inboxMessageID+": "+note)
-	}
-	if msg.SourceAgentID != "" && msg.SourceAgentID != agentID {
-		body := "Ack from " + agentID + " for " + inboxMessageID
-		if note != "" {
-			body += ": " + note
-		}
-		a.appendAgentMessage(projectID, msg.SourceAgentID, "system", "ack", body)
-	}
 	return toolJSON(map[string]any{"inbox_message_id": inboxMessageID, "correlation_id": msg.CorrelationID, "status": HandoffClosed})
 }
 
@@ -218,8 +238,111 @@ func (a *app) reportActivity(projectID string, agent Agent, args map[string]any)
 	if !validActivityKind(kind) {
 		return toolJSON(map[string]any{"error": "validation_error", "message": "invalid activity_kind"})
 	}
-	entry := a.appendBlackboardEntry(projectID, agent, kind, summary, toolStringArg(args, "detail", 8000), toolStringArg(args, "inbox_message_id", 128))
-	return toolJSON(map[string]any{"entry": entry})
+	detail := toolStringArg(args, "detail", 8000)
+	inboxMessageID := toolStringArg(args, "inbox_message_id", 128)
+	var msg AgentInboxMessage
+	if inboxMessageID != "" {
+		var ok bool
+		msg, ok = a.inboxMessage(projectID, agent.ID, inboxMessageID)
+		if !ok || msg.TargetAgentID != agent.ID {
+			return toolJSON(map[string]any{"error": "not_found", "message": "inbox message not found for this agent"})
+		}
+	}
+	entry := a.appendBlackboardEntry(projectID, agent, kind, summary, detail, inboxMessageID)
+	result := map[string]any{
+		"entry":    entry,
+		"delivery": map[string]any{"state": "reported", "coordinator_response": false},
+	}
+	if inboxMessageID == "" {
+		return toolJSON(result)
+	}
+	if msg.SourceAgentID != "karoz" || kind != "done" && kind != "error" {
+		return toolJSON(result)
+	}
+	completion := strings.TrimSpace(summary)
+	if strings.TrimSpace(detail) != "" {
+		completion += "\n\n" + strings.TrimSpace(detail)
+	}
+	delivery, err := a.completeCoordinatorHandoff(msg, agent, kind, completion)
+	if err != nil {
+		return toolJSON(map[string]any{"error": "report_delivery_failed", "message": err.Error(), "entry": entry})
+	}
+	result["handoff_status"] = delivery.HandoffStatus
+	result["result_owner"] = delivery.ResultOwnerID
+	result["result_message_id"] = delivery.ResultMessageID
+	return toolJSON(result)
+}
+
+func (a *app) coordinatorDelegationContext(projectID, parentRunID string) (string, string) {
+	run, ok := a.activeAgentRun(projectID, "karoz")
+	if !ok || strings.TrimSpace(parentRunID) == "" || run.ID != strings.TrimSpace(parentRunID) || strings.TrimSpace(run.MessageID) == "" {
+		return "", ""
+	}
+	upstream, ok := a.inboxMessage(projectID, "karoz", run.MessageID)
+	if !ok || upstream.SourceAgentID == "" || upstream.SourceAgentID == "karoz" {
+		return "", ""
+	}
+	return upstream.SourceAgentID, upstream.ID
+}
+
+type coordinatorReportDelivery struct {
+	HandoffStatus   string
+	ResultOwnerID   string
+	ResultMessageID string
+}
+
+func (a *app) completeCoordinatorHandoff(msg AgentInboxMessage, agent Agent, kind, completion string) (coordinatorReportDelivery, error) {
+	now := time.Now().UTC()
+	a.updateInboxMessage(msg.ProjectID, agent.ID, msg.ID, func(item *AgentInboxMessage) { item.ReportedAt = &now })
+	next := HandoffClosed
+	if kind == "error" {
+		next = HandoffFailed
+	}
+	closed, ok := a.transitionHandoff(msg.ProjectID, agent.ID, msg.ID, next, completion)
+	if !ok {
+		return coordinatorReportDelivery{}, fmt.Errorf("close coordinator handoff %s", msg.ID)
+	}
+	if msg.UpstreamID != "" {
+		a.transitionHandoff(msg.ProjectID, "karoz", msg.UpstreamID, HandoffClosed, completion)
+	}
+	delivery := coordinatorReportDelivery{HandoffStatus: closed.Status, ResultOwnerID: msg.ResultOwnerID}
+	if msg.ResultOwnerID == "" || msg.ResultOwnerID == "karoz" {
+		return delivery, nil
+	}
+	project, err := a.projectByID(msg.ProjectID)
+	if err != nil {
+		return delivery, err
+	}
+	owner, exists := a.projectAgent(project, msg.ResultOwnerID)
+	if !exists || owner.ID == agent.ID {
+		return delivery, fmt.Errorf("result owner %s not found", msg.ResultOwnerID)
+	}
+	notification := AgentInboxMessage{
+		ID:             randomID(),
+		ProjectID:      msg.ProjectID,
+		SourceAgentID:  agent.ID,
+		TargetAgentID:  owner.ID,
+		CorrelationID:  msg.CorrelationID,
+		ParentRunID:    msg.ParentRunID,
+		MessageType:    "result",
+		Intent:         "result",
+		Subject:        firstNonEmpty(msg.Subject, "Delegated result"),
+		Body:           completion,
+		Objective:      "Deliver the completed delegated result.",
+		ExpectedOutput: "Acknowledge after review. If more work is required, create a new peer handoff.",
+		ArtifactIDs:    append([]string{}, msg.ArtifactIDs...),
+		ThreadKey:      msg.ThreadKey,
+		Priority:       msg.Priority,
+		Status:         HandoffQueued,
+		CreatedAt:      now,
+	}
+	if err := a.queueInboxMessage(msg.ProjectID, notification); err != nil {
+		return delivery, err
+	}
+	a.appendAgentMessage(msg.ProjectID, owner.ID, "system", "result", "[peer]<from:"+firstNonEmpty(agent.Nickname, agent.ID)+"> "+notification.Subject+"\n\n"+completion)
+	a.triggerAgentHandoffResponse(project, owner, notification)
+	delivery.ResultMessageID = notification.ID
+	return delivery, nil
 }
 
 func (a *app) markBlackboardActivity(projectID string, agent Agent, args map[string]any) string {

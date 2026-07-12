@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -29,8 +30,9 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 	b.WriteString("- Use project tools to ground answers in the real project before making claims. Prefer focused, verifiable steps over broad speculation.\n")
 	b.WriteString("- Use web_search and web_fetch for current external facts, docs, releases, prices, policies, or anything likely to have changed. Summarize sources with URLs when web tools inform the answer.\n")
 	b.WriteString("- If MCP tools are available, use tools named mcp__server__tool for external systems. For figma.com URLs or design implementation tasks, prefer the Figma MCP tools exposed by the figma server; parse file key and node-id from the URL, use get_design_context/get_screenshot/get_metadata when available, and do not claim Figma is unavailable until the MCP tool call itself fails.\n")
-	b.WriteString("- Coordinate with teammates through the collaboration loop: send_to creates a request/handoff, reply_to answers the requesting agent, report_activity adds optional project-level context, and ack_inbox only confirms low-information receipt/completion.\n")
-	b.WriteString("- Collaboration rule: close each original request exactly once with reply_to, decline_handoff, or ack_inbox. A reply is terminal: consume it without replying. If more work is required, create a new send_to handoff instead of replying to a reply. report_activity never closes a handoff. Do not duplicate a handoff result in the blackboard.\n")
+	b.WriteString("- Coordinate with teammates through the collaboration loop: send_to creates a peer request/handoff, reply_to returns one substantive result for an original peer request, report_activity reports one-way state to Karoz, and ack_inbox silently consumes a delivery when there is nothing substantive to return.\n")
+	b.WriteString("- Collaboration rule: never reply_to Karoz. For a Karoz-originated handoff, use report_activity with its inbox_message_id; activity_kind done or error closes it, while progress/blocker/decision reports keep it open. Reports never trigger a Karoz response. For peer work, execute first, then reply only with a concrete answer/result the sender needs. Never send greetings, receipt acknowledgements, or emoji replies. A peer reply/result must be acked, not replied to; if additional work is genuinely required, create a new send_to handoff.\n")
+	b.WriteString("- Evidence rule: never claim you discussed, aligned with, notified, or handed off to another agent unless a successful send_to/reply_to tool result in the current work proves it.\n")
 	b.WriteString("- Escalation rule: send_to karoz only for decisions, conflicts, resource requests, or user-facing coordination. Use report_activity only for project-level blockers, decisions, or milestones that are not already represented by a Run, Handoff, or Task.\n")
 	b.WriteString("- Use create_task when a requested development or deployment task should be tracked as a project task. Use update_task_status when you have a concrete status change for an existing task.\n")
 	b.WriteString("- Use request_choice when you need the user to confirm yes/no or choose one option from a numbered list. After requesting a choice, wait for the user's next message and do not assume the answer.\n")
@@ -78,7 +80,15 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 		b.WriteString("- group_name: " + agent.GroupName + "\n")
 		b.WriteString("- group_role: " + agent.GroupRole + "\n")
 		b.WriteString("- group_order: " + fmt.Sprintf("%d", agent.GroupOrder) + "\n")
-		b.WriteString("- Group contract: follow the team's handoff order. Use send_to for explicit handoffs to the next responsible group member instead of broadcasting.\n")
+		b.WriteString("- Group contract: follow the collaboration topology below. If another member owns the next step, send a direct handoff to that member's unique nickname instead of doing their job or asking Karoz to forward it.\n")
+		switch strings.ToLower(strings.TrimSpace(agent.GroupRole)) {
+		case "architect":
+			b.WriteString("- Role handoff: send execution-ready plans and risk hotspots to downstream builder/reviewer nicknames. When review or discussion is requested, perform a real send_to and wait for peer evidence before claiming alignment.\n")
+		case "builder":
+			b.WriteString("- Role handoff: send changed areas, verification evidence, and known risks to the downstream reviewer nickname. Send requested fixes back through a new concrete handoff only when another owner is required.\n")
+		case "reviewer":
+			b.WriteString("- Role handoff: send must-fix findings and user-visible risks directly to downstream builder/architect nicknames. Review a revised peer result before declaring approval; ack only when no further action is needed.\n")
+		}
 	}
 	if strings.TrimSpace(agent.Summary) != "" {
 		b.WriteString("- summary: " + agent.Summary + "\n")
@@ -105,15 +115,13 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 		b.WriteString(residentBuilderAgentPrompt())
 	}
 	if peers := a.projectAgents(project); len(peers) > 1 {
-		b.WriteString("\n### Resident teammates\n")
+		b.WriteString("\n### Resident teammates (address by unique nickname)\n")
 		for _, peer := range peers {
 			if peer.ID == agent.ID {
 				continue
 			}
-			b.WriteString("- id: ")
-			b.WriteString(peer.ID)
-			b.WriteString("; name: ")
-			b.WriteString(firstNonEmpty(peer.Nickname, peer.DisplayName, peer.Name))
+			b.WriteString("- nickname: ")
+			b.WriteString(firstNonEmpty(peer.Nickname, peer.DisplayName, peer.Name, peer.ID))
 			b.WriteString("; role: ")
 			b.WriteString(peer.Role)
 			if strings.TrimSpace(peer.GroupID) != "" {
@@ -125,13 +133,15 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 			b.WriteString("\n")
 		}
 	}
+	a.renderCollaborationTopology(&b, project, agent)
+	a.renderRecentTeamActivity(&b, project, agent, 12)
 	if pending := a.pendingInboxFor(project.ID, agent.ID, 8); len(pending) > 0 {
 		b.WriteString("\n### Pending handoffs for this agent\n")
 		for _, msg := range pending {
 			b.WriteString("- id: ")
 			b.WriteString(msg.ID)
 			b.WriteString("; from: ")
-			b.WriteString(msg.SourceAgentID)
+			b.WriteString(a.agentNickname(project, msg.SourceAgentID))
 			if strings.TrimSpace(msg.MessageType) != "" {
 				b.WriteString("; type: ")
 				b.WriteString(msg.MessageType)
@@ -209,4 +219,96 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 	b.WriteString("\nLatest user message:\n")
 	b.WriteString(userText)
 	return b.String()
+}
+
+func (a *app) renderCollaborationTopology(b *strings.Builder, project Project, agent Agent) {
+	if b == nil || agent.ID == "karoz" {
+		return
+	}
+	routes := a.routesForProject(project.ID)
+	type peerRoute struct {
+		nickname string
+		intent   string
+	}
+	var incoming, outgoing []peerRoute
+	for _, route := range routes {
+		if !route.Enabled {
+			continue
+		}
+		if route.FromAgentID == agent.ID && route.ToAgentID != "karoz" {
+			outgoing = append(outgoing, peerRoute{nickname: a.agentNickname(project, route.ToAgentID), intent: firstNonEmpty(route.Intent, "request")})
+		}
+		if route.ToAgentID == agent.ID && route.FromAgentID != "karoz" {
+			incoming = append(incoming, peerRoute{nickname: a.agentNickname(project, route.FromAgentID), intent: firstNonEmpty(route.Intent, "request")})
+		}
+	}
+	if len(routes) == 0 {
+		for _, peer := range a.projectAgents(project) {
+			if peer.ID == agent.ID || peer.ID == "karoz" {
+				continue
+			}
+			outgoing = append(outgoing, peerRoute{nickname: firstNonEmpty(peer.Nickname, peer.ID), intent: "any"})
+			incoming = append(incoming, peerRoute{nickname: firstNonEmpty(peer.Nickname, peer.ID), intent: "any"})
+		}
+	}
+	sort.SliceStable(outgoing, func(i, j int) bool { return outgoing[i].nickname < outgoing[j].nickname })
+	sort.SliceStable(incoming, func(i, j int) bool { return incoming[i].nickname < incoming[j].nickname })
+	b.WriteString("\n### Collaboration topology\n")
+	b.WriteString("- Address every target by the unique nickname below. Karoz maps nicknames to internal IDs.\n")
+	b.WriteString("- Route intent is a semantic default, not a separate permission. A legal peer direction accepts request, question, or handoff as needed.\n")
+	if len(outgoing) == 0 {
+		b.WriteString("- downstream/report_to: none; report blockers or decisions to Karoz with report_activity.\n")
+	} else {
+		b.WriteString("- downstream/report_to:\n")
+		for _, route := range outgoing {
+			b.WriteString("  - nickname: " + route.nickname + "; default_intent: " + route.intent + "\n")
+		}
+	}
+	if len(incoming) > 0 {
+		b.WriteString("- upstream/accept_from:\n")
+		for _, route := range incoming {
+			b.WriteString("  - nickname: " + route.nickname + "; default_intent: " + route.intent + "\n")
+		}
+	}
+}
+
+func (a *app) renderRecentTeamActivity(b *strings.Builder, project Project, agent Agent, limit int) {
+	if b == nil || strings.TrimSpace(agent.GroupID) == "" || limit <= 0 {
+		return
+	}
+	groupAgents := map[string]bool{}
+	for _, member := range a.projectAgents(project) {
+		if member.GroupID == agent.GroupID {
+			groupAgents[member.ID] = true
+		}
+	}
+	a.mu.Lock()
+	var activity []AgentInboxMessage
+	for _, items := range a.inbox {
+		for _, msg := range items {
+			if msg.ProjectID == project.ID && groupAgents[msg.SourceAgentID] && groupAgents[msg.TargetAgentID] {
+				activity = append(activity, msg)
+			}
+		}
+	}
+	a.mu.Unlock()
+	if len(activity) == 0 {
+		return
+	}
+	sort.SliceStable(activity, func(i, j int) bool { return activity[i].CreatedAt.Before(activity[j].CreatedAt) })
+	if len(activity) > limit {
+		activity = activity[len(activity)-limit:]
+	}
+	b.WriteString("\n### Team activity (recent peer deliveries)\n")
+	b.WriteString("- Use this timeline for continuity; do not claim an exchange occurred unless it appears here or in a successful current tool result.\n")
+	for _, msg := range activity {
+		b.WriteString("- " + a.agentNickname(project, msg.SourceAgentID) + " -> " + a.agentNickname(project, msg.TargetAgentID))
+		b.WriteString("; type: " + firstNonEmpty(msg.MessageType, "handoff"))
+		b.WriteString("; status: " + msg.Status)
+		b.WriteString("; subject: " + limitString(msg.Subject, 180))
+		if strings.TrimSpace(msg.Body) != "" {
+			b.WriteString("; summary: " + limitString(strings.ReplaceAll(msg.Body, "\n", " "), 240))
+		}
+		b.WriteString("\n")
+	}
 }

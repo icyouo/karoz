@@ -132,19 +132,20 @@ func residentToolSpecs() []map[string]any {
 			"status":  map[string]any{"type": "string"},
 			"result":  map[string]any{"type": "string"},
 		}, []string{"task_id", "status"}),
-		residentToolSpec("send_to", "Queue one asynchronous handoff/request to another resident agent in this project.", map[string]any{
-			"target_agent_id": map[string]any{"type": "string"},
-			"intent":          map[string]any{"type": "string", "enum": []string{"note", "request", "handoff", "status", "question", "result", "reply"}},
-			"subject":         map[string]any{"type": "string"},
-			"body":            map[string]any{"type": "string"},
-			"objective":       map[string]any{"type": "string", "description": "Concrete objective the target agent should complete."},
-			"expected_output": map[string]any{"type": "string", "description": "Definition of the result required to close this handoff."},
-			"artifact_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional referenced artifact IDs."},
-			"correlation_id":  map[string]any{"type": "string", "description": "Optional workflow correlation ID; generated when omitted."},
-			"thread_key":      map[string]any{"type": "string"},
-			"priority":        map[string]any{"type": "integer"},
+		residentToolSpec("send_to", "Queue one asynchronous peer handoff/request. Address peers by the unique nickname shown in collaboration topology; internal IDs are accepted only for compatibility.", map[string]any{
+			"target_agent_id":       map[string]any{"type": "string", "description": "Unique target nickname from collaboration topology (preferred), or an internal agent ID for compatibility."},
+			"intent":                map[string]any{"type": "string", "enum": []string{"note", "request", "handoff", "status", "question", "result", "reply"}},
+			"subject":               map[string]any{"type": "string"},
+			"body":                  map[string]any{"type": "string"},
+			"objective":             map[string]any{"type": "string", "description": "Concrete objective the target agent should complete."},
+			"expected_output":       map[string]any{"type": "string", "description": "Definition of the result required to close this handoff."},
+			"artifact_ids":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional referenced artifact IDs."},
+			"correlation_id":        map[string]any{"type": "string", "description": "Optional workflow correlation ID; generated when omitted."},
+			"thread_key":            map[string]any{"type": "string"},
+			"priority":              map[string]any{"type": "integer"},
+			"result_owner_agent_id": map[string]any{"type": "string", "description": "Karoz-only optional unique nickname (preferred) or ID that receives a delegated result. Peer agents must omit this because peer results return directly to the source."},
 		}, []string{"target_agent_id", "body"}),
-		residentToolSpec("reply_to", "Reply once with a substantive answer/result to the source agent for an original inbox request. Replies are terminal and cannot be replied to; use send_to for genuinely new follow-up work.", map[string]any{
+		residentToolSpec("reply_to", "Reply once with a substantive answer/result to the source agent for an original peer request. The receiver reviews and acknowledges this delivery; any genuinely new follow-up uses send_to, never reply-to-reply.", map[string]any{
 			"inbox_message_id": map[string]any{"type": "string"},
 			"subject":          map[string]any{"type": "string"},
 			"body":             map[string]any{"type": "string"},
@@ -153,11 +154,11 @@ func residentToolSpecs() []map[string]any {
 			"inbox_message_id": map[string]any{"type": "string"},
 			"reason":           map[string]any{"type": "string"},
 		}, []string{"inbox_message_id", "reason"}),
-		residentToolSpec("ack_inbox", "Acknowledge one inbox handoff after handling it when there is no useful detail to send back. This marks it consumed and should not be used for substantive results.", map[string]any{
+		residentToolSpec("ack_inbox", "Silently consume one inbox delivery after handling it when there is no useful detail to send back. Ack is internal state only: it never creates a peer message and must not be used for substantive results.", map[string]any{
 			"inbox_message_id": map[string]any{"type": "string"},
 			"note":             map[string]any{"type": "string"},
 		}, []string{"inbox_message_id"}),
-		residentToolSpec("report_activity", "Add optional project-level context to the blackboard for a blocker, decision, or milestone not already represented by a Run, Handoff, or Task. This never closes an inbox handoff.", map[string]any{
+		residentToolSpec("report_activity", "Send a one-way progress or completion report to Karoz. For a Karoz-originated handoff, done/error with inbox_message_id closes it and delivers the result to its result owner without triggering a Karoz response.", map[string]any{
 			"activity_kind":    map[string]any{"type": "string", "enum": []string{"focus", "start", "progress", "blocker", "handoff", "done", "error", "next_step", "decision_needed"}},
 			"summary":          map[string]any{"type": "string"},
 			"detail":           map[string]any{"type": "string"},

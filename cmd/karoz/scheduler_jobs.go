@@ -26,14 +26,21 @@ func (a *app) executeHandoffScheduledRun(ctx context.Context, job ScheduledRun) 
 	if !ok || !handoffStatusOpen(msg.Status) {
 		return nil
 	}
-	if handoffMessageIsReply(msg) {
-		a.markInboxAcked(project.ID, target.ID, msg.ID)
-		return nil
-	}
 	if !a.claimHandoff(project.ID, target.ID, msg.ID) {
 		return nil
 	}
-	userText := strings.TrimSpace(fmt.Sprintf("You received an asynchronous %s from agent %s.\n\nInbox message id: %s\nSubject: %s\nObjective: %s\nExpected output: %s\n\n%s\n\nRespond as %s. Before ending this turn, close handoff %s exactly once with reply_to when the original request needs an answer/result, decline_handoff when it cannot be completed, or ack_inbox only when there is no useful detail. A reply is terminal and must never receive another reply; additional work requires a new send_to handoff. report_activity does not close a handoff; use it only for additional project-level blockers, decisions, or milestones not already represented by this Handoff. Send decisions/conflicts to Karoz; otherwise avoid forwarding unless another agent is clearly required. If this handoff requires tracked coding or deployment work, create a task.", msg.Intent, msg.SourceAgentID, msg.ID, msg.Subject, msg.Objective, msg.ExpectedOutput, msg.Body, firstNonEmpty(target.Nickname, target.DisplayName, target.Name, target.ID), msg.ID))
+	closeInstruction := fmt.Sprintf("Before ending this turn, close handoff %s exactly once with reply_to when the original request needs an answer/result, decline_handoff when it cannot be completed, or ack_inbox only when there is no useful detail.", msg.ID)
+	if handoffMessageIsTerminalDelivery(msg) {
+		closeInstruction = fmt.Sprintf("This is a substantive peer delivery, not a new request. Review it, then close inbox %s with ack_inbox. Do not call reply_to. If the sender genuinely needs another review or action, create one new send_to handoff to their unique nickname before acking.", msg.ID)
+	}
+	if msg.SourceAgentID == "karoz" {
+		closeInstruction = fmt.Sprintf("Karoz is the coordinator, not a conversation peer. Do not call reply_to for this handoff. Report progress with report_activity and finish handoff %s with report_activity using activity_kind done or error and inbox_message_id %s. Reports never trigger a coordinator response.", msg.ID, msg.ID)
+	}
+	sourceKind := "peer"
+	if msg.SourceAgentID == "karoz" {
+		sourceKind = "coordinator"
+	}
+	userText := strings.TrimSpace(fmt.Sprintf("[%s]<from:%s> You received an asynchronous %s.\n\nInbox message id: %s\nSubject: %s\nObjective: %s\nExpected output: %s\n\n%s\n\nRespond as %s. %s Never send a greeting or receipt-only reply. Send decisions/conflicts to Karoz only as reports. If another peer owns the next step, hand off directly using their unique nickname. If this handoff requires tracked coding or deployment work, create a task.", sourceKind, a.agentNickname(project, msg.SourceAgentID), msg.Intent, msg.ID, msg.Subject, msg.Objective, msg.ExpectedOutput, msg.Body, firstNonEmpty(target.Nickname, target.DisplayName, target.Name, target.ID), closeInstruction))
 	out, err := a.runResidentAgentTurn(ctx, project, target, userText, "ask", nil)
 	if err != nil {
 		a.failHandoff(project.ID, target.ID, msg.ID, err)

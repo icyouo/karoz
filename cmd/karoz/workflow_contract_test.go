@@ -93,6 +93,14 @@ func TestRunHandoffArtifactTaskContract(t *testing.T) {
 	if _, err := a.executeResidentTool(context.Background(), reviewerCtx, codexToolCall{Name: "reply_to", Arguments: string(replyArgs)}); err != nil {
 		t.Fatal(err)
 	}
+	designerReplies := a.pendingInboxFor(project.ID, designer.ID, 10)
+	if len(designerReplies) != 1 || designerReplies[0].MessageType != "reply" {
+		t.Fatalf("designer reply delivery = %+v", designerReplies)
+	}
+	ackArgs, _ := json.Marshal(map[string]any{"inbox_message_id": designerReplies[0].ID})
+	if _, err := a.executeResidentTool(context.Background(), designerCtx, codexToolCall{Name: "ack_inbox", Arguments: string(ackArgs)}); err != nil {
+		t.Fatal(err)
+	}
 	reviewFinished, ok := a.finishAgentRun(project.ID, reviewer.ID, reviewRun.ID, RunStateDone, nil)
 	if !ok || reviewFinished.SourceID != handoff.ID || reviewFinished.MessageID != handoff.ID {
 		t.Fatalf("review run/handoff contract = %+v ok=%v", reviewFinished, ok)
