@@ -46,10 +46,31 @@ It shines on long-lived projects, parallel feature work, well-scoped implementat
 ## How It Works
 
 1. Karoz scans your projects directory and gives each project its own workspace.
-2. A project-scoped `karoz` agent keeps messages, memory, and context across sessions.
+2. A project-scoped `karoz` agent keeps messages, memory, and context across sessions — and can grow into a team of agents that hand off work to each other.
 3. You create development or deployment tasks and follow their state and logs live in the browser.
-4. Development tasks run in an isolated Git worktree — never directly in your main checkout.
-5. Karoz detects changes, optionally runs your verification command, commits on the task branch, and merges into your local base branch — leaving the push to you.
+4. Each development task runs in an isolated Git worktree and comes back as a reviewable commit on its own branch — never directly in your main checkout ([details below](#how-tasks-run)).
+
+## Quick Start
+
+You need Go and a parent directory holding the projects you want Karoz to scan.
+
+```bash
+go run ./cmd/karoz
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8088
+```
+
+Defaults:
+
+- projects directory: `$HOME/karoz-projects`
+- data directory: `.karoz`
+- default project agent: `karoz`
+
+Already using the Codex CLI? When `$HOME/.codex/auth.json` exists, `auto` mode reuses its OAuth credentials directly — no extra setup.
 
 ## How Tasks Run
 
@@ -83,48 +104,30 @@ The resident agent is an open runtime — you extend what it knows and what it c
 
 **MCP servers** connect external tools to the agent over the [Model Context Protocol](https://modelcontextprotocol.io). Configure them globally or per project via a `.mcp.json` in the project directory, over `stdio` or `SSE` transport. Karoz discovers each server's tools live and exposes them to the agent as `mcp__<server>__<tool>` — so a Figma, database, or in-house MCP server becomes callable mid-conversation with no code change.
 
-## Quick Start
-
-You need Go and a parent directory holding the projects you want Karoz to scan.
-
-```bash
-go run ./cmd/karoz
-```
-
-Then open:
-
-```text
-http://127.0.0.1:8088
-```
-
-Defaults:
-
-- projects directory: `$HOME/karoz-projects`
-- data directory: `.karoz`
-- default project agent: `karoz`
-
-Already using the Codex CLI? When `$HOME/.codex/auth.json` exists, `auto` mode reuses its OAuth credentials directly — no extra setup.
-
 ## What Works Today
 
+**Projects & agents**
 - Local project discovery and management
 - Persistent project agents with messages and memory
-- Multi-agent teams with role-based handoffs and a shared blackboard
-- Handoff state machine with serialized, recoverable per-agent queues
+- A local browser workspace with live runtime updates
+
+**Multi-agent teams**
+- Role-based teams that hand off work through `send_to` / `reply_to` / `decline_handoff`
+- A validated handoff state machine with serialized, recoverable per-agent queues
+- A shared blackboard plus idle-time backlog reconciliation by Karoz
+
+**Task execution**
+- Isolated worktree runner: develop → detect → verify → commit → merge
+- Coding delegated to the native `codex`/`claude` agent inside the worktree
+- Live task state, streaming logs, and interrupted-task recovery on restart
+
+**Extensibility & providers**
 - Local Skills discovery, listing, and `$mention` injection
 - MCP tool support over stdio and SSE, per project or global
-- Development and deployment task records
-- Live task state and streaming execution logs
+- Resident chat agent via Codex OAuth (direct), a local CLI, or an OpenAI-compatible cli2api adapter
 - `codex` and `claude` CLI diagnostics
-- Resident chat agent via Codex OAuth (direct) or a local CLI
-- Task execution delegated to the native `codex`/`claude` coding agent
-- Optional OpenAI-compatible cli2api adapter
-- Isolated worktree-based development task runner
-- Develop → detect → verify → commit → merge task pipeline
-- Interrupted-task recovery on restart
-- A local browser workspace
 
-Karoz is an MVP. The focus right now is validating the core loop — a project-scoped agent plus traceable task execution. The interface, extension system, and team features are still evolving fast.
+Karoz is an MVP. The core loop — project-scoped agents, multi-agent handoffs, and traceable task execution — works end to end today. The browser interface, configuration surface, and reliability guardrails are still evolving fast.
 
 ## Roadmap
 
