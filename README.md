@@ -10,7 +10,7 @@
 
 AI coding tools answer the question in front of them, then forget everything. Every new session starts from zero: you re-explain the project, tasks scatter across terminals, and you still inspect diffs, run checks, and craft commits by hand.
 
-Karoz closes that loop. Each project gets a persistent agent with its own memory and a traceable task workflow. Describe a goal in the browser, let the agent work with real project context, and watch development tasks run in isolated worktrees — with live logs, diffs, and commits you review before they touch your main branch. Context stays with the project, code stays on your machine, and every step stays visible and interruptible.
+Karoz closes that loop. Each project gets a persistent agent with its own memory and a traceable task workflow. Describe a goal in the browser, let the agent work with real project context, and watch development tasks run in isolated worktrees driven by battle-tested coding agents — with live logs, diffs, and commits kept on a dedicated branch so nothing reaches your remote until you review and push. Context stays with the project, code stays on your machine, and every step stays visible and interruptible.
 
 ```
   ~/karoz-projects/
@@ -18,15 +18,18 @@ Karoz closes that loop. Each project gets a persistent agent with its own memory
   ├── web-app       →  resident agent + memory + tasks + run history
   └── data-pipeline →  resident agent + memory + tasks + run history
 
-  task "add pagination"  →  isolated git worktree  →  agent edits
-                         →  change detection  →  optional verify
-                         →  commit  →  you review  →  merge
+  task "add pagination"
+     → isolated git worktree (branch karoz/task-…)
+     → native codex / claude agent implements it   ← the agent's own loop
+     → change detection → optional verify command
+     → commit on task branch → no-ff merge into local base
+     → you review the result and push when ready
 ```
 
 ## Why Karoz
 
 - **Built around projects, not chat windows.** Each project keeps its own agent, messages, memory, tasks, and run history — so context compounds instead of resetting every session.
-- **Advice becomes delivery.** Karoz doesn't stop at code generation. It runs the work in isolation, detects changes, optionally verifies them, and produces a Git commit you can review.
+- **Advice becomes delivery.** Karoz doesn't stop at code generation. It hands coding tasks to a native `codex`/`claude` agent inside an isolated worktree, detects the changes, optionally verifies them, and produces a reviewable Git commit.
 - **Your main checkout stays clean.** Development tasks run in separate worktrees, so parallel work never collides or leaves surprise edits in your working tree.
 - **Local-first, with clear boundaries.** You own the service, the project data, and the execution environment — and you can reuse the Codex or Claude auth you already have.
 - **Transparent and interruptible.** Task state, live logs, and diffs stay visible. Inspect any run, or take over at any point.
@@ -44,7 +47,21 @@ It shines on long-lived projects, parallel feature work, well-scoped implementat
 2. A project-scoped `karoz` agent keeps messages, memory, and context across sessions.
 3. You create development or deployment tasks and follow their state and logs live in the browser.
 4. Development tasks run in an isolated Git worktree — never directly in your main checkout.
-5. Karoz detects changes, optionally runs your verification command, and commits the result for you to review and merge.
+5. Karoz detects changes, optionally runs your verification command, commits on the task branch, and merges into your local base branch — leaving the push to you.
+
+## How Tasks Run
+
+Chat and task execution are two separate paths. The resident agent handles conversation and coordination. When real code needs to change, Karoz hands the work to a **native coding agent** — the `codex` or `claude` CLI already installed on your machine — inside an isolated worktree:
+
+1. **Isolate** — Karoz creates a Git worktree on a dedicated `karoz/task-…` branch (initializing a base snapshot first if the repo has no commits yet).
+2. **Develop** — it invokes `codex exec` or `claude` with full workspace access. That agent runs its own internal loop — reading files, editing, running commands, iterating — until the task is done. Karoz delegates the coding loop rather than reimplementing it.
+3. **Detect** — if the agent produced no repository changes, the task fails fast instead of reporting false success.
+4. **Verify** — when `KAROZ_VERIFY_COMMAND` is set, Karoz runs it in the worktree; a failure marks the task failed with the captured output.
+5. **Commit & merge** — changes are committed on the task branch, then merged `--no-ff` into your local base branch. Nothing is pushed to a remote — you review and push when ready.
+
+Every step streams to a live task log, and each terminal state notifies the resident agent so it can decide the next move. Interrupted tasks are recovered on restart.
+
+The worktree is the safety boundary: because the code lives on its own branch behind that boundary, the native agent can run with full permissions inside it while your main checkout and remote stay untouched.
 
 ## Quick Start
 
@@ -75,10 +92,11 @@ Already using the Codex CLI? When `$HOME/.codex/auth.json` exists, `auto` mode r
 - Development and deployment task records
 - Live task state and streaming execution logs
 - `codex` and `claude` CLI diagnostics
-- Direct Codex OAuth agent execution
+- Resident chat agent via Codex OAuth (direct) or a local CLI
+- Task execution delegated to the native `codex`/`claude` coding agent
 - Optional OpenAI-compatible cli2api adapter
 - Isolated worktree-based development task runner
-- Change detection, optional verification, commit, and merge workflow
+- Develop → detect → verify → commit → merge task pipeline
 - Interrupted-task recovery on restart
 - A local browser workspace
 
