@@ -30,6 +30,7 @@ Karoz closes that loop. Each project gets a persistent agent with its own memory
 
 - **Built around projects, not chat windows.** Each project keeps its own agent, messages, memory, tasks, and run history — so context compounds instead of resetting every session.
 - **Advice becomes delivery.** Karoz doesn't stop at code generation. It hands coding tasks to a native `codex`/`claude` agent inside an isolated worktree, detects the changes, optionally verifies them, and produces a reviewable Git commit.
+- **A team, not just one agent.** A project can host multiple resident agents — architect, builder, reviewer — that hand off work to each other through a tracked protocol, coordinated by Karoz.
 - **Your main checkout stays clean.** Development tasks run in separate worktrees, so parallel work never collides or leaves surprise edits in your working tree.
 - **Local-first, with clear boundaries.** You own the service, the project data, and the execution environment — and you can reuse the Codex or Claude auth you already have.
 - **Transparent and interruptible.** Task state, live logs, and diffs stay visible. Inspect any run, or take over at any point.
@@ -63,6 +64,16 @@ Chat and task execution are two separate paths. The resident agent handles conve
 Every step streams to a live task log, and each terminal state notifies the resident agent so it can decide the next move. Interrupted tasks are recovered on restart.
 
 The worktree is the safety boundary: because the code lives on its own branch behind that boundary, the native agent can run with full permissions inside it while your main checkout and remote stay untouched.
+
+## Multi-Agent Collaboration
+
+A project isn't limited to one agent. You can stand up a team of resident agents with distinct roles — for example architect, builder, and reviewer — that coordinate through a tracked, asynchronous handoff protocol rather than ad-hoc chatter.
+
+- **Direct handoffs.** An agent hands work to a teammate with `send_to`, returns a concrete result with `reply_to`, or turns work down with `decline_handoff` — each addressed by a unique teammate nickname.
+- **A real state machine.** Every handoff moves through validated states — `queued → delivered → claimed → working → replied / declined / failed / closed` — so nothing silently stalls or gets worked twice.
+- **Serialized, recoverable execution.** Each agent drains its own queue one job at a time, with de-duplication, automatic retries, and recovery of in-flight handoffs after a restart.
+- **A shared blackboard.** Agents post progress, blockers, and decisions as signals the whole project can see, and Karoz reconciles the backlog when the project goes idle.
+- **Karoz coordinates, you stay in control.** Karoz routes work and reconciles state; it reports rather than silently acting, and the whole exchange is visible in the runtime timeline.
 
 ## Skills & MCP
 
@@ -98,6 +109,8 @@ Already using the Codex CLI? When `$HOME/.codex/auth.json` exists, `auto` mode r
 
 - Local project discovery and management
 - Persistent project agents with messages and memory
+- Multi-agent teams with role-based handoffs and a shared blackboard
+- Handoff state machine with serialized, recoverable per-agent queues
 - Local Skills discovery, listing, and `$mention` injection
 - MCP tool support over stdio and SSE, per project or global
 - Development and deployment task records
@@ -125,8 +138,7 @@ Karoz is an MVP. The focus right now is validating the core loop — a project-s
 
 ### Next
 
-- Multi-agent delegation and collaboration
-- Reusable skills, workflows, and project templates
+- Reusable workflows and project templates
 - Pull Request, Issue, and CI integrations
 - Scheduled jobs, background queues, and notifications
 - Team sharing, permissions, and audit history
