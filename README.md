@@ -34,6 +34,7 @@ Karoz closes that loop. Each project gets a persistent agent with its own memory
 - **Local-first, with clear boundaries.** You own the service, the project data, and the execution environment — and you can reuse the Codex or Claude auth you already have.
 - **Transparent and interruptible.** Task state, live logs, and diffs stay visible. Inspect any run, or take over at any point.
 - **No vendor lock-in.** Use Codex OAuth, a local CLI, or an OpenAI-compatible proxy — swap providers without rewriting your workflow.
+- **Extensible by design.** The resident agent picks up local Skills (reusable instruction packs) and MCP servers — stdio or SSE — so you can plug in your own playbooks and tools without changing Karoz.
 
 ## Who It Is For
 
@@ -63,6 +64,14 @@ Every step streams to a live task log, and each terminal state notifies the resi
 
 The worktree is the safety boundary: because the code lives on its own branch behind that boundary, the native agent can run with full permissions inside it while your main checkout and remote stay untouched.
 
+## Skills & MCP
+
+The resident agent is an open runtime — you extend what it knows and what it can do without touching Karoz itself.
+
+**Skills** are local instruction packs (a `SKILL.md` file with `name`/`description` frontmatter). Karoz discovers them from project and user directories — `.agents/skills`, `.codex/skills`, `~/.agents/skills`, and `~/.codex/skills` — reusing the conventions you may already have from Codex. Every turn lists the available skills by name; the agent reads one on demand with `read_skill`, or you pull a full skill inline by mentioning `$SkillName` in your message.
+
+**MCP servers** connect external tools to the agent over the [Model Context Protocol](https://modelcontextprotocol.io). Configure them globally or per project via a `.mcp.json` in the project directory, over `stdio` or `SSE` transport. Karoz discovers each server's tools live and exposes them to the agent as `mcp__<server>__<tool>` — so a Figma, database, or in-house MCP server becomes callable mid-conversation with no code change.
+
 ## Quick Start
 
 You need Go and a parent directory holding the projects you want Karoz to scan.
@@ -89,6 +98,8 @@ Already using the Codex CLI? When `$HOME/.codex/auth.json` exists, `auto` mode r
 
 - Local project discovery and management
 - Persistent project agents with messages and memory
+- Local Skills discovery, listing, and `$mention` injection
+- MCP tool support over stdio and SSE, per project or global
 - Development and deployment task records
 - Live task state and streaming execution logs
 - `codex` and `claude` CLI diagnostics
