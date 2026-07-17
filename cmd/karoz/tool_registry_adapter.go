@@ -23,6 +23,18 @@ func (a *app) residentToolRegistry() *tooldomain.Registry[ResidentToolContext] {
 	a.residentToolsOnce.Do(func() {
 		registry := tooldomain.NewRegistry[ResidentToolContext]()
 		handlers := map[string]tooldomain.Handler[ResidentToolContext]{
+			"repo_list": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				result := repoListTool(ctx, toolCtx.Workdir, args)
+				return result, ctx.Err()
+			},
+			"repo_read": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				result := repoReadTool(ctx, toolCtx.Workdir, args)
+				return result, ctx.Err()
+			},
+			"repo_search": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				result := repoSearchTool(ctx, toolCtx.Workdir, args)
+				return result, ctx.Err()
+			},
 			"list_skills": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				return a.listSkillsTool(toolCtx.Project, toolStringArg(args, "query", 200)), nil
 			},
@@ -124,9 +136,6 @@ func (a *app) residentToolRegistry() *tooldomain.Registry[ResidentToolContext] {
 		specs := append(residentToolSpecs(), residentAgentManagementToolSpecs()...)
 		for _, spec := range specs {
 			definition := definitionFromResidentToolSpec(spec)
-			if definition.Name == "bash" {
-				continue
-			}
 			handler, exists := handlers[definition.Name]
 			if !exists {
 				panic("resident tool handler missing: " + definition.Name)
@@ -145,9 +154,21 @@ func (a *app) residentToolRegistry() *tooldomain.Registry[ResidentToolContext] {
 }
 
 func (a *app) executeResidentTool(ctx context.Context, toolCtx ResidentToolContext, call codexToolCall) (string, error) {
-	if call.Name == "bash" {
-		result := runResidentBashTool(toolCtx.Workdir, call.Arguments)
-		return toolJSON(result), nil
+	if err := ctx.Err(); err != nil {
+		return toolJSON(map[string]any{"error": "cancelled", "message": err.Error()}), err
+	}
+	if toolCtx.EnforceRunScope {
+		if run, active := a.activeAgentRun(toolCtx.Project.ID, toolCtx.Agent.ID); !active || run.ID != toolCtx.RunID {
+			return toolJSON(map[string]any{"error": "stale_run", "message": "the resident run is no longer active"}), context.Canceled
+		}
+	}
+	if toolCtx.EnforcePolicy && !residentToolAllowed(toolCtx, call.Name) {
+		return toolJSON(map[string]any{"error": "tool_forbidden", "message": call.Name + " is not allowed for this resident turn"}), nil
+	}
+	if residentToolHasSideEffects(call.Name) {
+		if err := a.markScheduledRunEffectsStarted(toolCtx.RunID); err != nil {
+			return toolJSON(map[string]any{"error": "effect_barrier_failed", "message": err.Error()}), err
+		}
 	}
 	if strings.HasPrefix(call.Name, "mcp__") {
 		return a.dynamicToolProvider().Call(ctx, toolCtx.Workdir, call.Name, call.Arguments)
@@ -161,4 +182,18 @@ func (a *app) executeResidentTool(ctx context.Context, toolCtx ResidentToolConte
 		return toolJSON(map[string]any{"error": "unknown_tool", "message": call.Name}), nil
 	}
 	return result, err
+}
+
+func residentToolHasSideEffects(name string) bool {
+	if strings.HasPrefix(name, "mcp__") {
+		return true
+	}
+	switch name {
+	case "repo_list", "repo_read", "repo_search", "list_skills", "read_skill",
+		"web_search", "web_fetch", "search_archive", "list_pending", "get_messages",
+		"list_artifacts", "get_artifact", "list_agent_templates":
+		return false
+	default:
+		return true
+	}
 }

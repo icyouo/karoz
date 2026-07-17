@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	runtimedomain "github.com/karoz/karoz/internal/runtime"
 	"io"
 	"net/http"
 	"os"
@@ -54,14 +55,7 @@ func (a *app) invokeCLI2API(ctx context.Context, req CLI2APIRequest) (CLI2APIRes
 }
 
 func (a *app) invokeCLI2APIStream(ctx context.Context, req CLI2APIRequest, toolCtx ResidentToolContext, callbacks AgentStreamCallbacks) error {
-	provider := strings.ToLower(strings.TrimSpace(req.Provider))
-	if provider == "" || provider == "auto" {
-		if fileExists(expandHome(getenv("KAROZ_CODEX_AUTH_PATH", "~/.codex/auth.json"))) {
-			provider = "codex-direct"
-		} else {
-			provider = "stub"
-		}
-	}
+	provider := a.resolveResidentProvider(req.Provider)
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
 		return errors.New("prompt is required")
@@ -72,7 +66,7 @@ func (a *app) invokeCLI2APIStream(ctx context.Context, req CLI2APIRequest, toolC
 	}
 	if provider == "codex-direct" || provider == "codex-oauth" || provider == "codex-api" {
 		toolCtx.Workdir = workdir
-		tools := a.residentToolSpecsForContext(ctx, workdir, toolCtx.Agent)
+		tools := a.residentToolSpecsForContext(ctx, toolCtx)
 		return invokeCodexDirectStream(ctx, workdir, prompt, tools, callbacks, func(call codexToolCall) (string, error) {
 			return a.executeResidentTool(ctx, toolCtx, call)
 		})
@@ -85,6 +79,26 @@ func (a *app) invokeCLI2APIStream(ctx context.Context, req CLI2APIRequest, toolC
 		callbacks.OnDelta(cli.Output)
 	}
 	return nil
+}
+
+func (a *app) resolveResidentProvider(raw string) string {
+	provider := strings.ToLower(strings.TrimSpace(raw))
+	if provider != "" && provider != "auto" {
+		return provider
+	}
+	if fileExists(expandHome(getenv("KAROZ_CODEX_AUTH_PATH", "~/.codex/auth.json"))) {
+		return "codex-direct"
+	}
+	return "unavailable"
+}
+
+func (a *app) residentProviderCapabilities(raw string) runtimedomain.ProviderCapabilities {
+	switch a.resolveResidentProvider(raw) {
+	case "codex-direct", "codex-oauth", "codex-api":
+		return runtimedomain.ProviderCapabilities{Streaming: true, Tools: true, Interrupts: true}
+	default:
+		return runtimedomain.ProviderCapabilities{}
+	}
 }
 
 func invokeCLIProxyAPI(ctx context.Context, req CLI2APIRequest) (CLI2APIResponse, error) {

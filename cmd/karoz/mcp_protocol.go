@@ -21,7 +21,7 @@ func (c *mcpClient) initialize(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.notify("notifications/initialized", map[string]any{})
+	return c.notify(ctx, "notifications/initialized", map[string]any{})
 }
 
 func (c *mcpClient) listTools(ctx context.Context, server string) ([]mcpTool, error) {
@@ -73,7 +73,7 @@ func (c *mcpClient) callTool(ctx context.Context, name string, args map[string]a
 func (c *mcpClient) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.nextID++
 	id := c.nextID
-	if err := c.write(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
+	if err := c.write(ctx, map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
 		return nil, err
 	}
 	for {
@@ -82,7 +82,7 @@ func (c *mcpClient) request(ctx context.Context, method string, params any) (jso
 			return nil, ctx.Err()
 		default:
 		}
-		msg, err := c.readMessage()
+		msg, err := c.readMessage(ctx)
 		if err != nil {
 			stderr := strings.TrimSpace(c.stderr.String())
 			if stderr != "" {
@@ -110,17 +110,17 @@ func (c *mcpClient) request(ctx context.Context, method string, params any) (jso
 	}
 }
 
-func (c *mcpClient) notify(method string, params any) error {
-	return c.write(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+func (c *mcpClient) notify(ctx context.Context, method string, params any) error {
+	return c.write(ctx, map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
 }
 
-func (c *mcpClient) write(value any) error {
+func (c *mcpClient) write(ctx context.Context, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
 	if c.postURL != "" {
-		req, err := http.NewRequest(http.MethodPost, c.postURL, bytes.NewReader(data))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.postURL, bytes.NewReader(data))
 		if err != nil {
 			return err
 		}
@@ -136,18 +136,36 @@ func (c *mcpClient) write(value any) error {
 		}
 		return nil
 	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 	_, err = fmt.Fprintf(c.stdin, "Content-Length: %d\r\n\r\n%s", len(data), data)
 	return err
 }
 
-func (c *mcpClient) readMessage() ([]byte, error) {
+func (c *mcpClient) readMessage(ctx context.Context) ([]byte, error) {
 	if c.messages != nil {
-		msg, ok := <-c.messages
-		if !ok {
-			return nil, io.EOF
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case msg, ok := <-c.messages:
+			if !ok {
+				select {
+				case err := <-c.messageErrors:
+					return nil, err
+				default:
+				}
+				return nil, io.EOF
+			}
+			return msg, nil
 		}
-		return msg, nil
 	}
+	return c.readStdioMessage()
+}
+
+func (c *mcpClient) readStdioMessage() ([]byte, error) {
 	contentLength := -1
 	for {
 		line, err := c.reader.ReadString('\n')
@@ -184,6 +202,9 @@ func (c *mcpClient) close() error {
 	}
 	if c.stdin != nil {
 		_ = c.stdin.Close()
+	}
+	if c.processCancel != nil {
+		c.processCancel()
 	}
 	if c.cmd != nil && c.cmd.Process != nil {
 		_ = c.cmd.Process.Kill()

@@ -2943,6 +2943,11 @@
           onError(message) {
             throw new Error(message);
           },
+          onCancelled(payload) {
+            assistantText = (payload && payload.message) || 'Agent run cancelled.';
+            setBubbleContent(assistantBubble, assistantText, false);
+            $('agentStatus').textContent = currentAgentLabel() + ' · cancelled';
+          },
           onToolStart(payload) {
             if (payload.tool !== 'request_choice') appendToolMessage('tool_call', payload.tool, payload.call_id, payload.arguments, true);
           },
@@ -3002,7 +3007,7 @@
         headers['content-type'] = 'application/json';
         body = JSON.stringify({ message, type: state.chatType || 'ask' });
       }
-      const res = await fetch('/api/projects/' + state.project.id + '/agents/' + encodeURIComponent(currentAgentID()) + '/messages?stream=1', {
+      const res = await fetch('/api/projects/' + state.project.id + '/agents/' + encodeURIComponent(currentAgentID()) + '/messages', {
         method: 'POST',
         headers,
         body
@@ -3044,6 +3049,7 @@
       if (event === 'log') handlers.onLog?.(payload);
       if (event === 'done') handlers.onDone?.(payload);
       if (event === 'error') handlers.onError?.(payload.message || 'stream failed');
+      if (event === 'cancelled') handlers.onCancelled?.(payload);
     }
     function currentSkillTrigger(input) {
       const cursor = input.selectionStart || 0;

@@ -64,34 +64,66 @@ func (a *app) agentMessagesPageForDisplay(projectID, agentID string, beforeSeq i
 }
 
 func (a *app) appendAgentMessage(projectID, agentID, role, intent, body string) AgentMessage {
-	now := time.Now().UTC()
+	a.mu.Lock()
+	msg := a.appendAgentMessageLocked(projectID, agentID, role, intent, body)
+	a.mu.Unlock()
+	a.persistAppendedAgentMessage(projectID, agentID)
+	return msg
+}
+
+func (a *app) appendAgentMessageForRun(projectID, agentID, runID, role, intent, body string) (AgentMessage, bool) {
 	key := agentMessageKey(projectID, agentID)
-	session := a.ensureAgentSession(projectID, agentID)
+	a.mu.Lock()
+	run, ok := a.agentRuns[key]
+	if !ok || !run.State.Active() || strings.TrimSpace(runID) == "" || run.ID != runID {
+		a.mu.Unlock()
+		return AgentMessage{}, false
+	}
+	msg := a.appendAgentMessageLocked(projectID, agentID, role, intent, body)
+	a.mu.Unlock()
+	a.persistAppendedAgentMessage(projectID, agentID)
+	return msg, true
+}
+
+func (a *app) appendAgentMessageLocked(projectID, agentID, role, intent, body string) AgentMessage {
+	if a.agentMessages == nil {
+		a.agentMessages = map[string][]AgentMessage{}
+	}
+	key := agentMessageKey(projectID, agentID)
+	session := a.ensureAgentSessionLocked(projectID, agentID)
 	msg := AgentMessage{
 		ID:        messageID(),
 		ProjectID: projectID,
 		AgentID:   agentID,
 		SessionID: session.SessionID,
-		Seq:       int64(len(a.agentMessagesFor(projectID, agentID))) + 1,
+		Seq:       int64(len(a.agentMessages[key])) + 1,
 		Role:      role,
 		Intent:    firstNonEmpty(intent, "note"),
 		Body:      strings.TrimSpace(body),
-		CreatedAt: now,
+		CreatedAt: time.Now().UTC(),
 	}
-	a.mu.Lock()
 	a.agentMessages[key] = append(a.agentMessages[key], msg)
-	a.mu.Unlock()
+	return msg
+}
+
+func (a *app) persistAppendedAgentMessage(projectID, agentID string) {
 	if err := a.saveAgentMessages(); err != nil {
 		log.Printf("save agent messages: %v", err)
 	}
 	a.maybeCheckpointAgentSession(projectID, agentID, false)
-	return msg
 }
 
 func (a *app) ensureAgentSession(projectID, agentID string) AgentSessionState {
-	key := agentMessageKey(projectID, agentID)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.ensureAgentSessionLocked(projectID, agentID)
+}
+
+func (a *app) ensureAgentSessionLocked(projectID, agentID string) AgentSessionState {
+	if a.agentSessions == nil {
+		a.agentSessions = map[string]AgentSessionState{}
+	}
+	key := agentMessageKey(projectID, agentID)
 	if state, ok := a.agentSessions[key]; ok && strings.TrimSpace(state.SessionID) != "" {
 		return state
 	}

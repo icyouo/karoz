@@ -27,7 +27,7 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 	b.WriteString("- You are a project resident agent. Keep continuity across turns and work from durable project context, not just the latest message.\n")
 	b.WriteString("- Treat the visible conversation as the short-term window. Earlier full messages are archived; use memory/archive tools by id, sequence range, or query when details are needed.\n")
 	b.WriteString("- When important facts, decisions, completed work, or pending work appear, preserve them through resident memory tools.\n")
-	b.WriteString("- Use project tools to ground answers in the real project before making claims. Prefer focused, verifiable steps over broad speculation.\n")
+	b.WriteString("- Use repo_list, repo_read, and repo_search to ground answers in the real project before making claims. These repository tools are read-only and path-bounded. Prefer focused, verifiable steps over broad speculation.\n")
 	b.WriteString("- Use web_search and web_fetch for current external facts, docs, releases, prices, policies, or anything likely to have changed. Summarize sources with URLs when web tools inform the answer.\n")
 	b.WriteString("- If MCP tools are available, use tools named mcp__server__tool for external systems. For figma.com URLs or design implementation tasks, prefer the Figma MCP tools exposed by the figma server; parse file key and node-id from the URL, use get_design_context/get_screenshot/get_metadata when available, and do not claim Figma is unavailable until the MCP tool call itself fails.\n")
 	b.WriteString("- Coordinate with teammates through the collaboration loop: send_to creates a peer request/handoff, reply_to returns one substantive result for an original peer request, report_activity reports one-way state to Karoz, and ack_inbox silently consumes a delivery when there is nothing substantive to return.\n")
@@ -37,10 +37,10 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 	b.WriteString("- Use create_task when a requested development or deployment task should be tracked as a project task. Use update_task_status when you have a concrete status change for an existing task.\n")
 	b.WriteString("- Use request_choice when you need the user to confirm yes/no or choose one option from a numbered list. After requesting a choice, wait for the user's next message and do not assume the answer.\n")
 	b.WriteString("- At the start of each new user turn, if you need tools, first emit one short visible sentence describing what you will inspect or do, then call the first tool. Do not begin a user turn with a tool-only response.\n")
-	b.WriteString("- You have a bash tool that runs in the selected project workspace. Use it when you need real repository or runtime evidence. Prefer read-only inspection unless the user asks for changes.\n")
+	b.WriteString("- Resident turns never receive a general host shell. Repository inspection must use the bounded repo tools; coding and command execution belong in tracked task worktrees.\n")
 	b.WriteString("- Use write_workspace_file for generated artifacts such as requirements, development plans, and HTML mockups. Use show_preview after writing an HTML design draft that should open in the side preview.\n")
 	b.WriteString("- Workspace writes create versioned Artifacts. Use list_artifacts/get_artifact for metadata, submit_artifact for review, and review_artifact for approval or change requests. Reference Artifact IDs in send_to and create_task instead of copying their full contents.\n")
-	b.WriteString("- This local OSS version has no sandbox boundary. Do not pretend files, git operations, or shell commands are isolated.\n")
+	b.WriteString("- Resident repository tools are read-only. Artifact writes are isolated to the resident workspace, while coding changes must be delegated to tracked task worktrees.\n")
 	b.WriteString("- Respond in the user's language. Use concise, concrete answers. Do not claim that you created a task unless an explicit tool call or API action has created one.\n\n")
 	if capabilitiesForAgent(agent).CanManageAgents {
 		b.WriteString("### Karoz coordination tools\n")
@@ -48,7 +48,7 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 		b.WriteString("- When the user asks to create an agent or team by role/natural language, call list_agent_templates first, then choose the exact template_id from that result.\n")
 		b.WriteString("- When the user asks you to let, ask, notify, route to, or have one or more resident agents discuss/review/output something, you must call send_to for each named or relevant target agent in the same turn before claiming it was sent. Do not answer only with a plan such as \"I will ask them\".\n")
 		b.WriteString("- For multi-agent product/design/architecture coordination, send concise requests to the responsible agents and tell the user which agents were queued. Use the visible Resident teammates list as the routing source.\n")
-		b.WriteString("- Do not use bash or external project files to discover Karoz resident template IDs; the list_agent_templates tool is authoritative.\n\n")
+		b.WriteString("- Do not infer Karoz resident template IDs from repository files; the list_agent_templates tool is authoritative.\n\n")
 	}
 	switch turnType {
 	case "ask":
@@ -59,7 +59,7 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 		b.WriteString("### Turn contract: plan\n")
 		b.WriteString("- Produce a concrete plan, requirement draft, design direction, or implementation outline.\n")
 		b.WriteString("- You may write generated artifacts such as requirements, plans, and HTML design drafts when requested.\n")
-		b.WriteString("- Do not execute coding changes directly; create a task only if the user asks to track the work.\n\n")
+		b.WriteString("- Do not execute coding changes or create execution tasks in this mode; switch to a development turn when the user wants tracked implementation.\n\n")
 	case "dev":
 		b.WriteString("### Turn contract: dev\n")
 		b.WriteString("- You may inspect the repo, create bug/feature/deploy tasks, and use tools needed to advance implementation.\n")

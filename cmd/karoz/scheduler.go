@@ -130,7 +130,7 @@ func (a *app) newSchedulerWorker() *runtimedomain.SchedulerWorker {
 			return started
 		},
 		Bind: func(ctx context.Context, job ScheduledRun) (context.Context, bool) {
-			return a.bindAgentRunContext(ctx, job.ProjectID, job.AgentID)
+			return a.bindAgentRunContext(ctx, job.ProjectID, job.AgentID, job.ID)
 		},
 		Execute: a.executeScheduledRun,
 		Finish: func(job ScheduledRun, runErr error) {
@@ -138,7 +138,7 @@ func (a *app) newSchedulerWorker() *runtimedomain.SchedulerWorker {
 				a.finishAgentRun(job.ProjectID, job.AgentID, job.ID, RunStateFailed, runErr)
 				return
 			}
-			a.transitionAgentRun(job.ProjectID, job.AgentID, RunStateCompleting)
+			a.transitionAgentRun(job.ProjectID, job.AgentID, job.ID, RunStateCompleting)
 			a.finishAgentRun(job.ProjectID, job.AgentID, job.ID, RunStateDone, nil)
 		},
 		Claimed: func(ScheduledRun) {
@@ -244,6 +244,17 @@ func (a *app) saveScheduledRuns() error {
 	return persistenceadapter.NewJSONStore(a.settings.DataDir).Save("agent-run-queue.json", scheduledRunSnapshot{Jobs: jobs}, 0644)
 }
 
+func (a *app) markScheduledRunEffectsStarted(runID string) error {
+	if strings.TrimSpace(runID) == "" {
+		return nil
+	}
+	_, found, changed := a.ensureSchedulerQueue().MarkEffectsStarted(runID, time.Now().UTC())
+	if !found || !changed {
+		return nil
+	}
+	return a.saveScheduledRuns()
+}
+
 func (a *app) loadScheduledRuns() error {
 	var snapshot scheduledRunSnapshot
 	found, err := persistenceadapter.NewJSONStore(a.settings.DataDir).Load("agent-run-queue.json", &snapshot)
@@ -251,6 +262,11 @@ func (a *app) loadScheduledRuns() error {
 		return err
 	}
 	recovery := a.ensureSchedulerQueue().Recover(snapshot.Jobs, time.Now().UTC())
+	for _, job := range recovery.TerminalFailures {
+		if job.Kind == ScheduledRunHandoff {
+			a.notifyFailedHandoff(job)
+		}
+	}
 	for _, job := range recovery.Jobs {
 		if job.Kind != ScheduledRunHandoff {
 			continue

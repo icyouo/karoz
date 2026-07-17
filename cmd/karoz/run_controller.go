@@ -80,15 +80,19 @@ func (a *app) beginAgentRun(input AgentRunInput) (AgentRun, bool) {
 	return run, true
 }
 
-func (a *app) transitionAgentRun(projectID, agentID string, next RunState) (AgentRun, bool) {
+func (a *app) transitionAgentRun(projectID, agentID, expectedRunID string, next RunState) (AgentRun, bool) {
 	key := agentMessageKey(projectID, agentID)
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
-	if !ok || !run.State.Active() {
+	if !ok || !run.State.Active() || strings.TrimSpace(expectedRunID) == "" || run.ID != expectedRunID {
 		a.mu.Unlock()
 		return AgentRun{}, false
 	}
 	previous := run.State
+	if !runtimedomain.CanTransition(previous, next) {
+		a.mu.Unlock()
+		return AgentRun{}, false
+	}
 	run, changed := runtimedomain.Transition(run, next, time.Now().UTC())
 	a.agentRuns[key] = run
 	a.mu.Unlock()
@@ -158,7 +162,7 @@ func (a *app) agentRunActive(projectID, agentID string) bool {
 	return ok
 }
 
-func (a *app) bindAgentRunContext(parent context.Context, projectID, agentID string) (context.Context, bool) {
+func (a *app) bindAgentRunContext(parent context.Context, projectID, agentID, expectedRunID string) (context.Context, bool) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -166,7 +170,7 @@ func (a *app) bindAgentRunContext(parent context.Context, projectID, agentID str
 	ctx, cancel := context.WithCancel(parent)
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
-	if !ok || !run.State.Active() {
+	if !ok || !run.State.Active() || strings.TrimSpace(expectedRunID) == "" || run.ID != expectedRunID {
 		a.mu.Unlock()
 		cancel()
 		return parent, false
@@ -222,11 +226,11 @@ func (a *app) enqueueAgentInterrupt(projectID, agentID string, msg AgentMessage,
 	return item, true
 }
 
-func (a *app) drainAgentInterrupts(projectID, agentID string) []AgentInterrupt {
+func (a *app) drainAgentInterrupts(projectID, agentID, expectedRunID string) []AgentInterrupt {
 	key := agentMessageKey(projectID, agentID)
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
-	if !ok || len(run.Interrupts) == 0 {
+	if !ok || run.ID != expectedRunID || len(run.Interrupts) == 0 {
 		a.mu.Unlock()
 		return []AgentInterrupt{}
 	}

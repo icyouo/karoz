@@ -514,6 +514,7 @@ func TestMCPToolSpecsAndCall(t *testing.T) {
 }
 
 func TestProjectMCPConfigSSETool(t *testing.T) {
+	t.Setenv("KAROZ_TRUST_PROJECT_MCP", "1")
 	responses := make(chan map[string]any, 16)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -600,14 +601,14 @@ func TestStreamCodexResponseUsesCompletedTextWithoutDeltas(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out strings.Builder
-	calls, err := streamCodexResponse(req, func(delta string) {
+	streamed, err := streamCodexResponse(req, func(delta string) {
 		out.WriteString(delta)
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 0 {
-		t.Fatalf("tool calls = %d", len(calls))
+	if len(streamed.ToolCalls) != 0 {
+		t.Fatalf("tool calls = %d", len(streamed.ToolCalls))
 	}
 	if out.String() != "最终回复" {
 		t.Fatalf("streamed text = %q", out.String())
@@ -650,7 +651,7 @@ func TestLimitToolResultForModelCapsCurrentLoopOutput(t *testing.T) {
 	if !strings.Contains(got, "karoz truncated tool result") {
 		t.Fatalf("tool result missing truncation notice")
 	}
-	if !strings.Contains(got, "original_chars=901000") {
+	if !strings.Contains(got, fmt.Sprintf("original_chars=%d", len(result))) {
 		t.Fatalf("tool result missing original size: %s", got[len(got)-160:])
 	}
 }
@@ -778,7 +779,7 @@ func TestAgentInterruptQueueDrainsForModelInjection(t *testing.T) {
 	if _, queued := a.enqueueAgentInterrupt("p1", "frontend", msg, "dev"); !queued {
 		t.Fatal("interrupt should attach to active run")
 	}
-	items := a.drainAgentInterrupts("p1", "frontend")
+	items := a.drainAgentInterrupts("p1", "frontend", run.ID)
 	if len(items) != 1 || items[0].Body != "请先改按钮布局" {
 		t.Fatalf("interrupts = %+v", items)
 	}
@@ -786,7 +787,7 @@ func TestAgentInterruptQueueDrainsForModelInjection(t *testing.T) {
 	if !strings.Contains(rendered, "latest user input") || !strings.Contains(rendered, "请先改按钮布局") {
 		t.Fatalf("rendered interrupts = %s", rendered)
 	}
-	if got := a.drainAgentInterrupts("p1", "frontend"); len(got) != 0 {
+	if got := a.drainAgentInterrupts("p1", "frontend", run.ID); len(got) != 0 {
 		t.Fatalf("interrupts should drain once: %+v", got)
 	}
 	finished, ok := a.finishAgentRun("p1", "frontend", run.ID, RunStateDone, nil)
@@ -824,7 +825,11 @@ func TestAgentRunControllerTracksTriggerTransitionsAndFailure(t *testing.T) {
 	if startedEvent.RunID != run.ID || startedEvent.Trigger != string(RunTriggerHandoff) || startedEvent.To != string(RunStatePreparingContext) {
 		t.Fatalf("started event = %+v", startedEvent)
 	}
-	if current, ok := a.transitionAgentRun("p1", "designer", RunStateExecutingTool); !ok || current.State != RunStateExecutingTool {
+	if current, ok := a.transitionAgentRun("p1", "designer", run.ID, RunStateInvokingModel); !ok || current.State != RunStateInvokingModel {
+		t.Fatalf("model transition = %+v ok=%v", current, ok)
+	}
+	<-events
+	if current, ok := a.transitionAgentRun("p1", "designer", run.ID, RunStateExecutingTool); !ok || current.State != RunStateExecutingTool {
 		t.Fatalf("tool transition = %+v ok=%v", current, ok)
 	}
 	toolEvent := <-events
@@ -865,7 +870,7 @@ func TestAgentRunQueryAndCancelAPI(t *testing.T) {
 	if !started {
 		t.Fatal("run did not start")
 	}
-	runCtx, bound := a.bindAgentRunContext(context.Background(), "p1", "designer")
+	runCtx, bound := a.bindAgentRunContext(context.Background(), "p1", "designer", run.ID)
 	if !bound {
 		t.Fatal("run context did not bind")
 	}
@@ -976,7 +981,6 @@ func TestAgentRunSchedulerSerializesAndDeduplicatesPerAgent(t *testing.T) {
 }
 
 func TestTaskCompletionSchedulesTaskEventRun(t *testing.T) {
-	t.Setenv("KAROZ_AGENT_PROVIDER", "stub")
 	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "1")
 	root := t.TempDir()
 	projectPath := filepath.Join(root, "demo")
@@ -1000,6 +1004,7 @@ func TestTaskCompletionSchedulesTaskEventRun(t *testing.T) {
 		blackboard:         map[string][]AgentBlackboardEntry{},
 		memories:           map[string][]AgentMemoryEntry{},
 		archives:           map[string][]AgentArchiveMessage{},
+		modelProvider:      fakeModelProvider{},
 	}
 	task := Task{ID: "task-1", ProjectID: project.ID, Status: "done", Result: "mockup implemented"}
 	a.notifyTaskRuntimeHooks(project, task)
@@ -1141,11 +1146,11 @@ func TestKarozOnlyAgentManagementTools(t *testing.T) {
 		agentSessions: map[string]AgentSessionState{},
 		agentRuns:     map[string]AgentRun{},
 	}
-	karozSpecs := toolSpecNames(a.residentToolSpecsForContext(context.Background(), project.Path, Agent{ID: "karoz"}))
+	karozSpecs := toolSpecNames(a.residentToolSpecsForContext(context.Background(), ResidentToolContext{Project: project, Workdir: project.Path, Agent: Agent{ID: "karoz"}, TurnType: "ask"}))
 	if !karozSpecs["list_agent_templates"] || !karozSpecs["add_agent"] || !karozSpecs["create_agent_team"] || !karozSpecs["delete_agent"] {
 		t.Fatalf("karoz management tools missing: %+v", karozSpecs)
 	}
-	frontendSpecs := toolSpecNames(a.residentToolSpecsForContext(context.Background(), project.Path, Agent{ID: "frontend"}))
+	frontendSpecs := toolSpecNames(a.residentToolSpecsForContext(context.Background(), ResidentToolContext{Project: project, Workdir: project.Path, Agent: Agent{ID: "frontend"}, TurnType: "ask"}))
 	if frontendSpecs["list_agent_templates"] || frontendSpecs["add_agent"] || frontendSpecs["create_agent_team"] || frontendSpecs["delete_agent"] {
 		t.Fatalf("non-karoz should not see management tools: %+v", frontendSpecs)
 	}
@@ -1281,9 +1286,13 @@ func TestWebSearchAndFetchTools(t *testing.T) {
 	if !strings.Contains(search, "Example Result") || !strings.Contains(search, server.URL+"/page") || !strings.Contains(search, "Useful snippet") {
 		t.Fatalf("web_search result = %s", search)
 	}
-	fetched := webFetchTool(context.Background(), map[string]any{"url": server.URL + "/page", "max_chars": float64(2000)})
-	if !strings.Contains(fetched, "Example Page") || !strings.Contains(fetched, "Readable text") || strings.Contains(fetched, "bad()") {
-		t.Fatalf("web_fetch result = %s", fetched)
+	blocked := webFetchTool(context.Background(), map[string]any{"url": server.URL + "/page", "max_chars": float64(2000)})
+	if !strings.Contains(blocked, "private or loopback web targets are not allowed") {
+		t.Fatalf("web_fetch private-target policy = %s", blocked)
+	}
+	fetched, err := webFetchWithPolicy(context.Background(), server.URL+"/page", 2000, true)
+	if err != nil || fetched["title"] != "Example Page" || !strings.Contains(fmt.Sprint(fetched["text"]), "Readable text") || strings.Contains(fmt.Sprint(fetched["text"]), "bad()") {
+		t.Fatalf("web_fetch extraction = %+v err=%v", fetched, err)
 	}
 }
 

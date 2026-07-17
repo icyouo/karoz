@@ -70,3 +70,30 @@ func TestSchedulerQueueRecoveryAndCancellation(t *testing.T) {
 		t.Fatalf("cancelled jobs = %+v", cancelled)
 	}
 }
+
+func TestSchedulerQueueSuppressesRetryAfterEffectsStart(t *testing.T) {
+	queue := NewSchedulerQueue()
+	now := time.Date(2026, 7, 18, 4, 0, 0, 0, time.UTC)
+	job := ScheduledRun{ID: "effectful", ProjectID: "p1", AgentID: "designer", Kind: ScheduledHandoff, Status: ScheduledQueued, MaxAttempts: 3, CreatedAt: now}
+	queue.Enqueue(job)
+	queue.Claim(AgentKey(job.ProjectID, job.AgentID), now.Add(time.Second))
+	marked, found, changed := queue.MarkEffectsStarted(job.ID, now.Add(2*time.Second))
+	if !found || !changed || !marked.EffectsStarted || marked.EffectsStartedAt == nil {
+		t.Fatalf("effects marker = %+v found=%v changed=%v", marked, found, changed)
+	}
+	completed := queue.Complete(job.ID, CompletionFailed, "provider failed", now.Add(3*time.Second))
+	if completed.Requeue || !completed.NotifyFailure || completed.Job.Status != ScheduledFailed {
+		t.Fatalf("effectful completion = %+v", completed)
+	}
+	if queue.PendingCount(AgentKey(job.ProjectID, job.AgentID)) != 0 {
+		t.Fatal("effectful job was requeued")
+	}
+
+	recovered := NewSchedulerQueue().Recover([]ScheduledRun{{
+		ID: "interrupted", ProjectID: "p1", AgentID: "designer", Kind: ScheduledHandoff,
+		Status: ScheduledRunning, MaxAttempts: 3, EffectsStarted: true, CreatedAt: now,
+	}}, now.Add(4*time.Second))
+	if len(recovered.Jobs) != 0 || len(recovered.TerminalFailures) != 1 || recovered.TerminalFailures[0].Status != ScheduledFailed {
+		t.Fatalf("effectful recovery = %+v", recovered)
+	}
+}

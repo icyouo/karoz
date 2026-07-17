@@ -3,30 +3,28 @@ package main
 import (
 	"context"
 	tooldomain "github.com/karoz/karoz/internal/tool"
+	"strings"
 )
-
-func bashToolSpec() map[string]any {
-	return map[string]any{
-		"type":        "function",
-		"name":        "bash",
-		"description": "Run a bash command in the current project workspace. Use it to inspect files, run tests, and gather local evidence. The command runs on the host workspace without sandbox isolation.",
-		"parameters": map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"command":     map[string]any{"type": "string", "description": "Bash command to execute."},
-				"timeout_ms":  map[string]any{"type": "integer", "description": "Optional timeout in milliseconds. Default 60000, max 300000."},
-				"max_output":  map[string]any{"type": "integer", "description": "Optional maximum combined stdout/stderr characters. Default 20000."},
-				"description": map[string]any{"type": "string", "description": "Short reason for running the command."},
-			},
-			"required":             []string{"command"},
-			"additionalProperties": false,
-		},
-	}
-}
 
 func residentToolSpecs() []map[string]any {
 	return []map[string]any{
-		bashToolSpec(),
+		residentToolSpec("repo_list", "List files and directories inside the current project through a bounded read-only repository view.", map[string]any{
+			"path":        map[string]any{"type": "string", "description": "Optional relative repository path."},
+			"depth":       map[string]any{"type": "integer", "description": "Traversal depth from 0 to 6. Default 2."},
+			"max_entries": map[string]any{"type": "integer", "description": "Maximum entries from 1 to 1000. Default 200."},
+		}, nil),
+		residentToolSpec("repo_read", "Read a bounded line range from one text file inside the current project.", map[string]any{
+			"path":       map[string]any{"type": "string"},
+			"start_line": map[string]any{"type": "integer"},
+			"end_line":   map[string]any{"type": "integer"},
+			"max_chars":  map[string]any{"type": "integer"},
+		}, []string{"path"}),
+		residentToolSpec("repo_search", "Search text files inside the current project without executing a shell command.", map[string]any{
+			"query":          map[string]any{"type": "string"},
+			"path":           map[string]any{"type": "string", "description": "Optional relative repository path."},
+			"case_sensitive": map[string]any{"type": "boolean"},
+			"max_results":    map[string]any{"type": "integer"},
+		}, []string{"query"}),
 		residentToolSpec("list_skills", "List local Karoz/Codex-style skills discovered for the current project.", map[string]any{
 			"query": map[string]any{"type": "string", "description": "Optional case-insensitive name or description filter."},
 		}, nil),
@@ -198,11 +196,49 @@ func residentAgentManagementToolSpecs() []map[string]any {
 	}
 }
 
-func (a *app) residentToolSpecsForContext(ctx context.Context, workdir string, agent Agent) []map[string]any {
-	specs := residentToolSpecs()
-	if capabilitiesForAgent(agent).CanManageAgents {
-		specs = append(specs, residentAgentManagementToolSpecs()...)
+func (a *app) residentToolSpecsForContext(ctx context.Context, toolCtx ResidentToolContext) []map[string]any {
+	all := residentToolSpecs()
+	if capabilitiesForAgent(toolCtx.Agent).CanManageAgents {
+		all = append(all, residentAgentManagementToolSpecs()...)
 	}
-	specs = append(specs, a.dynamicToolProvider().Specs(ctx, workdir)...)
+	var specs []map[string]any
+	for _, spec := range all {
+		if residentToolAllowed(toolCtx, toolNameFromSpec(spec)) {
+			specs = append(specs, spec)
+		}
+	}
+	if residentDynamicToolsAllowed(toolCtx) {
+		specs = append(specs, a.dynamicToolProvider().Specs(ctx, toolCtx.Workdir)...)
+	}
 	return specs
+}
+
+func toolNameFromSpec(spec map[string]any) string {
+	name, _ := spec["name"].(string)
+	return name
+}
+
+func residentDynamicToolsAllowed(toolCtx ResidentToolContext) bool {
+	turnType := normalizeChatTurnType(toolCtx.TurnType)
+	return turnType == "plan" || turnType == "dev"
+}
+
+func residentToolAllowed(toolCtx ResidentToolContext, name string) bool {
+	if name == "" || name == "bash" {
+		return false
+	}
+	if strings.HasPrefix(name, "mcp__") {
+		return residentDynamicToolsAllowed(toolCtx)
+	}
+	turnType := normalizeChatTurnType(toolCtx.TurnType)
+	switch name {
+	case "write_workspace_file", "show_preview":
+		return turnType == "plan" || turnType == "dev"
+	case "create_task", "update_task_status":
+		return turnType == "dev"
+	case "list_agent_templates", "add_agent", "create_agent_team", "delete_agent":
+		return capabilitiesForAgent(toolCtx.Agent).CanManageAgents
+	default:
+		return true
+	}
 }

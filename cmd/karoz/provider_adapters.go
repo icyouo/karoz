@@ -10,6 +10,10 @@ type cliModelProviderAdapter struct {
 	app *app
 }
 
+func (adapter cliModelProviderAdapter) Capabilities(request CLI2APIRequest) runtimedomain.ProviderCapabilities {
+	return adapter.app.residentProviderCapabilities(request.Provider)
+}
+
 func (adapter cliModelProviderAdapter) Stream(ctx context.Context, request CLI2APIRequest, toolCtx ResidentToolContext, callbacks AgentStreamCallbacks) error {
 	return adapter.app.invokeCLI2APIStream(ctx, request, toolCtx, callbacks)
 }
