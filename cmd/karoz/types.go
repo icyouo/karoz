@@ -304,23 +304,14 @@ type CLI2APIResponse struct {
 	Stub     bool   `json:"stub"`
 }
 
-type BashToolResult struct {
-	OK         bool   `json:"ok"`
-	Workspace  string `json:"workspace"`
-	Command    string `json:"command"`
-	Code       int    `json:"code"`
-	Stdout     string `json:"stdout,omitempty"`
-	Stderr     string `json:"stderr,omitempty"`
-	Error      string `json:"error,omitempty"`
-	DurationMS int64  `json:"duration_ms"`
-	Truncated  bool   `json:"truncated,omitempty"`
-}
-
 type ResidentToolContext struct {
-	Project Project
-	Agent   Agent
-	Workdir string
-	RunID   string
+	Project         Project
+	Agent           Agent
+	Workdir         string
+	RunID           string
+	TurnType        string
+	EnforceRunScope bool
+	EnforcePolicy   bool
 }
 
 type AgentStreamCallbacks struct {
@@ -357,13 +348,6 @@ type ProjectCreateRequest struct {
 	Name string `json:"name"`
 	Path string `json:"path,omitempty"`
 	Mode string `json:"mode,omitempty"`
-}
-
-type AgentMessageResponse struct {
-	Agent   Agent            `json:"agent"`
-	Message string           `json:"message"`
-	Task    *Task            `json:"task,omitempty"`
-	CLI     *CLI2APIResponse `json:"cli,omitempty"`
 }
 
 type Diagnostics struct {

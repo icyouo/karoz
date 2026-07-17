@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -144,19 +143,13 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 			messageStored = true
 			item, queued := a.enqueueAgentInterrupt(project.ID, agent.ID, msg, turnType)
 			if queued {
-				if r.URL.Query().Get("stream") == "1" || strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
-					w.Header().Set("Content-Type", "text/event-stream")
-					w.Header().Set("Cache-Control", "no-cache")
-					writeSSE(w, "queued", map[string]any{"interrupt": item, "message": "Queued for the running agent turn."})
-					writeSSE(w, "done", map[string]any{"queued": true, "message": "Queued for the running agent turn.", "agent": a.agentWithRuntimeState(project, agent)})
-					if flusher, ok := w.(http.Flusher); ok {
-						flusher.Flush()
-					}
-					return
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				writeSSE(w, "queued", map[string]any{"interrupt": item, "message": "Queued for the running agent turn."})
+				writeSSE(w, "done", map[string]any{"queued": true, "message": "Queued for the running agent turn.", "agent": a.agentWithRuntimeState(project, agent)})
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
 				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusAccepted)
-				writeJSON(w, map[string]any{"queued": true, "interrupt": item, "message": "Queued for the running agent turn.", "agent": a.agentWithRuntimeState(project, agent)})
 				return
 			}
 			// The previous Run finished between the initial submit and interrupt
@@ -169,37 +162,15 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 			}
 		}
 		defer a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateDone, nil)
-		runCtx, _ := a.bindAgentRunContext(r.Context(), project.ID, agent.ID)
+		runCtx, bound := a.bindAgentRunContext(r.Context(), project.ID, agent.ID, run.ID)
+		if !bound {
+			writeError(w, http.StatusConflict, errors.New("agent run changed before execution; retry"))
+			return
+		}
 		if !messageStored {
 			a.appendAgentMessage(project.ID, agent.ID, "user", turnType, userText)
 		}
-		if r.URL.Query().Get("stream") == "1" || strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
-			a.streamAgentMessage(w, r.Clone(runCtx), project, agent, run.ID, userText, turnType)
-			return
-		}
-		prompt := a.buildResidentAgentPrompt(project, agent, userText, turnType)
-		a.transitionAgentRun(project.ID, agent.ID, RunStateInvokingModel)
-		cli, err := a.invokeCLI2API(runCtx, CLI2APIRequest{
-			Provider: getenv("KAROZ_AGENT_PROVIDER", "auto"),
-			Prompt:   prompt,
-			Workdir:  project.Path,
-			Mode:     chatTurnRuntimeMode(turnType),
-		})
-		message := emptyAgentOutputMessage(agent)
-		if err != nil {
-			a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateFailed, err)
-			message += " Agent runtime failed: " + err.Error()
-			a.appendAgentMessage(project.ID, agent.ID, "assistant", "status", message)
-			writeJSON(w, AgentMessageResponse{Agent: a.agentWithRuntimeState(project, agent), Message: message})
-			return
-		}
-		if strings.TrimSpace(cli.Output) != "" {
-			message = cli.Output
-		} else {
-			log.Printf("agent runtime returned empty output project=%s agent=%s", project.ID, agent.ID)
-		}
-		a.appendAgentMessage(project.ID, agent.ID, "assistant", "result", message)
-		writeJSON(w, AgentMessageResponse{Agent: a.agentWithRuntimeState(project, agent), Message: message, CLI: &cli})
+		a.streamAgentMessage(w, r.Clone(runCtx), project, agent, run.ID, userText, turnType)
 		return
 	}
 	http.NotFound(w, r)

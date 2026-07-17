@@ -129,7 +129,7 @@ func (a *app) maybeTriggerKarozIdleReconcile(event RuntimeEvent) {
 	projectID := event.ProjectID
 	job, err := newScheduledRun(
 		ScheduledRunIdleReconcile,
-		AgentRunInput{ProjectID: projectID, AgentID: "karoz", Trigger: RunTriggerSystem, TurnType: "ask", SourceID: karozIdleReconcileHook},
+		AgentRunInput{ProjectID: projectID, AgentID: "karoz", Trigger: RunTriggerSystem, TurnType: "dev", SourceID: karozIdleReconcileHook},
 		projectID+"/"+karozIdleReconcileHook,
 		IdleReconcileRunPayload{Reason: event.Reason},
 		3*time.Minute,

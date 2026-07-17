@@ -25,15 +25,17 @@ type mcpTool struct {
 }
 
 type mcpClient struct {
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	reader     *bufio.Reader
-	stderr     bytes.Buffer
-	nextID     int
-	httpClient *http.Client
-	postURL    string
-	sseCancel  context.CancelFunc
-	messages   chan []byte
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	reader        *bufio.Reader
+	stderr        bytes.Buffer
+	nextID        int
+	httpClient    *http.Client
+	postURL       string
+	sseCancel     context.CancelFunc
+	processCancel context.CancelFunc
+	messages      chan []byte
+	messageErrors chan error
 }
 
 func normalizeMCPServers(in map[string]MCPServerConfig) map[string]MCPServerConfig {
@@ -158,8 +160,10 @@ func (a *app) mcpServersForWorkdir(workdir string) map[string]MCPServerConfig {
 	if servers == nil {
 		servers = map[string]MCPServerConfig{}
 	}
-	for name, cfg := range loadProjectMCPServers(workdir) {
-		servers[name] = cfg
+	if getenv("KAROZ_TRUST_PROJECT_MCP", "") == "1" {
+		for name, cfg := range loadProjectMCPServers(workdir) {
+			servers[name] = cfg
+		}
 	}
 	return normalizeMCPServers(servers)
 }

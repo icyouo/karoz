@@ -14,7 +14,7 @@ func (a *app) triggerAgentHandoffResponse(project Project, target Agent, msg Age
 	}
 	job, err := newScheduledRun(
 		ScheduledRunHandoff,
-		AgentRunInput{ProjectID: project.ID, AgentID: target.ID, Trigger: RunTriggerHandoff, TurnType: "ask", SourceID: msg.SourceAgentID, MessageID: msg.ID},
+		AgentRunInput{ProjectID: project.ID, AgentID: target.ID, Trigger: RunTriggerHandoff, TurnType: "dev", SourceID: msg.SourceAgentID, MessageID: msg.ID},
 		"handoff/"+project.ID+"/"+target.ID+"/"+msg.ID,
 		HandoffRunPayload{InboxMessageID: msg.ID},
 		3*time.Minute,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -12,14 +13,21 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 	if run, active := a.activeAgentRun(project.ID, agent.ID); active {
 		runID = run.ID
 	}
-	toolCtx := ResidentToolContext{Project: project, Agent: agent, Workdir: project.Path, RunID: runID}
+	toolCtx := ResidentToolContext{
+		Project: project, Agent: agent, Workdir: project.Path, RunID: runID,
+		TurnType: normalizeChatTurnType(turnType), EnforceRunScope: runID != "", EnforcePolicy: true,
+	}
 	cb := AgentStreamCallbacks{}
 	if callbacks != nil {
 		cb = *callbacks
 	}
 	outerDelta := cb.OnDelta
 	cb.OnDelta = func(delta string) {
-		a.transitionAgentRun(project.ID, agent.ID, RunStateInvokingModel)
+		if runID != "" {
+			if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateInvokingModel); !ok {
+				return
+			}
+		}
 		out.WriteString(delta)
 		if outerDelta != nil {
 			outerDelta(delta)
@@ -27,36 +35,55 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 	}
 	outerToolStart := cb.OnToolStart
 	cb.OnToolStart = func(call codexToolCall) {
-		a.transitionAgentRun(project.ID, agent.ID, RunStateExecutingTool)
-		a.appendAgentMessage(project.ID, agent.ID, "tool_call", call.Name, call.Arguments)
+		if runID != "" {
+			if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateExecutingTool); !ok {
+				return
+			}
+			if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, runID, "tool_call", call.Name, call.Arguments); !ok {
+				return
+			}
+		}
 		if outerToolStart != nil {
 			outerToolStart(call)
 		}
 	}
 	outerToolResult := cb.OnToolResult
 	cb.OnToolResult = func(call codexToolCall, result string, success bool) {
-		a.appendAgentMessage(project.ID, agent.ID, "tool_result", call.Name, result)
-		a.transitionAgentRun(project.ID, agent.ID, RunStateWaitingModel)
+		if runID != "" {
+			if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, runID, "tool_result", call.Name, result); !ok {
+				return
+			}
+			if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateWaitingModel); !ok {
+				return
+			}
+		}
 		if outerToolResult != nil {
 			outerToolResult(call, result, success)
 		}
 	}
-	outerInterrupt := cb.OnInterrupt
 	cb.PollInterrupts = func() []AgentInterrupt {
-		items := a.drainAgentInterrupts(project.ID, agent.ID)
-		if len(items) > 0 && outerInterrupt != nil {
-			outerInterrupt(items)
+		if runID == "" {
+			return []AgentInterrupt{}
 		}
-		return items
+		return a.drainAgentInterrupts(project.ID, agent.ID, runID)
 	}
 	prompt := a.buildResidentAgentPrompt(project, agent, userText, turnType)
-	a.transitionAgentRun(project.ID, agent.ID, RunStateInvokingModel)
-	err := a.residentModelProvider().Stream(ctx, CLI2APIRequest{
+	if runID != "" {
+		if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateInvokingModel); !ok {
+			return "", fmt.Errorf("resident run %s is no longer active", runID)
+		}
+	}
+	request := CLI2APIRequest{
 		Provider: getenv("KAROZ_AGENT_PROVIDER", "auto"),
 		Prompt:   prompt,
 		Workdir:  project.Path,
 		Mode:     chatTurnRuntimeMode(turnType),
-	}, toolCtx, cb)
+	}
+	provider := a.residentModelProvider()
+	if capabilities := provider.Capabilities(request); !capabilities.SupportsResidentRuntime() {
+		return "", fmt.Errorf("resident provider %q does not support the required streaming, tool, and interrupt capabilities", a.resolveResidentProvider(request.Provider))
+	}
+	err := provider.Stream(ctx, request, toolCtx, cb)
 	return strings.TrimSpace(out.String()), err
 }
 

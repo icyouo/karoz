@@ -139,7 +139,7 @@ func residentDesignAgentPrompt() string {
 	return "\n### Design resident rules\n" +
 		"- When the user asks for a design draft, mockup, screen, or HTML design artifact, produce a concrete artifact instead of only explaining.\n" +
 		"- A workspace HTML mockup must be complete: include document structure, responsive CSS, and a complete body. Do not paste the full file into chat after writing it.\n" +
-		"- When the user asks to match, refine, or reproduce the current project's UI, first inspect relevant repository entry points, components, routes, styles, or assets with bash; do not rely only on an attached mockup.\n" +
+		"- When the user asks to match, refine, or reproduce the current project's UI, first inspect relevant repository entry points, components, routes, styles, or assets with repo_list, repo_read, and repo_search; do not rely only on an attached mockup.\n" +
 		"- Inspect the smallest set of files needed to understand visual language, routes, and existing components, then stop scanning and draft.\n" +
 		"- Set artifact_kind and a clear title on write_workspace_file. Rewriting the same path creates a new revision. When the draft is ready, call submit_artifact and hand its artifact_id to a reviewer.\n"
 }

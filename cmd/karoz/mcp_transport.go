@@ -22,10 +22,9 @@ func startMCPClient(ctx context.Context, workdir string, cfg MCPServerConfig) (*
 	if cfg.Command == "" {
 		return nil, errors.New("command is required")
 	}
-	cmdCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	cmd := exec.CommandContext(cmdCtx, cfg.Command, cfg.Args...)
+	processCtx, processCancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(processCtx, cfg.Command, cfg.Args...)
 	cmd.Cancel = func() error {
-		cancel()
 		if cmd.Process != nil {
 			return cmd.Process.Kill()
 		}
@@ -40,21 +39,27 @@ func startMCPClient(ctx context.Context, workdir string, cfg MCPServerConfig) (*
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		cancel()
+		processCancel()
 		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		cancel()
+		processCancel()
 		return nil, err
 	}
-	client := &mcpClient{cmd: cmd, stdin: stdin, reader: bufio.NewReader(stdout)}
+	client := &mcpClient{
+		cmd: cmd, stdin: stdin, reader: bufio.NewReader(stdout), processCancel: processCancel,
+		messages: make(chan []byte, 64), messageErrors: make(chan error, 1),
+	}
 	cmd.Stderr = &client.stderr
 	if err := cmd.Start(); err != nil {
-		cancel()
+		processCancel()
 		return nil, err
 	}
-	if err := client.initialize(ctx); err != nil {
+	go client.readStdio(processCtx)
+	initCtx, initCancel := context.WithTimeout(ctx, 20*time.Second)
+	defer initCancel()
+	if err := client.initialize(initCtx); err != nil {
 		_ = client.close()
 		return nil, err
 	}
@@ -76,17 +81,17 @@ func startSSEMCPClient(ctx context.Context, cfg MCPServerConfig) (*mcpClient, er
 	clientCtx, cancel := context.WithCancel(ctx)
 	httpClient := &http.Client{Timeout: 0}
 	c := &mcpClient{
-		httpClient: httpClient,
-		sseCancel:  cancel,
-		messages:   make(chan []byte, 64),
+		httpClient:    httpClient,
+		sseCancel:     cancel,
+		messages:      make(chan []byte, 64),
+		messageErrors: make(chan error, 1),
 	}
 	endpointCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-	go c.readSSE(clientCtx, sseURL, endpointCh, errCh)
+	go c.readSSE(clientCtx, sseURL, endpointCh)
 	var endpoint string
 	select {
 	case endpoint = <-endpointCh:
-	case err := <-errCh:
+	case err := <-c.messageErrors:
 		cancel()
 		return nil, err
 	case <-time.After(15 * time.Second):
@@ -102,7 +107,9 @@ func startSSEMCPClient(ctx context.Context, cfg MCPServerConfig) (*mcpClient, er
 		return nil, err
 	}
 	c.postURL = postURL
-	if err := c.initialize(ctx); err != nil {
+	initCtx, initCancel := context.WithTimeout(ctx, 20*time.Second)
+	defer initCancel()
+	if err := c.initialize(initCtx); err != nil {
 		_ = c.close()
 		return nil, err
 	}
@@ -125,22 +132,43 @@ func resolveMCPEndpointURL(base, endpoint string) (string, error) {
 	return baseURL.ResolveReference(endpointURL).String(), nil
 }
 
-func (c *mcpClient) readSSE(ctx context.Context, sseURL string, endpointCh chan<- string, errCh chan<- error) {
+func (c *mcpClient) readStdio(ctx context.Context) {
+	defer close(c.messages)
+	for {
+		message, err := c.readStdioMessage()
+		if err != nil {
+			if ctx.Err() == nil {
+				c.reportMessageError(err)
+			}
+			return
+		}
+		select {
+		case c.messages <- message:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (c *mcpClient) readSSE(ctx context.Context, sseURL string, endpointCh chan<- string) {
+	defer close(c.messages)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
 	if err != nil {
-		errCh <- err
+		c.reportMessageError(err)
 		return
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		errCh <- err
+		if ctx.Err() == nil {
+			c.reportMessageError(err)
+		}
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		errCh <- fmt.Errorf("MCP SSE status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		c.reportMessageError(fmt.Errorf("MCP SSE status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw))))
 		return
 	}
 	scanner := bufio.NewScanner(resp.Body)
@@ -189,7 +217,22 @@ func (c *mcpClient) readSSE(ctx context.Context, sseURL string, endpointCh chan<
 			data = append(data, value)
 		}
 	}
-	if err := scanner.Err(); err != nil && ctx.Err() == nil {
-		errCh <- err
+	if ctx.Err() != nil {
+		return
+	}
+	if err := scanner.Err(); err != nil {
+		c.reportMessageError(err)
+		return
+	}
+	c.reportMessageError(io.EOF)
+}
+
+func (c *mcpClient) reportMessageError(err error) {
+	if err == nil || c.messageErrors == nil {
+		return
+	}
+	select {
+	case c.messageErrors <- err:
+	default:
 	}
 }

@@ -156,7 +156,7 @@ func (queue *SchedulerQueue) Complete(jobID string, outcome CompletionOutcome, m
 		job.UpdatedAt = now
 		job.LastFailedAt = &now
 		job.StartedAt = nil
-		if job.Attempt < job.MaxAttempts {
+		if job.Attempt < job.MaxAttempts && !job.EffectsStarted {
 			job.Status = ScheduledQueued
 			key := AgentKey(job.ProjectID, job.AgentID)
 			queue.queues[key] = append(queue.queues[key], job.ID)
@@ -175,8 +175,9 @@ func (queue *SchedulerQueue) Complete(jobID string, outcome CompletionOutcome, m
 }
 
 type RecoveryResult struct {
-	Normalized bool
-	Jobs       []ScheduledRun
+	Normalized       bool
+	Jobs             []ScheduledRun
+	TerminalFailures []ScheduledRun
 }
 
 func (queue *SchedulerQueue) Recover(jobs []ScheduledRun, now time.Time) RecoveryResult {
@@ -207,6 +208,17 @@ func (queue *SchedulerQueue) Recover(jobs []ScheduledRun, now time.Time) Recover
 			result.Normalized = true
 			continue
 		case ScheduledRunning:
+			if job.EffectsStarted {
+				job.Attempt++
+				job.StartedAt = nil
+				job.Error = "automatic retry suppressed after interrupted side effects"
+				job.UpdatedAt = now.UTC()
+				job.Status = ScheduledFailed
+				queue.jobs[job.ID] = job
+				result.TerminalFailures = append(result.TerminalFailures, job)
+				result.Normalized = true
+				continue
+			}
 			job.Attempt++
 			job.StartedAt = nil
 			job.Error = "requeued after interrupted process"
@@ -222,6 +234,7 @@ func (queue *SchedulerQueue) Recover(jobs []ScheduledRun, now time.Time) Recover
 		if job.Attempt >= job.MaxAttempts {
 			job.Status = ScheduledFailed
 			queue.jobs[job.ID] = job
+			result.TerminalFailures = append(result.TerminalFailures, job)
 			result.Normalized = true
 			continue
 		}
@@ -234,6 +247,24 @@ func (queue *SchedulerQueue) Recover(jobs []ScheduledRun, now time.Time) Recover
 		result.Jobs = append(result.Jobs, job)
 	}
 	return result
+}
+
+func (queue *SchedulerQueue) MarkEffectsStarted(jobID string, now time.Time) (ScheduledRun, bool, bool) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	job, ok := queue.jobs[jobID]
+	if !ok || job.Status != ScheduledRunning {
+		return ScheduledRun{}, false, false
+	}
+	if job.EffectsStarted {
+		return job, true, false
+	}
+	now = now.UTC()
+	job.EffectsStarted = true
+	job.EffectsStartedAt = &now
+	job.UpdatedAt = now
+	queue.jobs[jobID] = job
+	return job, true, true
 }
 
 func (queue *SchedulerQueue) ResumeKeys() []string {

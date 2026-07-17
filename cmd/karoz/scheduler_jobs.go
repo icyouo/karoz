@@ -41,7 +41,7 @@ func (a *app) executeHandoffScheduledRun(ctx context.Context, job ScheduledRun) 
 		sourceKind = "coordinator"
 	}
 	userText := strings.TrimSpace(fmt.Sprintf("[%s]<from:%s> You received an asynchronous %s.\n\nInbox message id: %s\nSubject: %s\nObjective: %s\nExpected output: %s\n\n%s\n\nRespond as %s. %s Never send a greeting or receipt-only reply. Send decisions/conflicts to Karoz only as reports. If another peer owns the next step, hand off directly using their unique nickname. If this handoff requires tracked coding or deployment work, create a task.", sourceKind, a.agentNickname(project, msg.SourceAgentID), msg.Intent, msg.ID, msg.Subject, msg.Objective, msg.ExpectedOutput, msg.Body, firstNonEmpty(target.Nickname, target.DisplayName, target.Name, target.ID), closeInstruction))
-	out, err := a.runResidentAgentTurn(ctx, project, target, userText, "ask", nil)
+	out, err := a.runResidentAgentTurn(ctx, project, target, userText, firstNonEmpty(job.TurnType, "dev"), nil)
 	if err != nil {
 		a.failHandoff(project.ID, target.ID, msg.ID, err)
 		return err
@@ -49,7 +49,10 @@ func (a *app) executeHandoffScheduledRun(ctx context.Context, job ScheduledRun) 
 	if strings.TrimSpace(out) == "" {
 		out = firstNonEmpty(target.DisplayName, target.Name, target.ID) + " acknowledged the handoff."
 	}
-	a.appendAgentMessage(project.ID, target.ID, "assistant", "result", out)
+	if err := a.markScheduledRunEffectsStarted(job.ID); err != nil {
+		return err
+	}
+	a.appendAgentMessageForRun(project.ID, target.ID, job.ID, "assistant", "result", out)
 	a.completeUnhandledInboxAfterAutoResponse(project, target, msg, out)
 	return nil
 }
@@ -80,7 +83,10 @@ func (a *app) executeTaskEventScheduledRun(ctx context.Context, job ScheduledRun
 		return err
 	}
 	if strings.TrimSpace(out) != "" {
-		a.appendAgentMessage(project.ID, agent.ID, "assistant", "task_result", out)
+		if err := a.markScheduledRunEffectsStarted(job.ID); err != nil {
+			return err
+		}
+		a.appendAgentMessageForRun(project.ID, agent.ID, job.ID, "assistant", "task_result", out)
 	}
 	return nil
 }
@@ -105,15 +111,18 @@ func (a *app) executeIdleReconcileScheduledRun(ctx context.Context, job Schedule
 	if !ok {
 		return nil
 	}
-	a.appendAgentMessage(project.ID, karoz.ID, "system", karozIdleReconcileHook, "Runtime triggered Karoz idle reconciliation after project became idle.")
+	if err := a.markScheduledRunEffectsStarted(job.ID); err != nil {
+		return err
+	}
+	a.appendAgentMessageForRun(project.ID, karoz.ID, job.ID, "system", karozIdleReconcileHook, "Runtime triggered Karoz idle reconciliation after project became idle.")
 	userText := "Runtime idle reconciliation requested. The project runtime is quiescent and there is unresolved backlog.\n\n" + a.renderProjectBacklogForKaroz(project.ID) + "\n\nRules:\n- Process backlog, do not merely summarize it.\n- Pending inbox items should be routed to the target agent if that agent is idle, or answered/acked if they belong to Karoz.\n- Pending tasks should be started only through task tools when appropriate; failed tasks require review, retry planning, or user escalation.\n- Unhandled blackboard signals must be consumed exactly once: route to an agent with send_to, create a task, ask the user, ignore with reason, or expire if stale. Then call mark_activity with handling_result.\n- Do not create duplicate handoffs if a matching pending inbox already exists."
-	out, err := a.runResidentAgentTurn(ctx, project, karoz, userText, "ask", nil)
+	out, err := a.runResidentAgentTurn(ctx, project, karoz, userText, firstNonEmpty(job.TurnType, "dev"), nil)
 	if err != nil {
-		a.appendAgentMessage(project.ID, karoz.ID, "assistant", "error", "Karoz idle reconciliation failed: "+err.Error())
+		a.appendAgentMessageForRun(project.ID, karoz.ID, job.ID, "assistant", "error", "Karoz idle reconciliation failed: "+err.Error())
 		return err
 	}
 	if strings.TrimSpace(out) != "" {
-		a.appendAgentMessage(project.ID, karoz.ID, "assistant", "result", out)
+		a.appendAgentMessageForRun(project.ID, karoz.ID, job.ID, "assistant", "result", out)
 	}
 	return nil
 }

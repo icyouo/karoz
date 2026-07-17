@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,9 +74,15 @@ func (a *app) streamAgentMessage(w http.ResponseWriter, r *http.Request, project
 		},
 	})
 	if err != nil {
-		a.finishAgentRun(project.ID, agent.ID, runID, RunStateFailed, err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			a.finishAgentRun(project.ID, agent.ID, runID, RunStateCancelled, err)
+			writeSSE(w, "cancelled", map[string]string{"message": "Agent run cancelled."})
+			flusher.Flush()
+			return
+		}
 		message := "Agent runtime failed: " + err.Error()
-		a.appendAgentMessage(project.ID, agent.ID, "assistant", "status", message)
+		a.appendAgentMessageForRun(project.ID, agent.ID, runID, "assistant", "status", message)
+		a.finishAgentRun(project.ID, agent.ID, runID, RunStateFailed, err)
 		writeSSE(w, "error", map[string]string{"message": message})
 		flusher.Flush()
 		return
@@ -84,7 +91,13 @@ func (a *app) streamAgentMessage(w http.ResponseWriter, r *http.Request, project
 		message = emptyAgentOutputMessage(agent)
 		log.Printf("agent runtime returned empty output project=%s agent=%s", project.ID, agent.ID)
 	}
-	a.appendAgentMessage(project.ID, agent.ID, "assistant", "result", message)
+	if _, appended := a.appendAgentMessageForRun(project.ID, agent.ID, runID, "assistant", "result", message); !appended {
+		writeSSE(w, "cancelled", map[string]string{"message": "Agent run was replaced before its result could be committed."})
+		flusher.Flush()
+		return
+	}
+	a.transitionAgentRun(project.ID, agent.ID, runID, RunStateCompleting)
+	a.finishAgentRun(project.ID, agent.ID, runID, RunStateDone, nil)
 	writeSSE(w, "done", map[string]any{"message": message, "agent": a.agentWithRuntimeState(project, agent)})
 	flusher.Flush()
 }

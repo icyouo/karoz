@@ -35,7 +35,7 @@ Karoz closes that loop. Each project gets a persistent agent with its own memory
 - **Local-first, with clear boundaries.** You own the service, the project data, and the execution environment — and you can reuse the Codex or Claude auth you already have.
 - **Transparent and interruptible.** Task state, live logs, and diffs stay visible. Inspect any run, or take over at any point.
 - **No vendor lock-in.** Use Codex OAuth, a local CLI, or an OpenAI-compatible proxy — swap providers without rewriting your workflow.
-- **Extensible by design.** The resident agent picks up local Skills (reusable instruction packs) and MCP servers — stdio or SSE — so you can plug in your own playbooks and tools without changing Karoz.
+- **Extensible by design.** The resident agent picks up local Skills (reusable instruction packs) and explicitly trusted MCP servers — stdio or SSE — so you can plug in your own playbooks and tools without changing Karoz.
 
 ## Who It Is For
 
@@ -92,7 +92,7 @@ A project isn't limited to one agent. You can stand up a team of resident agents
 
 - **Direct handoffs.** An agent hands work to a teammate with `send_to`, returns a concrete result with `reply_to`, or turns work down with `decline_handoff` — each addressed by a unique teammate nickname.
 - **A real state machine.** Every handoff moves through validated states — `queued → delivered → claimed → working → replied / declined / failed / closed` — so nothing silently stalls or gets worked twice.
-- **Serialized, recoverable execution.** Each agent drains its own queue one job at a time, with de-duplication, automatic retries, and recovery of in-flight handoffs after a restart.
+- **Serialized, recoverable execution.** Each agent drains its own queue one job at a time, with de-duplication and restart recovery. Automatic retries stop once a run has begun external or persistent side effects, preventing duplicate actions.
 - **A shared blackboard.** Agents post progress, blockers, and decisions as signals the whole project can see, and Karoz reconciles the backlog when the project goes idle.
 - **Karoz coordinates, you stay in control.** Karoz routes work and reconciles state; it reports rather than silently acting, and the whole exchange is visible in the runtime timeline.
 
@@ -102,7 +102,9 @@ The resident agent is an open runtime — you extend what it knows and what it c
 
 **Skills** are local instruction packs (a `SKILL.md` file with `name`/`description` frontmatter). Karoz discovers them from project and user directories — `.agents/skills`, `.codex/skills`, `~/.agents/skills`, and `~/.codex/skills` — reusing the conventions you may already have from Codex. Every turn lists the available skills by name; the agent reads one on demand with `read_skill`, or you pull a full skill inline by mentioning `$SkillName` in your message.
 
-**MCP servers** connect external tools to the agent over the [Model Context Protocol](https://modelcontextprotocol.io). Configure them globally or per project via a `.mcp.json` in the project directory, over `stdio` or `SSE` transport. Karoz discovers each server's tools live and exposes them to the agent as `mcp__<server>__<tool>` — so a Figma, database, or in-house MCP server becomes callable mid-conversation with no code change.
+**MCP servers** connect external tools to the agent over the [Model Context Protocol](https://modelcontextprotocol.io). Configure trusted servers globally over `stdio` or `SSE`; repository-owned `.mcp.json` files are ignored unless `KAROZ_TRUST_PROJECT_MCP=1` explicitly grants them host-level trust. MCP tools are exposed only to `plan` and `dev` turns as `mcp__<server>__<tool>`.
+
+Resident turns have no general host shell. They inspect source through path-bounded, read-only repository tools; artifact writes stay in the resident workspace, while source changes and command execution run as tracked coding tasks in isolated worktrees.
 
 ## What Works Today
 
@@ -123,8 +125,8 @@ The resident agent is an open runtime — you extend what it knows and what it c
 
 **Extensibility & providers**
 - Local Skills discovery, listing, and `$mention` injection
-- MCP tool support over stdio and SSE, per project or global
-- Resident chat agent via Codex OAuth (direct), a local CLI, or an OpenAI-compatible cli2api adapter
+- Trusted MCP tool support over stdio and SSE; project MCP requires explicit opt-in
+- Streaming resident chat agent via Codex OAuth with tools and live interrupts
 - `codex` and `claude` CLI diagnostics
 
 Karoz is an MVP. The core loop — project-scoped agents, multi-agent handoffs, and traceable task execution — works end to end today. The browser interface, configuration surface, and reliability guardrails are still evolving fast.
@@ -168,13 +170,18 @@ KAROZ_CODEX_MODEL=gpt-5.6-luna
 KAROZ_CLI2API_BASE_URL=http://127.0.0.1:8317
 KAROZ_CLI2API_MODEL=claude
 KAROZ_CLI2API_API_KEY=
+KAROZ_TRUST_PROJECT_MCP=0
 KAROZ_VERIFY_COMMAND=
 ```
 
-Providers:
+Resident provider (`KAROZ_AGENT_PROVIDER`):
 
-- `auto`: use `codex-direct` when Codex OAuth credentials are available, otherwise fall back to an available local execution path.
+- `auto`: use `codex-direct` when Codex OAuth credentials are available; otherwise fail explicitly because a capability-complete resident provider is unavailable.
 - `codex-direct`: read Codex CLI OAuth credentials and call the Codex upstream API directly.
+- `codex-oauth` / `codex-api`: compatibility aliases for the same streaming resident path.
+
+Task and diagnostics providers (`KAROZ_TASK_PROVIDER` and `/api/cli2api`):
+
 - `codex`: call the host `codex` CLI directly.
 - `claude`: call the host `claude` CLI directly.
 - `cli2api`: call the OpenAI-compatible service configured by `KAROZ_CLI2API_BASE_URL`.

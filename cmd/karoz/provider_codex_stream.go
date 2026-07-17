@@ -5,15 +5,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-const maxCodexToolOutputChars = 900000
+const maxCodexToolOutputChars = 60000
 
 func invokeCodexDirect(ctx context.Context, workdir, prompt string) (CLI2APIResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -45,19 +47,24 @@ func invokeCodexDirectStream(ctx context.Context, workdir, prompt string, tools 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	input := []map[string]any{codexMessage("user", prompt+"\n\nProject workspace: "+workdir)}
-	for step := 0; step < 12; step++ {
-		httpReq, err := newCodexDirectRequestWithInput(ctx, input, tools)
+	toolRounds := 0
+	for modelRound := 0; modelRound < 24 && toolRounds < 12; modelRound++ {
+		streamed, interrupts, err := streamCodexStep(ctx, input, tools, callbacks)
 		if err != nil {
 			return err
 		}
-		toolCalls, err := streamCodexResponse(httpReq, callbacks.OnDelta)
-		if err != nil {
-			return err
+		if len(interrupts) > 0 {
+			if strings.TrimSpace(streamed.Text) != "" {
+				input = append(input, codexMessage("assistant", streamed.Text))
+			}
+			input = append(input, codexMessage("user", renderAgentInterruptsForModel(interrupts)))
+			continue
 		}
-		if len(toolCalls) == 0 {
+		if len(streamed.ToolCalls) == 0 {
 			return nil
 		}
-		for _, call := range toolCalls {
+		toolRounds++
+		for _, call := range streamed.ToolCalls {
 			input = append(input, codexFunctionCallItem(call))
 			if callbacks.OnToolStart != nil {
 				callbacks.OnToolStart(call)
@@ -78,6 +85,9 @@ func invokeCodexDirectStream(ctx context.Context, workdir, prompt string, tools 
 			})
 			if callbacks.PollInterrupts != nil {
 				if interrupts := callbacks.PollInterrupts(); len(interrupts) > 0 {
+					if callbacks.OnInterrupt != nil {
+						callbacks.OnInterrupt(interrupts)
+					}
 					input = append(input, codexMessage("user", renderAgentInterruptsForModel(interrupts)))
 				}
 			}
@@ -92,6 +102,75 @@ func invokeCodexDirectStream(ctx context.Context, workdir, prompt string, tools 
 		return err
 	}
 	return nil
+}
+
+type codexStreamResult struct {
+	ToolCalls []codexToolCall
+	Text      string
+}
+
+func streamCodexStep(ctx context.Context, input []map[string]any, tools []map[string]any, callbacks AgentStreamCallbacks) (codexStreamResult, []AgentInterrupt, error) {
+	if callbacks.PollInterrupts != nil {
+		if interrupts := callbacks.PollInterrupts(); len(interrupts) > 0 {
+			if callbacks.OnInterrupt != nil {
+				callbacks.OnInterrupt(interrupts)
+			}
+			return codexStreamResult{}, interrupts, nil
+		}
+	}
+	stepCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	httpReq, err := newCodexDirectRequestWithInput(stepCtx, input, tools)
+	if err != nil {
+		return codexStreamResult{}, nil, err
+	}
+	interruptCh := make(chan []AgentInterrupt, 1)
+	stopPolling := make(chan struct{})
+	var pollers sync.WaitGroup
+	if callbacks.PollInterrupts != nil {
+		pollers.Add(1)
+		go func() {
+			defer pollers.Done()
+			ticker := time.NewTicker(40 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopPolling:
+					return
+				case <-stepCtx.Done():
+					return
+				case <-ticker.C:
+					interrupts := callbacks.PollInterrupts()
+					if len(interrupts) == 0 {
+						continue
+					}
+					interruptCh <- interrupts
+					cancel()
+					return
+				}
+			}
+		}()
+	}
+	streamed, streamErr := streamCodexResponse(httpReq, callbacks.OnDelta)
+	close(stopPolling)
+	pollers.Wait()
+	var interrupts []AgentInterrupt
+	select {
+	case interrupts = <-interruptCh:
+	default:
+	}
+	if len(interrupts) == 0 && callbacks.PollInterrupts != nil {
+		interrupts = callbacks.PollInterrupts()
+	}
+	if len(interrupts) > 0 {
+		if callbacks.OnInterrupt != nil {
+			callbacks.OnInterrupt(interrupts)
+		}
+		if errors.Is(streamErr, context.Canceled) {
+			streamErr = nil
+		}
+	}
+	return streamed, interrupts, streamErr
 }
 
 func limitToolResultForModel(result string) string {
@@ -203,15 +282,15 @@ func codexFunctionCallItem(call codexToolCall) map[string]any {
 	return item
 }
 
-func streamCodexResponse(httpReq *http.Request, onDelta func(string)) ([]codexToolCall, error) {
+func streamCodexResponse(httpReq *http.Request, onDelta func(string)) (codexStreamResult, error) {
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return codexStreamResult{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		return nil, fmt.Errorf("codex direct status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return codexStreamResult{}, fmt.Errorf("codex direct status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	var toolCalls []codexToolCall
 	var streamed strings.Builder
@@ -228,9 +307,11 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) ([]codexTo
 			continue
 		}
 		delta := codexSSEDelta([]byte(payload))
-		if delta != "" && onDelta != nil {
+		if delta != "" {
 			streamed.WriteString(delta)
-			onDelta(delta)
+			if onDelta != nil {
+				onDelta(delta)
+			}
 		}
 		if streamed.Len() == 0 {
 			if text := codexSSETextSnapshot([]byte(payload)); text != "" {
@@ -242,10 +323,14 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) ([]codexTo
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return toolCalls, err
+		return codexStreamResult{ToolCalls: toolCalls, Text: streamed.String()}, err
 	}
 	if streamed.Len() == 0 && strings.TrimSpace(finalText) != "" && onDelta != nil {
 		onDelta(finalText)
 	}
-	return toolCalls, nil
+	text := streamed.String()
+	if strings.TrimSpace(text) == "" {
+		text = finalText
+	}
+	return codexStreamResult{ToolCalls: toolCalls, Text: text}, nil
 }

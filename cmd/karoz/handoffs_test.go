@@ -4,12 +4,44 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	runtimedomain "github.com/karoz/karoz/internal/runtime"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+type scriptedAckModelProvider struct {
+	app *app
+}
+
+func (scriptedAckModelProvider) Capabilities(CLI2APIRequest) runtimedomain.ProviderCapabilities {
+	return runtimedomain.ProviderCapabilities{Streaming: true, Tools: true, Interrupts: true}
+}
+
+func (provider scriptedAckModelProvider) Stream(ctx context.Context, _ CLI2APIRequest, toolCtx ResidentToolContext, callbacks AgentStreamCallbacks) error {
+	pending := provider.app.pendingInboxFor(toolCtx.Project.ID, toolCtx.Agent.ID, 1)
+	if len(pending) == 0 {
+		return fmt.Errorf("scripted provider found no pending inbox")
+	}
+	arguments, _ := json.Marshal(map[string]any{"inbox_message_id": pending[0].ID})
+	call := codexToolCall{ID: "ack-call", CallID: "ack-call", Name: "ack_inbox", Arguments: string(arguments)}
+	if callbacks.OnToolStart != nil {
+		callbacks.OnToolStart(call)
+	}
+	result, err := provider.app.executeResidentTool(ctx, toolCtx, call)
+	if callbacks.OnToolResult != nil {
+		callbacks.OnToolResult(call, result, err == nil)
+	}
+	if err != nil {
+		return err
+	}
+	if callbacks.OnDelta != nil {
+		callbacks.OnDelta("Reviewed and acknowledged peer result.")
+	}
+	return nil
+}
 
 func newHandoffTestApp(t *testing.T) (*app, Project, Agent, Agent) {
 	t.Helper()
@@ -153,6 +185,7 @@ func TestReplyToReplyIsRejectedAndConsumed(t *testing.T) {
 
 func TestScheduledReplyIsReviewedThenAckedWithoutReplyLoop(t *testing.T) {
 	a, project, source, target := newHandoffTestApp(t)
+	a.modelProvider = scriptedAckModelProvider{app: a}
 	reply := AgentInboxMessage{
 		ID: "reply-recovered", ProjectID: project.ID, SourceAgentID: target.ID, TargetAgentID: source.ID,
 		CorrelationID: "corr-recovered", MessageType: "reply", Intent: "reply", Subject: "Result", Body: "Done",
@@ -171,6 +204,10 @@ func TestScheduledReplyIsReviewedThenAckedWithoutReplyLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, started := a.beginAgentRun(job.RunInput()); !started {
+		t.Fatal("scheduled run did not start")
+	}
+	defer a.finishAgentRun(project.ID, source.ID, job.ID, RunStateDone, nil)
 	if err := a.executeHandoffScheduledRun(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}

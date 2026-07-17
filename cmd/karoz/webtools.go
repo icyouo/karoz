@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -61,7 +62,7 @@ func webSearch(ctx context.Context, query string, limit int) ([]WebSearchResult,
 		values := url.Values{"q": {query}}
 		searchURL = "https://html.duckduckgo.com/html/?" + values.Encode()
 	}
-	body, finalURL, err := fetchURL(ctx, searchURL, 2<<20)
+	body, finalURL, err := fetchURL(ctx, searchURL, 2<<20, endpoint != "")
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +74,11 @@ func webSearch(ctx context.Context, query string, limit int) ([]WebSearchResult,
 }
 
 func webFetch(ctx context.Context, rawURL string, maxChars int) (map[string]any, error) {
-	body, finalURL, err := fetchURL(ctx, rawURL, 4<<20)
+	return webFetchWithPolicy(ctx, rawURL, maxChars, false)
+}
+
+func webFetchWithPolicy(ctx context.Context, rawURL string, maxChars int, allowPrivate bool) (map[string]any, error) {
+	body, finalURL, err := fetchURL(ctx, rawURL, 4<<20, allowPrivate)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +94,7 @@ func webFetch(ctx context.Context, rawURL string, maxChars int) (map[string]any,
 	}, nil
 }
 
-func fetchURL(ctx context.Context, rawURL string, maxBytes int64) ([]byte, string, error) {
+func fetchURL(ctx context.Context, rawURL string, maxBytes int64, allowPrivate bool) ([]byte, string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return nil, "", err
@@ -100,6 +105,9 @@ func fetchURL(ctx context.Context, rawURL string, maxBytes int64) ([]byte, strin
 	if parsed.Host == "" {
 		return nil, "", errors.New("url host is required")
 	}
+	if err := validateFetchTarget(ctx, parsed, allowPrivate); err != nil {
+		return nil, "", err
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, parsed.String(), nil)
@@ -108,7 +116,13 @@ func fetchURL(ctx context.Context, rawURL string, maxBytes int64) ([]byte, strin
 	}
 	req.Header.Set("User-Agent", "Karoz/0.1 (+https://local.karoz)")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5")
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: fetchTransport(allowPrivate),
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			return validateFetchTarget(req.Context(), req.URL, allowPrivate)
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", err
@@ -126,6 +140,120 @@ func fetchURL(ctx context.Context, rawURL string, maxBytes int64) ([]byte, strin
 		body = body[:maxBytes]
 	}
 	return body, resp.Request.URL.String(), nil
+}
+
+func validateFetchTarget(ctx context.Context, target *url.URL, allowPrivate bool) error {
+	if allowPrivate {
+		return nil
+	}
+	host := strings.TrimSpace(target.Hostname())
+	if host == "" {
+		return errors.New("url host is required")
+	}
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return errors.New("private or loopback web targets are not allowed")
+	}
+	addresses, err := resolveFetchAddresses(ctx, host)
+	if err != nil {
+		return err
+	}
+	for _, address := range addresses {
+		if forbiddenFetchAddress(address) {
+			return errors.New("private or loopback web targets are not allowed")
+		}
+	}
+	return nil
+}
+
+func fetchTransport(allowPrivate bool) http.RoundTripper {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if allowPrivate {
+		return transport
+	}
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		addresses, err := resolveFetchAddresses(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, candidate := range addresses {
+			if forbiddenFetchAddress(candidate) {
+				return nil, errors.New("private or loopback web targets are not allowed")
+			}
+		}
+		dialer := net.Dialer{Timeout: 20 * time.Second}
+		var lastErr error
+		for _, candidate := range addresses {
+			connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.String(), port))
+			if dialErr == nil {
+				return connection, nil
+			}
+			lastErr = dialErr
+		}
+		return nil, firstNonNilError(lastErr, errors.New("web target did not resolve to an address"))
+	}
+	return transport
+}
+
+func resolveFetchAddresses(ctx context.Context, host string) ([]net.IP, error) {
+	if parsed := net.ParseIP(strings.TrimSpace(host)); parsed != nil {
+		return []net.IP{parsed}, nil
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resolved, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return nil, err
+	}
+	addresses := make([]net.IP, 0, len(resolved))
+	for _, address := range resolved {
+		addresses = append(addresses, address.IP)
+	}
+	if len(addresses) == 0 {
+		return nil, errors.New("web target did not resolve to an address")
+	}
+	return addresses, nil
+}
+
+var forbiddenFetchNetworks = parseFetchNetworks(
+	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+	"172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
+	"::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
+)
+
+func parseFetchNetworks(values ...string) []*net.IPNet {
+	networks := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			panic(err)
+		}
+		networks = append(networks, network)
+	}
+	return networks
+}
+
+func forbiddenFetchAddress(address net.IP) bool {
+	if address == nil || !address.IsGlobalUnicast() || address.IsPrivate() {
+		return true
+	}
+	for _, network := range forbiddenFetchNetworks {
+		if network.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonNilError(err, fallback error) error {
+	if err != nil {
+		return err
+	}
+	return fallback
 }
 
 var (

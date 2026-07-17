@@ -173,3 +173,17 @@ func codexSSEToolCall(payload []byte) (codexToolCall, bool) {
 		Arguments: args,
 	}, strings.TrimSpace(event.Item.Name) != ""
 }
+
+func decodeRawJSONText(raw json.RawMessage) string {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text == "null" {
+		return ""
+	}
+	if strings.HasPrefix(text, `"`) {
+		var decoded string
+		if err := json.Unmarshal(raw, &decoded); err == nil {
+			return strings.TrimSpace(decoded)
+		}
+	}
+	return text
+}
