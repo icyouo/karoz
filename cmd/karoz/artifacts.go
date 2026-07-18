@@ -151,12 +151,23 @@ func (a *app) validateTaskArtifactRefs(projectID string, artifactIDs []string) (
 }
 
 func (a *app) reconcileWorkspaceArtifacts() error {
+	projects, err := a.scanProjects()
+	if err != nil {
+		return err
+	}
+	availableProjects := make(map[string]bool, len(projects))
+	for _, project := range projects {
+		availableProjects[project.ID] = true
+	}
 	a.mu.Lock()
 	if a.artifacts == nil {
 		a.artifacts = map[string][]Artifact{}
 	}
 	agents := map[string][]Agent{}
 	for projectID, projectAgents := range a.agents {
+		if !availableProjects[projectID] {
+			continue
+		}
 		agents[projectID] = append([]Agent{}, projectAgents...)
 	}
 	a.mu.Unlock()

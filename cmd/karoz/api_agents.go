@@ -139,6 +139,10 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 		run, started := a.beginAgentRun(AgentRunInput{ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: turnType})
 		messageStored := false
 		if !started {
+			if isResidentBashChoice(req.ChoiceID) {
+				writeError(w, http.StatusConflict, errors.New("wait for the active agent run to finish before resolving a bash approval"))
+				return
+			}
 			msg := a.appendAgentMessage(project.ID, agent.ID, "user", "interrupt", userText)
 			messageStored = true
 			item, queued := a.enqueueAgentInterrupt(project.ID, agent.ID, msg, turnType)
@@ -160,6 +164,11 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 				writeError(w, http.StatusConflict, errors.New("agent run changed while submitting message; retry"))
 				return
 			}
+		}
+		if _, err := a.resolveResidentBashChoice(project.ID, agent.ID, run.ID, req.ChoiceID); err != nil {
+			a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateCancelled, err)
+			writeError(w, http.StatusConflict, err)
+			return
 		}
 		defer a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateDone, nil)
 		runCtx, bound := a.bindAgentRunContext(r.Context(), project.ID, agent.ID, run.ID)
@@ -184,8 +193,9 @@ func (a *app) readAgentMessageRequest(r *http.Request, project Project, agent Ag
 			return AgentMessageRequest{}, nil, err
 		}
 		req := AgentMessageRequest{
-			Message: r.FormValue("message"),
-			Type:    r.FormValue("type"),
+			Message:  r.FormValue("message"),
+			Type:     r.FormValue("type"),
+			ChoiceID: r.FormValue("choice_id"),
 		}
 		attachments, err := a.saveAgentMultipartAttachments(project, agent, r)
 		return req, attachments, err

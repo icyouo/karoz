@@ -8,6 +8,12 @@ import (
 
 func residentToolSpecs() []map[string]any {
 	return []map[string]any{
+		residentToolSpec("bash", "Run a host bash command starting in the current project directory. The shell is not filesystem-sandboxed. Development turns execute directly; ask and plan turns require explicit user approval for the exact command before execution.", map[string]any{
+			"command":     map[string]any{"type": "string", "description": "Bash command to execute."},
+			"timeout_ms":  map[string]any{"type": "integer", "description": "Optional timeout in milliseconds. Default 60000, max 300000."},
+			"max_output":  map[string]any{"type": "integer", "description": "Optional maximum combined stdout/stderr characters. Default 20000, max 200000."},
+			"description": map[string]any{"type": "string", "description": "Short reason for running the command."},
+		}, []string{"command"}),
 		residentToolSpec("repo_list", "List files and directories inside the current project through a bounded read-only repository view.", map[string]any{
 			"path":        map[string]any{"type": "string", "description": "Optional relative repository path."},
 			"depth":       map[string]any{"type": "integer", "description": "Traversal depth from 0 to 6. Default 2."},
@@ -224,7 +230,7 @@ func residentDynamicToolsAllowed(toolCtx ResidentToolContext) bool {
 }
 
 func residentToolAllowed(toolCtx ResidentToolContext, name string) bool {
-	if name == "" || name == "bash" {
+	if name == "" {
 		return false
 	}
 	if strings.HasPrefix(name, "mcp__") {

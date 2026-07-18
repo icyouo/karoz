@@ -13,6 +13,16 @@ import (
 	"testing"
 )
 
+func artifactTestProject(t *testing.T) (string, Project) {
+	t.Helper()
+	root := t.TempDir()
+	path := filepath.Join(root, "demo")
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return root, Project{ID: projectID(path), Name: "demo", Path: path, WorkspaceRoot: root, DefaultBranch: "main"}
+}
+
 func TestDesignerBuilderReviewerArtifactWorkflow(t *testing.T) {
 	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
 	t.Setenv("KAROZ_TASK_AUTO_RUN", "0")
@@ -118,13 +128,14 @@ func TestDesignerBuilderReviewerArtifactWorkflow(t *testing.T) {
 func TestArtifactHTTPReviewAndPreview(t *testing.T) {
 	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
 	dataDir := t.TempDir()
+	root, project := artifactTestProject(t)
 	a := &app{
-		settings: Settings{DataDir: dataDir}, artifacts: map[string][]Artifact{},
-		agents:     map[string][]Agent{"p1": {{ID: "designer", ProjectID: "p1"}}},
+		settings: Settings{DataDir: dataDir, ProjectsRoot: root}, artifacts: map[string][]Artifact{},
+		agents:     map[string][]Agent{project.ID: {{ID: "designer", ProjectID: project.ID}}},
 		blackboard: map[string][]AgentBlackboardEntry{}, runtimeHooks: map[string]bool{}, runtimeWatchers: map[string]map[chan RuntimeEvent]bool{},
 	}
 	content := []byte("<!doctype html><html><body>Preview</body></html>")
-	full, err := a.safeWorkspacePath("p1", "designer", "preview.html")
+	full, err := a.safeWorkspacePath(project.ID, "designer", "preview.html")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,12 +145,14 @@ func TestArtifactHTTPReviewAndPreview(t *testing.T) {
 	if err := os.WriteFile(full, content, 0644); err != nil {
 		t.Fatal(err)
 	}
-	artifact, err := a.registerWorkspaceArtifact("p1", "designer", "run-1", "preview.html", "mockup_html", "Preview", "", content)
+	wantRoot := filepath.Join(project.Path, ".karoz", "artifacts", "designer")
+	if !strings.HasPrefix(full, wantRoot+string(os.PathSeparator)) {
+		t.Fatalf("artifact path %q is outside project-local root %q", full, wantRoot)
+	}
+	artifact, err := a.registerWorkspaceArtifact(project.ID, "designer", "run-1", "preview.html", "mockup_html", "Preview", "", content)
 	if err != nil {
 		t.Fatal(err)
 	}
-	project := Project{ID: "p1"}
-
 	reviewingBody := bytes.NewBufferString(`{"status":"reviewing","actor_agent_id":"designer"}`)
 	reviewingRecorder := httptest.NewRecorder()
 	a.handleArtifacts(reviewingRecorder, httptest.NewRequest(http.MethodPatch, "/", reviewingBody), project, []string{artifact.ID})
@@ -161,10 +174,11 @@ func TestArtifactHTTPReviewAndPreview(t *testing.T) {
 
 func TestArtifactsPersistAndLegacyWorkspaceFilesAreRegistered(t *testing.T) {
 	dataDir := t.TempDir()
-	projectID := "p1"
+	root, project := artifactTestProject(t)
+	projectID := project.ID
 	agentID := "designer"
 	a := &app{
-		settings:  Settings{DataDir: dataDir},
+		settings:  Settings{DataDir: dataDir, ProjectsRoot: root},
 		agents:    map[string][]Agent{projectID: {{ID: agentID, ProjectID: projectID}}},
 		artifacts: map[string][]Artifact{},
 	}
@@ -186,7 +200,7 @@ func TestArtifactsPersistAndLegacyWorkspaceFilesAreRegistered(t *testing.T) {
 		t.Fatalf("reconciled artifacts = %+v", items)
 	}
 
-	reloaded := &app{settings: Settings{DataDir: dataDir}, artifacts: map[string][]Artifact{}}
+	reloaded := &app{settings: Settings{DataDir: dataDir, ProjectsRoot: root}, artifacts: map[string][]Artifact{}}
 	if err := reloaded.loadArtifacts(); err != nil {
 		t.Fatal(err)
 	}
@@ -198,8 +212,9 @@ func TestArtifactsPersistAndLegacyWorkspaceFilesAreRegistered(t *testing.T) {
 
 func TestConcurrentArtifactWritesPreserveEveryRevision(t *testing.T) {
 	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
+	root, project := artifactTestProject(t)
 	a := &app{
-		settings: Settings{DataDir: t.TempDir()}, artifacts: map[string][]Artifact{},
+		settings: Settings{DataDir: t.TempDir(), ProjectsRoot: root}, artifacts: map[string][]Artifact{},
 		blackboard: map[string][]AgentBlackboardEntry{}, runtimeHooks: map[string]bool{}, runtimeWatchers: map[string]map[chan RuntimeEvent]bool{},
 	}
 	const writes = 10
@@ -208,13 +223,13 @@ func TestConcurrentArtifactWritesPreserveEveryRevision(t *testing.T) {
 	for index := 0; index < writes; index++ {
 		go func() {
 			defer wait.Done()
-			if _, err := a.registerWorkspaceArtifact("p1", "designer", "run", "concurrent.html", "mockup_html", "Concurrent", "", []byte(randomID())); err != nil {
+			if _, err := a.registerWorkspaceArtifact(project.ID, "designer", "run", "concurrent.html", "mockup_html", "Concurrent", "", []byte(randomID())); err != nil {
 				t.Errorf("register artifact: %v", err)
 			}
 		}()
 	}
 	wait.Wait()
-	items := a.artifactsForProject("p1", "designer", "", "")
+	items := a.artifactsForProject(project.ID, "designer", "", "")
 	if len(items) != 1 || items[0].Revision != writes || len(items[0].Revisions) != writes {
 		t.Fatalf("concurrent artifact revisions = %+v", items)
 	}

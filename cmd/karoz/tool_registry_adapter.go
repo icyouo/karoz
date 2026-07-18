@@ -23,6 +23,9 @@ func (a *app) residentToolRegistry() *tooldomain.Registry[ResidentToolContext] {
 	a.residentToolsOnce.Do(func() {
 		registry := tooldomain.NewRegistry[ResidentToolContext]()
 		handlers := map[string]tooldomain.Handler[ResidentToolContext]{
+			"bash": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.executeResidentBashTool(ctx, toolCtx, args)
+			},
 			"repo_list": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				result := repoListTool(ctx, toolCtx.Workdir, args)
 				return result, ctx.Err()
@@ -165,7 +168,7 @@ func (a *app) executeResidentTool(ctx context.Context, toolCtx ResidentToolConte
 	if toolCtx.EnforcePolicy && !residentToolAllowed(toolCtx, call.Name) {
 		return toolJSON(map[string]any{"error": "tool_forbidden", "message": call.Name + " is not allowed for this resident turn"}), nil
 	}
-	if residentToolHasSideEffects(call.Name) {
+	if residentToolHasSideEffects(call.Name) && call.Name != "bash" {
 		if err := a.markScheduledRunEffectsStarted(toolCtx.RunID); err != nil {
 			return toolJSON(map[string]any{"error": "effect_barrier_failed", "message": err.Error()}), err
 		}

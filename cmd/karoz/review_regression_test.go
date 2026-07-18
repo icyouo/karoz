@@ -56,8 +56,8 @@ func TestRemovingRuntimeWatcherDoesNotCloseChannelDuringBroadcast(t *testing.T) 
 }
 
 func TestInvalidArtifactMetadataCannotReplaceApprovedFile(t *testing.T) {
-	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
-	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
+	root, project := artifactTestProject(t)
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
 	designer := Agent{ID: "designer", ProjectID: project.ID}
 	reviewer := Agent{ID: "reviewer", ProjectID: project.ID}
 	a.agents[project.ID] = []Agent{designer, reviewer}

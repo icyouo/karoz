@@ -340,10 +340,17 @@ func compactToolResultForPrompt(body string) string {
 }
 
 func compactToolResultForDisplay(toolName, body string) string {
-	if strings.EqualFold(strings.TrimSpace(toolName), "request_choice") {
+	if strings.EqualFold(strings.TrimSpace(toolName), "request_choice") || toolResultIsChoiceRequest(body) {
 		return body
 	}
 	return compactToolResultForPrompt(body)
+}
+
+func toolResultIsChoiceRequest(body string) bool {
+	var decoded struct {
+		Kind string `json:"kind"`
+	}
+	return json.Unmarshal([]byte(body), &decoded) == nil && decoded.Kind == "choice_request"
 }
 
 func scrubToolPromptValue(key string, value any) any {

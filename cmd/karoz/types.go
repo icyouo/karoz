@@ -13,34 +13,35 @@ import (
 )
 
 type app struct {
-	mu                 sync.Mutex
-	artifactOpsMu      sync.Mutex
-	handoffOpsMu       sync.Mutex
-	handoffReplyMu     sync.Mutex
-	schedulerPersistMu sync.Mutex
-	settings           Settings
-	tasks              map[string][]Task
-	agents             map[string][]Agent
-	archives           map[string][]AgentArchiveMessage
-	memories           map[string][]AgentMemoryEntry
-	blackboard         map[string][]AgentBlackboardEntry
-	artifacts          map[string][]Artifact
-	inbox              map[string][]AgentInboxMessage
-	taskHooks          map[string][]TaskRuntimeHook
-	agentRoutes        map[string][]AgentRoute
-	agentMessages      map[string][]AgentMessage
-	agentSessions      map[string]AgentSessionState
-	projectAliases     map[string]string
-	agentRuns          map[string]AgentRun
-	agentRunCancels    map[string]context.CancelFunc
-	schedulerQueue     *runtimedomain.SchedulerQueue
-	schedulerExecutors map[ScheduledRunKind]ScheduledRunExecutor
-	runtimeHooks       map[string]bool
-	runtimeWatchers    map[string]map[chan RuntimeEvent]bool
-	residentToolsOnce  sync.Once
-	residentTools      *tooldomain.Registry[ResidentToolContext]
-	modelProvider      runtimedomain.ModelProvider[CLI2APIRequest, ResidentToolContext, AgentStreamCallbacks]
-	dynamicTools       tooldomain.DynamicProvider
+	mu                    sync.Mutex
+	artifactOpsMu         sync.Mutex
+	handoffOpsMu          sync.Mutex
+	handoffReplyMu        sync.Mutex
+	schedulerPersistMu    sync.Mutex
+	settings              Settings
+	tasks                 map[string][]Task
+	agents                map[string][]Agent
+	archives              map[string][]AgentArchiveMessage
+	memories              map[string][]AgentMemoryEntry
+	blackboard            map[string][]AgentBlackboardEntry
+	artifacts             map[string][]Artifact
+	inbox                 map[string][]AgentInboxMessage
+	taskHooks             map[string][]TaskRuntimeHook
+	agentRoutes           map[string][]AgentRoute
+	agentMessages         map[string][]AgentMessage
+	agentSessions         map[string]AgentSessionState
+	projectAliases        map[string]string
+	agentRuns             map[string]AgentRun
+	agentRunCancels       map[string]context.CancelFunc
+	residentBashApprovals map[string]ResidentBashApproval
+	schedulerQueue        *runtimedomain.SchedulerQueue
+	schedulerExecutors    map[ScheduledRunKind]ScheduledRunExecutor
+	runtimeHooks          map[string]bool
+	runtimeWatchers       map[string]map[chan RuntimeEvent]bool
+	residentToolsOnce     sync.Once
+	residentTools         *tooldomain.Registry[ResidentToolContext]
+	modelProvider         runtimedomain.ModelProvider[CLI2APIRequest, ResidentToolContext, AgentStreamCallbacks]
+	dynamicTools          tooldomain.DynamicProvider
 }
 
 type Settings struct {
@@ -199,8 +200,9 @@ type Task struct {
 }
 
 type AgentMessageRequest struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
+	Message  string `json:"message"`
+	Type     string `json:"type"`
+	ChoiceID string `json:"choice_id,omitempty"`
 }
 
 type AgentAttachment struct {
@@ -312,6 +314,29 @@ type ResidentToolContext struct {
 	TurnType        string
 	EnforceRunScope bool
 	EnforcePolicy   bool
+}
+
+type BashToolResult struct {
+	OK         bool   `json:"ok"`
+	Workspace  string `json:"workspace"`
+	Command    string `json:"command"`
+	Code       int    `json:"code"`
+	Stdout     string `json:"stdout,omitempty"`
+	Stderr     string `json:"stderr,omitempty"`
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	Truncated  bool   `json:"truncated,omitempty"`
+}
+
+type ResidentBashApproval struct {
+	ID        string
+	ProjectID string
+	AgentID   string
+	RunID     string
+	Command   string
+	State     string
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }
 
 type AgentStreamCallbacks struct {

@@ -142,7 +142,7 @@ func (a *app) createProject(req ProjectCreateRequest) (Project, error) {
 	if branch == "" {
 		branch = "main"
 	}
-	return Project{
+	project := Project{
 		ID:            projectID(cleanPath),
 		Name:          name,
 		Path:          cleanPath,
@@ -150,7 +150,11 @@ func (a *app) createProject(req ProjectCreateRequest) (Project, error) {
 		WorkspaceType: "main",
 		DefaultBranch: branch,
 		AgentName:     "karoz",
-	}, nil
+	}
+	if err := initializeProjectKaroz(project.Path); err != nil {
+		return Project{}, err
+	}
+	return project, nil
 }
 
 func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
@@ -174,6 +178,9 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 	}
 	project := projectFromPath(projectPath, projectPath, "extra")
 	project.Name = name
+	if err := initializeProjectKaroz(project.Path); err != nil {
+		return Project{}, err
+	}
 	a.mu.Lock()
 	if a.projectAliases == nil {
 		a.projectAliases = map[string]string{}
@@ -188,4 +195,48 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 		return Project{}, err
 	}
 	return project, nil
+}
+
+func initializeProjectKaroz(projectPath string) error {
+	karozDir := filepath.Join(projectPath, ".karoz")
+	marker := filepath.Join(karozDir, "ignore-initialized")
+	if _, err := os.Stat(marker); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(karozDir, 0755); err != nil {
+		return err
+	}
+	ignorePath := filepath.Join(projectPath, ".gitignore")
+	content, err := os.ReadFile(ignorePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	found := false
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(line) == "/.karoz/" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		file, err := os.OpenFile(ignorePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		prefix := ""
+		if len(content) > 0 && content[len(content)-1] != '\n' {
+			prefix = "\n"
+		}
+		_, writeErr := file.WriteString(prefix + "/.karoz/\n")
+		closeErr := file.Close()
+		if writeErr != nil {
+			return writeErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return os.WriteFile(marker, []byte("initialized\n"), 0644)
 }

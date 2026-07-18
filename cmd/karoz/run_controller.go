@@ -131,6 +131,7 @@ func (a *app) finishAgentRun(projectID, agentID, expectedRunID string, final Run
 	delete(a.agentRunCancels, key)
 	delete(a.agentRuns, key)
 	a.mu.Unlock()
+	a.revokeResidentBashApprovalsForRun(run.ID)
 	if cancel != nil {
 		cancel()
 	}

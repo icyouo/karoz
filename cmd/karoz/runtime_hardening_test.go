@@ -97,15 +97,15 @@ func TestResidentToolPolicyAndReadOnlyRepositoryTools(t *testing.T) {
 		}))
 	}
 	ask := askSpecs("ask")
-	if !ask["repo_list"] || !ask["repo_read"] || !ask["repo_search"] || ask["write_workspace_file"] || ask["create_task"] || ask["bash"] {
+	if !ask["repo_list"] || !ask["repo_read"] || !ask["repo_search"] || !ask["bash"] || ask["write_workspace_file"] || ask["create_task"] {
 		t.Fatalf("ask policy = %+v", ask)
 	}
 	plan := askSpecs("plan")
-	if !plan["write_workspace_file"] || plan["create_task"] || plan["bash"] {
+	if !plan["write_workspace_file"] || !plan["bash"] || plan["create_task"] {
 		t.Fatalf("plan policy = %+v", plan)
 	}
 	dev := askSpecs("dev")
-	if !dev["write_workspace_file"] || !dev["create_task"] || dev["bash"] {
+	if !dev["write_workspace_file"] || !dev["create_task"] || !dev["bash"] {
 		t.Fatalf("dev policy = %+v", dev)
 	}
 
@@ -134,6 +134,151 @@ func TestResidentToolPolicyAndReadOnlyRepositoryTools(t *testing.T) {
 	if err != nil || !strings.Contains(forbidden, "tool_forbidden") {
 		t.Fatalf("forbidden write = %s err=%v", forbidden, err)
 	}
+}
+
+func TestResidentBashApprovalPolicy(t *testing.T) {
+	root := t.TempDir()
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
+	project := Project{ID: "p1", Name: "demo", Path: root}
+	agent := Agent{ID: "designer", ProjectID: project.ID, Nickname: "Designer"}
+	runID := "run-ask"
+	runBash := func(turn, command string) (string, error) {
+		args, err := json.Marshal(map[string]any{"command": command})
+		if err != nil {
+			return "", err
+		}
+		return a.executeResidentTool(context.Background(), ResidentToolContext{
+			Project: project, Agent: agent, RunID: runID, Workdir: root, TurnType: turn, EnforcePolicy: true,
+		}, codexToolCall{Name: "bash", Arguments: string(args)})
+	}
+
+	askCommand := "printf approved > ask-approved.txt"
+	requested, err := runBash("ask", askCommand)
+	if err != nil || !toolResultIsChoiceRequest(requested) {
+		t.Fatalf("ask approval request = %s err=%v", requested, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ask-approved.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ask command ran before approval: %v", err)
+	}
+	approveID := bashChoiceID(t, requested, residentBashApprovePrefix)
+	if _, err := a.resolveResidentBashChoice(project.ID, "other-agent", runID, approveID); err == nil {
+		t.Fatal("approval was accepted for a different agent")
+	}
+	if recognized, err := a.resolveResidentBashChoice(project.ID, agent.ID, runID, "yes"); recognized || err != nil {
+		t.Fatalf("plain yes resolved approval: recognized=%t err=%v", recognized, err)
+	}
+	if recognized, err := a.resolveResidentBashChoice(project.ID, agent.ID, runID, approveID); !recognized || err != nil {
+		t.Fatalf("approval resolution: recognized=%t err=%v", recognized, err)
+	}
+
+	mismatched, err := runBash("ask", "printf wrong > wrong.txt")
+	if err != nil || !toolResultIsChoiceRequest(mismatched) {
+		t.Fatalf("mismatched command = %s err=%v", mismatched, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "wrong.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched command ran: %v", err)
+	}
+	runID = "other-run"
+	wrongRun, err := runBash("ask", askCommand)
+	if err != nil || !toolResultIsChoiceRequest(wrongRun) {
+		t.Fatalf("approval escaped its run: %s err=%v", wrongRun, err)
+	}
+	runID = "run-ask"
+	executed, err := runBash("ask", askCommand)
+	if err != nil || !strings.Contains(executed, `"ok":true`) {
+		t.Fatalf("approved ask command = %s err=%v", executed, err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "ask-approved.txt")); err != nil || string(content) != "approved" {
+		t.Fatalf("approved output = %q err=%v", content, err)
+	}
+	if err := os.Remove(filepath.Join(root, "ask-approved.txt")); err != nil {
+		t.Fatal(err)
+	}
+	reused, err := runBash("ask", askCommand)
+	if err != nil || !toolResultIsChoiceRequest(reused) {
+		t.Fatalf("single-use approval was reused: %s err=%v", reused, err)
+	}
+
+	planCommand := "printf plan > plan.txt"
+	runID = "run-plan"
+	planRequest, err := runBash("plan", planCommand)
+	if err != nil || !toolResultIsChoiceRequest(planRequest) {
+		t.Fatalf("plan approval request = %s err=%v", planRequest, err)
+	}
+	denyID := bashChoiceID(t, planRequest, residentBashDenyPrefix)
+	if recognized, err := a.resolveResidentBashChoice(project.ID, agent.ID, runID, denyID); !recognized || err != nil {
+		t.Fatalf("denial resolution: recognized=%t err=%v", recognized, err)
+	}
+	deniedRetry, err := runBash("plan", planCommand)
+	if err != nil || !toolResultIsChoiceRequest(deniedRetry) {
+		t.Fatalf("denied plan command did not require a new approval: %s err=%v", deniedRetry, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "plan.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("denied plan command ran: %v", err)
+	}
+
+	devCommand := "printf dev > dev.txt"
+	runID = "run-dev"
+	devResult, err := runBash("dev", devCommand)
+	if err != nil || !strings.Contains(devResult, `"ok":true`) {
+		t.Fatalf("dev command = %s err=%v", devResult, err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "dev.txt")); err != nil || string(content) != "dev" {
+		t.Fatalf("dev output = %q err=%v", content, err)
+	}
+}
+
+func TestResidentBashOutputIsBounded(t *testing.T) {
+	result := runResidentBashTool(context.Background(), t.TempDir(), "yes x | head -c 4096", 5000, 128)
+	if !result.OK {
+		t.Fatalf("bounded command failed: %+v", result)
+	}
+	if !result.Truncated {
+		t.Fatal("oversized output was not marked truncated")
+	}
+	if len(result.Stdout) > 128 {
+		t.Fatalf("output exceeded limit: %d", len(result.Stdout))
+	}
+}
+
+func TestResidentBashApprovalIsRevokedWhenRunFinishes(t *testing.T) {
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
+	agent := Agent{ID: "designer", ProjectID: project.ID}
+	a.agents[project.ID] = []Agent{agent}
+	command := "printf revoked"
+	request := a.requestResidentBashApproval(ResidentToolContext{Project: project, Agent: agent}, command)
+	choiceID := bashChoiceID(t, request, residentBashApprovePrefix)
+	run, started := a.beginAgentRun(AgentRunInput{RunID: "run-revoke", ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect})
+	if !started {
+		t.Fatal("run did not start")
+	}
+	if recognized, err := a.resolveResidentBashChoice(project.ID, agent.ID, run.ID, choiceID); !recognized || err != nil {
+		t.Fatalf("approval resolution: recognized=%t err=%v", recognized, err)
+	}
+	a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateDone, nil)
+	if a.consumeResidentBashApproval(project.ID, agent.ID, run.ID, command) {
+		t.Fatal("approval survived its run")
+	}
+}
+
+func bashChoiceID(t *testing.T, result, prefix string) string {
+	t.Helper()
+	var payload struct {
+		Choices []struct {
+			ID string `json:"id"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatalf("decode choice request: %v", err)
+	}
+	for _, choice := range payload.Choices {
+		if strings.HasPrefix(choice.ID, prefix) {
+			return choice.ID
+		}
+	}
+	t.Fatalf("choice with prefix %q missing from %s", prefix, result)
+	return ""
 }
 
 func TestResidentProviderWithoutRuntimeCapabilitiesIsRejected(t *testing.T) {

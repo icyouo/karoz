@@ -389,6 +389,10 @@ func TestProjectWorkspacesScanMainAndExtraCreateInMain(t *testing.T) {
 	if created.WorkspaceType != "main" || created.WorkspaceRoot != filepath.Clean(mainRoot) || !strings.HasPrefix(created.Path, filepath.Clean(mainRoot)+string(os.PathSeparator)) {
 		t.Fatalf("created project = %+v", created)
 	}
+	createdIgnore, err := os.ReadFile(filepath.Join(created.Path, ".gitignore"))
+	if err != nil || string(createdIgnore) != "/.karoz/\n" {
+		t.Fatalf("created project ignore = %q err=%v", createdIgnore, err)
+	}
 	externalRoot := t.TempDir()
 	externalProject := filepath.Join(externalRoot, "existing-app")
 	if err := os.MkdirAll(filepath.Join(externalProject, ".git"), 0755); err != nil {
@@ -400,6 +404,19 @@ func TestProjectWorkspacesScanMainAndExtraCreateInMain(t *testing.T) {
 	}
 	if imported.Name != "Imported Name" || imported.Path != filepath.Clean(externalProject) || imported.WorkspaceType != "extra" || imported.WorkspaceRoot != filepath.Clean(externalProject) {
 		t.Fatalf("imported project = %+v", imported)
+	}
+	ignorePath := filepath.Join(imported.Path, ".gitignore")
+	if content, err := os.ReadFile(ignorePath); err != nil || string(content) != "/.karoz/\n" {
+		t.Fatalf("imported project ignore = %q err=%v", content, err)
+	}
+	if err := os.WriteFile(ignorePath, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeProjectKaroz(imported.Path); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(ignorePath); err != nil || len(content) != 0 {
+		t.Fatalf("user-removed ignore rule was restored: %q err=%v", content, err)
 	}
 	scanned, err := a.scanProjects()
 	if err != nil {
@@ -726,6 +743,9 @@ func TestReadAgentMessageRequestSavesMultipartAttachments(t *testing.T) {
 	if err := writer.WriteField("type", "ask"); err != nil {
 		t.Fatal(err)
 	}
+	if err := writer.WriteField("choice_id", "choice-1"); err != nil {
+		t.Fatal(err)
+	}
 	part, err := writer.CreateFormFile("files", "note.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -743,7 +763,7 @@ func TestReadAgentMessageRequestSavesMultipartAttachments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Message != "please inspect" || parsed.Type != "ask" {
+	if parsed.Message != "please inspect" || parsed.Type != "ask" || parsed.ChoiceID != "choice-1" {
 		t.Fatalf("request = %+v", parsed)
 	}
 	if len(attachments) != 1 {
@@ -1243,7 +1263,6 @@ func toolSpecNames(specs []map[string]any) map[string]bool {
 func TestResidentToolRegistryCoversStaticDefinitions(t *testing.T) {
 	a := &app{}
 	expected := toolSpecNames(append(residentToolSpecs(), residentAgentManagementToolSpecs()...))
-	delete(expected, "bash")
 	definitions := a.residentToolRegistry().Definitions()
 	if len(definitions) != len(expected) {
 		t.Fatalf("registry definitions = %d, expected %d", len(definitions), len(expected))

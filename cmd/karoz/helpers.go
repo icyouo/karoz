@@ -261,17 +261,24 @@ func mimeTypeForPath(path string) string {
 	}
 }
 
-func (a *app) agentWorkspaceDir(projectID, agentID string) string {
-	return filepath.Join(a.settings.DataDir, "agent-workspaces", projectID, agentID)
+func (a *app) agentWorkspaceDir(projectID, agentID string) (string, error) {
+	project, err := a.projectByID(projectID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(project.Path, ".karoz", "artifacts", agentID), nil
 }
 
 func (a *app) listWorkspaceFiles(projectID, agentID string) ([]WorkspaceFile, error) {
-	root := a.agentWorkspaceDir(projectID, agentID)
+	root, err := a.agentWorkspaceDir(projectID, agentID)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(root, 0755); err != nil {
 		return nil, err
 	}
 	var files []WorkspaceFile
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -316,7 +323,11 @@ func (a *app) getWorkspaceFilePreview(projectID, agentID, relPath string) (Works
 	if err != nil {
 		return WorkspaceFilePreview{}, err
 	}
-	rel, err := filepath.Rel(a.agentWorkspaceDir(projectID, agentID), full)
+	root, err := a.agentWorkspaceDir(projectID, agentID)
+	if err != nil {
+		return WorkspaceFilePreview{}, err
+	}
+	rel, err := filepath.Rel(root, full)
 	if err != nil {
 		return WorkspaceFilePreview{}, err
 	}
@@ -346,7 +357,11 @@ func (a *app) safeWorkspacePath(projectID, agentID, relPath string) (string, err
 	if filepath.IsAbs(relPath) {
 		return "", errors.New("absolute paths are not allowed")
 	}
-	root := filepath.Clean(a.agentWorkspaceDir(projectID, agentID))
+	workspace, err := a.agentWorkspaceDir(projectID, agentID)
+	if err != nil {
+		return "", err
+	}
+	root := filepath.Clean(workspace)
 	full := filepath.Clean(filepath.Join(root, relPath))
 	if full == root || !strings.HasPrefix(full, root+string(os.PathSeparator)) {
 		return "", errors.New("path escapes workspace")

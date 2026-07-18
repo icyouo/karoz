@@ -2116,10 +2116,11 @@
       let skipNextChoiceAssistant = false;
       messages.forEach((m, index) => {
         if (m.role === 'tool_call' || m.role === 'tool_result') {
-          const choiceRequest = m.role === 'tool_result' && m.intent === 'request_choice' ? parseChoiceRequestResult(m.body || '') : null;
+          const choiceRequest = m.role === 'tool_result' ? parseChoiceRequestResult(m.body || '') : null;
           if (choiceRequest) {
             const hasUserAnswer = messages.slice(index + 1).some(next => next.role === 'user');
-            appendChoiceRequest(choiceRequest, !hasUserAnswer);
+            const interactive = !hasUserAnswer && choiceRequest.approval_type !== 'resident_bash';
+            appendChoiceRequest(choiceRequest, interactive);
             skipNextChoiceAssistant = true;
             return;
           }
@@ -2364,16 +2365,29 @@
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'choice-option';
+        button.disabled = !interactive;
         const marker = choice.mode === 'yes_no' ? '' : String(index + 1);
         button.innerHTML = '<span class="choice-index">' + escapeHTML(marker) + '</span><span><strong class="choice-label">' + escapeHTML(option.label || option.id || ('Option ' + (index + 1))) + '</strong>' + (option.description ? '<span class="choice-desc">' + escapeHTML(option.description) + '</span>' : '') + '</span>';
-        button.onclick = () => {
+        button.onclick = async () => {
           if (!interactive || item.classList.contains('answered')) return;
           item.classList.add('answered');
           button.classList.add('selected');
+          options.querySelectorAll('button').forEach(candidate => { candidate.disabled = true; });
           const id = option.id || String(index + 1);
           const label = option.label || id;
-          $('agentMessage').value = 'Selected option ' + id + ': ' + label;
-          $('sendAgent').click();
+          $('agentStatus').textContent = currentAgentLabel() + ' · submitting choice ·';
+          for (let attempt = 0; attempt < 50 && currentAgentWorking(); attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            await refreshAgentStates();
+          }
+          if (currentAgentWorking()) {
+            item.classList.remove('answered');
+            button.classList.remove('selected');
+            options.querySelectorAll('button').forEach(candidate => { candidate.disabled = false; });
+            notify('The current agent turn is still finishing. Try the choice again.', 'error');
+            return;
+          }
+          await sendAgentMessage('Selected: ' + label, id, []);
         };
         options.appendChild(button);
       });
@@ -2865,17 +2879,21 @@
       await selectProject(project);
       notify('Project ready.', 'success');
     };
-    $('sendAgent').onclick = async () => {
+    $('sendAgent').onclick = () => sendAgentMessage();
+    async function sendAgentMessage(messageOverride = '', choiceID = '', attachmentOverride = null) {
       if (!state.project || !state.agent) return notify('Select a project and agent first.', 'error');
-      const message = $('agentMessage').value.trim();
-      const attachments = (state.agentAttachments || []).slice();
+      const directChoice = Boolean(choiceID);
+      const message = directChoice ? String(messageOverride || '').trim() : $('agentMessage').value.trim();
+      const attachments = Array.isArray(attachmentOverride) ? attachmentOverride.slice() : (state.agentAttachments || []).slice();
       if (!message && attachments.length === 0) return fieldError('agentMessage', 'Enter a message or attach a file.');
       const activeAgentId = currentAgentID();
       const wasWorking = currentAgentWorking();
       $('sendAgent').disabled = true;
       appendAgentMessage('you', messagePreviewWithAttachments(message, attachments));
-      $('agentMessage').value = '';
-      clearAgentAttachments();
+      if (!directChoice) {
+        $('agentMessage').value = '';
+        clearAgentAttachments();
+      }
       closeSkillSuggest();
       if (wasWorking) {
         $('agentStatus').textContent = currentAgentLabel() + ' · queued interrupt ·';
@@ -2890,7 +2908,7 @@
             onError(message) {
               throw new Error(message);
             }
-          });
+          }, choiceID);
         } catch (err) {
           state.agentAttachments = attachments;
           renderAgentAttachments();
@@ -2952,7 +2970,7 @@
             if (payload.tool !== 'request_choice') appendToolMessage('tool_call', payload.tool, payload.call_id, payload.arguments, true);
           },
           onToolResult(payload) {
-            if (payload.tool === 'request_choice' && appendChoiceRequestFromResult(payload.result, true)) {
+            if (appendChoiceRequestFromResult(payload.result, true)) {
               renderedChoice = true;
               return;
             }
@@ -2974,8 +2992,12 @@
             const count = payload && Array.isArray(payload.interrupts) ? payload.interrupts.length : 0;
             $('agentStatus').textContent = currentAgentLabel() + ' · working · applied ' + (count || 1) + ' interrupt';
           }
-        });
-        await loadAgents();
+        }, choiceID);
+        if (renderedChoice) {
+          await refreshAgentStates();
+        } else {
+          await loadAgents();
+        }
         await loadTasks();
         await loadResidentRuntimeState();
         await loadWorkspaceFiles(false);
@@ -2993,8 +3015,8 @@
         $('sendAgent').disabled = false;
         $('agentMessage').focus();
       }
-    };
-    async function consumeAgentStream(message, attachments, handlers) {
+    }
+    async function consumeAgentStream(message, attachments, handlers, choiceID = '') {
       const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
       let body;
       const headers = { 'accept': 'text/event-stream' };
@@ -3002,10 +3024,11 @@
         body = new FormData();
         body.append('message', message);
         body.append('type', state.chatType || 'ask');
+        if (choiceID) body.append('choice_id', choiceID);
         attachments.forEach(file => body.append('files', file, file.name));
       } else {
         headers['content-type'] = 'application/json';
-        body = JSON.stringify({ message, type: state.chatType || 'ask' });
+        body = JSON.stringify({ message, type: state.chatType || 'ask', choice_id: choiceID });
       }
       const res = await fetch('/api/projects/' + state.project.id + '/agents/' + encodeURIComponent(currentAgentID()) + '/messages', {
         method: 'POST',

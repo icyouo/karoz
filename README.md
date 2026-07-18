@@ -104,7 +104,7 @@ The resident agent is an open runtime — you extend what it knows and what it c
 
 **MCP servers** connect external tools to the agent over the [Model Context Protocol](https://modelcontextprotocol.io). Configure trusted servers globally over `stdio` or `SSE`; repository-owned `.mcp.json` files are ignored unless `KAROZ_TRUST_PROJECT_MCP=1` explicitly grants them host-level trust. MCP tools are exposed only to `plan` and `dev` turns as `mcp__<server>__<tool>`.
 
-Resident turns have no general host shell. They inspect source through path-bounded, read-only repository tools; artifact writes stay in the resident workspace, while source changes and command execution run as tracked coding tasks in isolated worktrees.
+Every resident agent has a host Bash tool that starts in the selected project directory. It is not filesystem-sandboxed and can access anything available to the Karoz process. Development turns execute commands directly; ask and plan turns require explicit, single-use approval for the exact command. Path-bounded repository tools remain available for read-only inspection, artifacts are stored under the project's `.karoz/artifacts/` directory with metadata in `.karoz/artifacts.json`, and tracked worktree tasks remain the preferred path for substantial source changes. Karoz adds `/.karoz/` to `.gitignore` only when the project is first created or imported; later user changes are respected.
 
 ## What Works Today
 

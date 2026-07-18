@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	persistenceadapter "github.com/karoz/karoz/internal/persistence"
 	"log"
 	"os"
 	"path/filepath"
@@ -63,9 +64,20 @@ func (a *app) bootstrap() error {
 }
 
 func (a *app) loadArtifacts() error {
-	found, err := a.loadJSON("artifacts.json", &a.artifacts)
-	if err != nil || !found {
+	projects, err := a.scanProjects()
+	if err != nil {
 		return err
+	}
+	a.artifacts = map[string][]Artifact{}
+	for _, project := range projects {
+		var items []Artifact
+		found, loadErr := persistenceadapter.NewJSONStore(filepath.Join(project.Path, ".karoz")).Load("artifacts.json", &items)
+		if loadErr != nil {
+			return loadErr
+		}
+		if found {
+			a.artifacts[project.ID] = items
+		}
 	}
 	changed := false
 	for projectID, artifacts := range a.artifacts {
@@ -98,8 +110,21 @@ func (a *app) loadArtifacts() error {
 
 func (a *app) saveArtifacts() error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.saveJSON("artifacts.json", a.artifacts, 0644)
+	snapshot := make(map[string][]Artifact, len(a.artifacts))
+	for projectID, items := range a.artifacts {
+		snapshot[projectID] = append([]Artifact{}, items...)
+	}
+	a.mu.Unlock()
+	for projectID, items := range snapshot {
+		project, err := a.projectByID(projectID)
+		if err != nil {
+			return err
+		}
+		if err := persistenceadapter.NewJSONStore(filepath.Join(project.Path, ".karoz")).Save("artifacts.json", items, 0644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *app) loadSettings() error {

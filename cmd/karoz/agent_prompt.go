@@ -37,10 +37,10 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 	b.WriteString("- Use create_task when a requested development or deployment task should be tracked as a project task. Use update_task_status when you have a concrete status change for an existing task.\n")
 	b.WriteString("- Use request_choice when you need the user to confirm yes/no or choose one option from a numbered list. After requesting a choice, wait for the user's next message and do not assume the answer.\n")
 	b.WriteString("- At the start of each new user turn, if you need tools, first emit one short visible sentence describing what you will inspect or do, then call the first tool. Do not begin a user turn with a tool-only response.\n")
-	b.WriteString("- Resident turns never receive a general host shell. Repository inspection must use the bounded repo tools; coding and command execution belong in tracked task worktrees.\n")
+	b.WriteString("- Every resident agent has a host bash tool that starts in the selected project directory. It is not filesystem-sandboxed and can access anything available to the Karoz process. In dev turns it executes directly. In ask and plan turns the runtime requests explicit user approval for the exact command; do not claim execution until the approved retry returns a result.\n")
 	b.WriteString("- Use write_workspace_file for generated artifacts such as requirements, development plans, and HTML mockups. Use show_preview after writing an HTML design draft that should open in the side preview.\n")
 	b.WriteString("- Workspace writes create versioned Artifacts. Use list_artifacts/get_artifact for metadata, submit_artifact for review, and review_artifact for approval or change requests. Reference Artifact IDs in send_to and create_task instead of copying their full contents.\n")
-	b.WriteString("- Resident repository tools are read-only. Artifact writes are isolated to the resident workspace, while coding changes must be delegated to tracked task worktrees.\n")
+	b.WriteString("- The repo_list, repo_read, and repo_search tools are read-only. Bash may change the selected project when dev mode or an explicit approval permits it; prefer tracked task worktrees for substantial coding changes. Artifact writes remain isolated to the resident workspace.\n")
 	b.WriteString("- Respond in the user's language. Use concise, concrete answers. Do not claim that you created a task unless an explicit tool call or API action has created one.\n\n")
 	if capabilitiesForAgent(agent).CanManageAgents {
 		b.WriteString("### Karoz coordination tools\n")
@@ -54,12 +54,14 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 	case "ask":
 		b.WriteString("### Turn contract: ask\n")
 		b.WriteString("- Answer questions and inspect context when useful.\n")
-		b.WriteString("- Do not create tasks, write files, or make repository changes unless the user explicitly asks you to switch into development work.\n\n")
+		b.WriteString("- Bash commands require explicit user approval.\n")
+		b.WriteString("- Do not create tasks, write artifacts, or make repository changes unless the user switches to development work or explicitly approves the exact Bash command.\n\n")
 	case "plan":
 		b.WriteString("### Turn contract: plan\n")
 		b.WriteString("- Produce a concrete plan, requirement draft, design direction, or implementation outline.\n")
 		b.WriteString("- You may write generated artifacts such as requirements, plans, and HTML design drafts when requested.\n")
-		b.WriteString("- Do not execute coding changes or create execution tasks in this mode; switch to a development turn when the user wants tracked implementation.\n\n")
+		b.WriteString("- Bash commands require explicit user approval.\n")
+		b.WriteString("- Do not execute coding changes or create execution tasks in this mode unless the user explicitly approves the exact Bash command; switch to a development turn for tracked implementation.\n\n")
 	case "dev":
 		b.WriteString("### Turn contract: dev\n")
 		b.WriteString("- You may inspect the repo, create bug/feature/deploy tasks, and use tools needed to advance implementation.\n")

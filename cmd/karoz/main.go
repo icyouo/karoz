@@ -22,13 +22,13 @@ func main() {
 	settings.ExtraProjectsRoots = normalizeWorkspaceRoots(settings.ExtraProjectsRoots, settings.ProjectsRoot)
 
 	a := newApp(settings)
-	if err := a.bootstrap(); err != nil {
-		log.Fatalf("bootstrap: %v", err)
-	}
 	if !projectsRootFromEnv {
 		if err := a.loadSettings(); err != nil {
 			log.Fatalf("load settings: %v", err)
 		}
+	}
+	if err := a.bootstrap(); err != nil {
+		log.Fatalf("bootstrap: %v", err)
 	}
 	if err := os.MkdirAll(a.settings.ProjectsRoot, 0755); err != nil {
 		log.Fatalf("create projects root: %v", err)
