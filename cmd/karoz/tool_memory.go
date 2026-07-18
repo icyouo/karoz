@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 	"time"
 )
@@ -85,22 +86,72 @@ func (a *app) searchArchive(projectID, agentID, query string, limit int) string 
 	memories := append([]AgentMemoryEntry{}, a.memories[key]...)
 	archives := append([]AgentArchiveMessage{}, a.archives[key]...)
 	a.mu.Unlock()
-	var memoryResults []map[string]any
-	for _, entry := range memories {
-		haystack := strings.ToLower(entry.Summary + "\n" + entry.Detail)
-		if strings.Contains(haystack, query) {
-			memoryResults = append(memoryResults, memorySummary(entry))
+	terms := strings.Fields(query)
+	matchScore := func(text string) int {
+		text = strings.ToLower(text)
+		if strings.Contains(text, query) {
+			return len(terms) + 4
 		}
+		score := 0
+		for _, term := range terms {
+			if len([]rune(term)) < 2 {
+				continue
+			}
+			if strings.Contains(text, term) {
+				score++
+			}
+		}
+		return score
+	}
+	type memoryMatch struct {
+		entry AgentMemoryEntry
+		score int
+	}
+	var matchedMemories []memoryMatch
+	for _, entry := range memories {
+		if score := matchScore(entry.Summary + "\n" + entry.Detail); score > 0 {
+			matchedMemories = append(matchedMemories, memoryMatch{entry: entry, score: score})
+		}
+	}
+	sort.SliceStable(matchedMemories, func(i, j int) bool {
+		if matchedMemories[i].score == matchedMemories[j].score {
+			return matchedMemories[i].entry.UpdatedAt.After(matchedMemories[j].entry.UpdatedAt)
+		}
+		return matchedMemories[i].score > matchedMemories[j].score
+	})
+	memoryResults := make([]map[string]any, 0, min(limit, len(matchedMemories)))
+	for _, match := range matchedMemories {
+		memoryResults = append(memoryResults, memorySummary(match.entry))
 		if len(memoryResults) >= limit {
 			break
 		}
 	}
-	var messageResults []AgentArchiveMessage
-	for i := len(archives) - 1; i >= 0; i-- {
-		msg := archives[i]
-		if strings.Contains(strings.ToLower(msg.Body), query) {
-			messageResults = append(messageResults, msg)
+	type messageMatch struct {
+		message AgentArchiveMessage
+		score   int
+	}
+	var matchedMessages []messageMatch
+	for _, msg := range archives {
+		// Tool payloads are already represented by the surrounding assistant or
+		// system message. Returning them here recursively injects old JSON blobs
+		// into the current model loop.
+		if msg.Role == "tool_call" || msg.Role == "tool_result" {
+			continue
 		}
+		if score := matchScore(msg.Body); score > 0 {
+			matchedMessages = append(matchedMessages, messageMatch{message: msg, score: score})
+		}
+	}
+	sort.SliceStable(matchedMessages, func(i, j int) bool {
+		if matchedMessages[i].score == matchedMessages[j].score {
+			return matchedMessages[i].message.Seq > matchedMessages[j].message.Seq
+		}
+		return matchedMessages[i].score > matchedMessages[j].score
+	})
+	messageResults := make([]map[string]any, 0, min(limit, len(matchedMessages)))
+	for _, match := range matchedMessages {
+		msg := match.message
+		messageResults = append(messageResults, compactArchivedMessageForTool(msg.Seq, msg.Role, msg.Intent, msg.Body, msg.CreatedAt))
 		if len(messageResults) >= limit {
 			break
 		}
@@ -136,7 +187,12 @@ func (a *app) getArchivedMessages(projectID, agentID string, startSeq, endSeq in
 
 func compactArchivedMessageForTool(seq int64, role, intent, body string, createdAt time.Time) map[string]any {
 	originalChars := len(body)
-	compactBody := promptAgentMessageBody(AgentMessage{Role: role, Intent: intent, Body: body})
+	compactBody := ""
+	if role == "tool_call" || role == "tool_result" {
+		compactBody = "[historical tool payload omitted; inspect the surrounding assistant/system result or call the current domain tool]"
+	} else {
+		compactBody = promptAgentMessageBody(AgentMessage{Role: role, Intent: intent, Body: body})
+	}
 	return map[string]any{
 		"seq":            seq,
 		"role":           role,

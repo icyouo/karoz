@@ -15,7 +15,12 @@ import (
 	"time"
 )
 
-const maxCodexToolOutputChars = 60000
+const (
+	maxCodexToolOutputChars  = 12000
+	maxResidentToolRounds    = 8
+	residentToolPhaseTimeout = 90 * time.Second
+	residentFinalTimeout     = 30 * time.Second
+)
 
 func invokeCodexDirect(ctx context.Context, workdir, prompt string) (CLI2APIResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -44,13 +49,20 @@ func invokeCodexDirect(ctx context.Context, workdir, prompt string) (CLI2APIResp
 }
 
 func invokeCodexDirectStream(ctx context.Context, workdir, prompt string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
+	parentCtx := ctx
+	toolCtx, cancelTools := context.WithTimeout(parentCtx, residentToolPhaseTimeout)
+	defer cancelTools()
 	input := []map[string]any{codexMessage("user", prompt+"\n\nProject workspace: "+workdir)}
 	toolRounds := 0
-	for modelRound := 0; modelRound < 24 && toolRounds < 12; modelRound++ {
-		streamed, interrupts, err := streamCodexStep(ctx, input, tools, callbacks)
+	limitReason := "resident tool loop limit"
+toolLoop:
+	for modelRound := 0; modelRound < 16 && toolRounds < maxResidentToolRounds; modelRound++ {
+		streamed, interrupts, err := streamCodexStep(toolCtx, input, tools, callbacks)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && parentCtx.Err() == nil {
+				limitReason = "resident tool phase time budget"
+				break toolLoop
+			}
 			return err
 		}
 		if len(interrupts) > 0 {
@@ -91,17 +103,54 @@ func invokeCodexDirectStream(ctx context.Context, workdir, prompt string, tools 
 					input = append(input, codexMessage("user", renderAgentInterruptsForModel(interrupts)))
 				}
 			}
+			if toolCtx.Err() != nil && parentCtx.Err() == nil {
+				limitReason = "resident tool phase time budget"
+				break toolLoop
+			}
 		}
 	}
-	input = append(input, codexMessage("user", "You have reached the resident tool loop limit. Stop using tools and provide the best concise answer now, summarizing what happened, any completed actions, and the next concrete step."))
-	httpReq, err := newCodexDirectRequestWithInput(ctx, input, nil)
+	if err := parentCtx.Err(); err != nil {
+		return err
+	}
+	input = append(input, codexMessage("user", "You have reached the "+limitReason+". Stop using tools and provide the best concise answer now. Directly answer the latest user message using the evidence already collected, state any uncertainty, and name the next concrete step."))
+	finalCtx, cancelFinal := context.WithTimeout(parentCtx, residentFinalTimeout)
+	defer cancelFinal()
+	httpReq, err := newCodexDirectRequestWithInput(finalCtx, compactCodexInputForFinal(input, 90000), nil)
 	if err != nil {
 		return err
 	}
 	if _, err := streamCodexResponse(httpReq, callbacks.OnDelta); err != nil {
-		return err
+		if parentCtx.Err() != nil {
+			return parentCtx.Err()
+		}
+		if callbacks.OnDelta != nil {
+			callbacks.OnDelta("本轮工具检索已达到运行预算，最终总结请求未能及时完成。已停止继续检索，现有操作结果均已保留；请重试最后一条消息，Agent 将优先使用项目 Task 与 WorkPlan 状态直接回答。")
+		}
+		return nil
 	}
 	return nil
+}
+
+func compactCodexInputForFinal(input []map[string]any, maxChars int) []map[string]any {
+	if len(input) <= 2 || maxChars <= 0 {
+		return input
+	}
+	keptReversed := make([]map[string]any, 0, len(input))
+	used := 0
+	for i := len(input) - 1; i >= 1; i-- {
+		raw, _ := json.Marshal(input[i])
+		if len(keptReversed) > 0 && used+len(raw) > maxChars {
+			break
+		}
+		keptReversed = append(keptReversed, input[i])
+		used += len(raw)
+	}
+	out := make([]map[string]any, 0, len(keptReversed)+1)
+	out = append(out, input[0])
+	for i := len(keptReversed) - 1; i >= 0; i-- {
+		out = append(out, keptReversed[i])
+	}
+	return out
 }
 
 type codexStreamResult struct {

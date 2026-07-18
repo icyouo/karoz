@@ -157,6 +157,112 @@ func (a *app) submitPlan(projectID, planID, actorID string, expectedVersion int6
 	return updated, err
 }
 
+func historicalTaskSuccessful(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "done", "completed", "success", "succeeded":
+		return true
+	default:
+		return false
+	}
+}
+
+func historicalTaskTerminal(status string) bool {
+	if historicalTaskSuccessful(status) {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed", "blocked", "cancelled", "canceled", "superseded", "deploy_failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *app) reconcilePlanHistory(project Project, actor Agent, req PlanHistoryReconciliationRequest) (WorkPlan, error) {
+	plan, ok := a.planByID(project.ID, strings.TrimSpace(req.PlanID))
+	if !ok {
+		return WorkPlan{}, errors.New("plan not found")
+	}
+	if actor.ID != plan.OwnerAgentID && actor.ID != plan.AuthoredByAgentID {
+		return WorkPlan{}, errors.New("only the plan owner or author can reconcile historical tasks")
+	}
+	if plan.Status != PlanDraft && plan.Status != PlanAwaitingApproval {
+		return WorkPlan{}, errors.New("historical reconciliation is only allowed before plan activation")
+	}
+	if len(req.Steps) == 0 {
+		return WorkPlan{}, errors.New("at least one step reconciliation is required")
+	}
+	seenSteps := map[string]bool{}
+	seenTasks := map[string]bool{}
+	now := time.Now().UTC()
+	for _, item := range req.Steps {
+		item.StepID = strings.TrimSpace(item.StepID)
+		item.Decision = strings.ToLower(strings.TrimSpace(item.Decision))
+		item.Evidence = strings.TrimSpace(item.Evidence)
+		idx := planStepIndex(plan, item.StepID)
+		if idx < 0 || seenSteps[item.StepID] {
+			return WorkPlan{}, fmt.Errorf("invalid or duplicate plan step %s", item.StepID)
+		}
+		seenSteps[item.StepID] = true
+		if item.Decision != "accepted" && item.Decision != "needs_review" {
+			return WorkPlan{}, fmt.Errorf("step %s has invalid reconciliation decision", item.StepID)
+		}
+		if item.Evidence == "" || len(item.TaskIDs) == 0 {
+			return WorkPlan{}, fmt.Errorf("step %s requires task ids and evidence", item.StepID)
+		}
+		step := &plan.Steps[idx]
+		attemptsByTask := map[string]bool{}
+		for _, attempt := range step.TaskAttempts {
+			attemptsByTask[attempt.TaskID] = true
+		}
+		for _, taskID := range item.TaskIDs {
+			taskID = strings.TrimSpace(taskID)
+			if taskID == "" || seenTasks[taskID] {
+				return WorkPlan{}, fmt.Errorf("invalid or duplicate historical task id for step %s", item.StepID)
+			}
+			seenTasks[taskID] = true
+			task, exists := a.findTask(project.ID, taskID)
+			if !exists {
+				return WorkPlan{}, fmt.Errorf("historical task %s was not found", taskID)
+			}
+			if !historicalTaskTerminal(task.Status) {
+				return WorkPlan{}, fmt.Errorf("historical task %s is not terminal", taskID)
+			}
+			if item.Decision == "accepted" && !historicalTaskSuccessful(task.Status) {
+				return WorkPlan{}, fmt.Errorf("historical task %s is not successful and cannot be accepted", taskID)
+			}
+			if !attemptsByTask[task.ID] {
+				step.TaskAttempts = append(step.TaskAttempts, PlanTaskAttempt{
+					Attempt: len(step.TaskAttempts) + 1, TaskID: task.ID, Status: task.Status,
+					CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
+				})
+				attemptsByTask[task.ID] = true
+			}
+			if step.AssignedAgentID == "" {
+				step.AssignedAgentID = task.OwnerAgentID
+			}
+		}
+		step.Result = item.Evidence
+		step.Blocker = ""
+		if item.Decision == "accepted" {
+			step.Status = PlanStepCompleted
+		} else {
+			step.Status = PlanStepAwaitingDecision
+		}
+		step.Version++
+	}
+	plan.Revision++
+	updated, err := a.replacePlan(plan, req.ExpectedVersion)
+	if err != nil {
+		return WorkPlan{}, err
+	}
+	if err := a.savePlansForProject(project.ID); err != nil {
+		return WorkPlan{}, err
+	}
+	a.emitRuntimeStateChanged(RuntimeEvent{ProjectID: project.ID, Kind: "plan_changed", EntityID: plan.ID, To: updated.Status, Reason: "historical_tasks_reconciled", CreatedAt: now})
+	return updated, nil
+}
+
 func (a *app) activatePlan(project Project, planID, approvedBy string, expectedVersion int64) (WorkPlan, error) {
 	plan, ok := a.planByID(project.ID, planID)
 	if !ok {

@@ -191,9 +191,9 @@ func (a *app) maybeCheckpointAgentSession(projectID, agentID string, force bool)
 	}
 	a.archiveAgentMessages(projectID, agentID, messages, state.ShortWindowStartSeq, batch[len(batch)-1].Seq)
 	var b strings.Builder
-	if strings.TrimSpace(state.ResidentSummary) != "" {
-		b.WriteString("Previous rolling summary:\n")
-		b.WriteString(limitString(state.ResidentSummary, 2400))
+	if previous := normalizeResidentSummary(state.ResidentSummary, 2400); previous != "" {
+		b.WriteString("Earlier checkpoint highlights:\n")
+		b.WriteString(previous)
 		b.WriteString("\n\n")
 	}
 	b.WriteString("Recent checkpoint highlights:\n")
@@ -222,6 +222,41 @@ func (a *app) maybeCheckpointAgentSession(projectID, agentID string, force bool)
 	state.LongTermVersion++
 	state.LastCheckpointAt = time.Now().UTC()
 	a.updateAgentSessionState(state)
+}
+
+func normalizeResidentSummary(value string, maxChars int) string {
+	if maxChars <= 0 {
+		maxChars = 6000
+	}
+	lines := strings.Split(strings.TrimSpace(value), "\n")
+	seen := map[string]bool{}
+	keptReversed := make([]string, 0, len(lines))
+	used := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		lower := strings.ToLower(line)
+		if line == "" || strings.HasPrefix(lower, "previous rolling summary:") ||
+			strings.HasPrefix(lower, "earlier checkpoint highlights:") ||
+			strings.HasPrefix(lower, "recent checkpoint highlights:") ||
+			strings.HasPrefix(lower, "rolling summary:") || lower == "previ..." {
+			continue
+		}
+		if seen[line] {
+			continue
+		}
+		cost := len(line) + 1
+		if len(keptReversed) > 0 && used+cost > maxChars {
+			break
+		}
+		seen[line] = true
+		keptReversed = append(keptReversed, line)
+		used += cost
+	}
+	kept := make([]string, len(keptReversed))
+	for i := range keptReversed {
+		kept[len(keptReversed)-1-i] = keptReversed[i]
+	}
+	return strings.Join(kept, "\n")
 }
 
 func (a *app) archiveAgentMessages(projectID, agentID string, messages []AgentMessage, startSeq, endSeq int64) {

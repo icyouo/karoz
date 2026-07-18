@@ -695,6 +695,55 @@ func TestGetArchivedMessagesCompactsToolResults(t *testing.T) {
 	if len(got) > 5000 {
 		t.Fatalf("get_messages result too large: %d", len(got))
 	}
+	if strings.Contains(got, `"ok":true`) || !strings.Contains(got, "historical tool payload omitted") {
+		t.Fatalf("get_messages retained recursive tool payload: %s", got)
+	}
+}
+
+func TestSearchArchiveUsesKeywordRelevanceAndOmitsToolPayloads(t *testing.T) {
+	key := agentMessageKey("p1", "architect")
+	a := &app{
+		memories: map[string][]AgentMemoryEntry{},
+		archives: map[string][]AgentArchiveMessage{key: {
+			{Seq: 1, Role: "assistant", Body: "M0 数据探针完成，M1 Watchlist 已由 reviewer 验收通过。", CreatedAt: time.Now().UTC()},
+			{Seq: 2, Role: "tool_result", Intent: "get_messages", Body: strings.Repeat("M0 M1 completed JSON ", 2000), CreatedAt: time.Now().UTC()},
+		}},
+	}
+	got := a.searchArchive("p1", "architect", "M0 M1 reviewer 完成", 20)
+	if !strings.Contains(got, "数据探针完成") {
+		t.Fatalf("keyword archive search missed relevant result: %s", got)
+	}
+	if strings.Contains(got, "completed JSON") || strings.Contains(got, `"role":"tool_result"`) {
+		t.Fatalf("archive search leaked historical tool payload: %s", got)
+	}
+}
+
+func TestNormalizeResidentSummaryRemovesRecursiveHeaders(t *testing.T) {
+	raw := strings.Repeat("Previous rolling summary:\n", 80) + "Recent checkpoint highlights:\n- M1 completed\n- M1 completed\n- M2 pending"
+	got := normalizeResidentSummary(raw, 6000)
+	if strings.Contains(got, "Previous rolling summary") || strings.Contains(got, "Recent checkpoint highlights") {
+		t.Fatalf("recursive summary headers remain: %s", got)
+	}
+	if strings.Count(got, "M1 completed") != 1 || !strings.Contains(got, "M2 pending") {
+		t.Fatalf("summary content was not normalized: %s", got)
+	}
+}
+
+func TestCompactCodexInputForFinalKeepsInitialPromptAndRecentEvidence(t *testing.T) {
+	input := []map[string]any{codexMessage("user", "initial")}
+	for i := 0; i < 20; i++ {
+		input = append(input, map[string]any{"type": "function_call", "call_id": fmt.Sprintf("c%d", i), "name": "tool", "arguments": `{}`})
+		input = append(input, map[string]any{"type": "function_call_output", "call_id": fmt.Sprintf("c%d", i), "output": strings.Repeat("x", 1000)})
+	}
+	input = append(input, codexMessage("user", "finalize"))
+	got := compactCodexInputForFinal(input, 5000)
+	if len(got) >= len(input) || fmt.Sprint(got[0]["content"]) == "" {
+		t.Fatalf("final input was not compacted correctly: len=%d", len(got))
+	}
+	last := got[len(got)-1]
+	if !strings.Contains(fmt.Sprint(last), "finalize") {
+		t.Fatalf("final instruction was dropped: %+v", last)
+	}
 }
 
 func TestAgentMessagesPageForDisplayReturnsLatestThenEarlier(t *testing.T) {

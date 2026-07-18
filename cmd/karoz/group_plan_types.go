@@ -138,3 +138,16 @@ type PlanActionRequest struct {
 	ExpectedVersion int64    `json:"expected_version,omitempty"`
 	Dependencies    []string `json:"dependencies,omitempty"`
 }
+
+type PlanHistoryReconciliationRequest struct {
+	PlanID          string                          `json:"plan_id"`
+	ExpectedVersion int64                           `json:"expected_version,omitempty"`
+	Steps           []PlanHistoryReconciliationStep `json:"steps"`
+}
+
+type PlanHistoryReconciliationStep struct {
+	StepID   string   `json:"step_id"`
+	TaskIDs  []string `json:"task_ids"`
+	Decision string   `json:"decision"`
+	Evidence string   `json:"evidence"`
+}

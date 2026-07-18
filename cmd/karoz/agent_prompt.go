@@ -66,6 +66,7 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 		b.WriteString("- Persist it with save_plan_draft, then submit_plan for user approval. A grouped author automatically hands durable ownership to its coordinator; a standalone agent owns its own plan.\n")
 		b.WriteString("- If you are Karoz, do not author the plan: route the planning request to the best group through send_to_group, or provision a suitable group first.\n")
 		b.WriteString("- An activated WorkPlan is continuously advanced by its owner using advance_plan. Task completion is evidence, never automatic todo completion; the owner must directly verify it or delegate review, then accept or request rework.\n")
+		b.WriteString("- When the user says work may already be complete, call list_tasks/get_task before searching chat history. For a draft or awaiting-approval plan, use reconcile_plan_history to attach terminal Task evidence and explicitly mark each historical step accepted or needing review. Do not recreate completed Tasks.\n")
 		b.WriteString("- Bash commands require explicit user approval.\n")
 		b.WriteString("- Do not write artifacts, call dynamic MCP tools, make coding changes, or create ad-hoc tasks in Plan mode. WorkPlan activation creates tracked execution tasks through advance_plan.\n\n")
 	case "dev":
@@ -217,9 +218,9 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 			b.WriteString("\n")
 		}
 	}
-	if strings.TrimSpace(state.ResidentSummary) != "" {
+	if summary := normalizeResidentSummary(state.ResidentSummary, 6000); summary != "" {
 		b.WriteString("\nResident rolling summary:\n")
-		b.WriteString(strings.TrimSpace(state.ResidentSummary))
+		b.WriteString(summary)
 		b.WriteString("\n\nEarlier full messages are archived. Use search_archive or get_messages for exact details.")
 		b.WriteString("\n")
 	}

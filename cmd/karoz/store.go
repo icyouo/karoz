@@ -349,7 +349,22 @@ func (a *app) saveAgentMessages() error {
 
 func (a *app) loadAgentSessions() error {
 	_, err := a.loadJSON("agent-session-state.json", &a.agentSessions)
-	return err
+	if err != nil {
+		return err
+	}
+	changed := false
+	for key, state := range a.agentSessions {
+		normalized := normalizeResidentSummary(state.ResidentSummary, 6000)
+		if normalized != state.ResidentSummary {
+			state.ResidentSummary = normalized
+			a.agentSessions[key] = state
+			changed = true
+		}
+	}
+	if changed {
+		return a.saveAgentSessions()
+	}
+	return nil
 }
 
 func (a *app) saveAgentSessions() error {

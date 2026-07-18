@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func planTestApp(t *testing.T) (*app, Project, Agent, Agent) {
@@ -81,6 +83,45 @@ func TestKarozCannotOwnPlanAndGroupedWorkUsesGroupInbox(t *testing.T) {
 	routed := a.sendToGroup(project.ID, karoz.ID, "", map[string]any{"group_id": "build", "body": "implement", "subject": "Runtime"})
 	if containsToolError(routed, "") || len(a.groupInbox[project.ID]) != 1 {
 		t.Fatalf("group route = %s inbox=%+v", routed, a.groupInbox[project.ID])
+	}
+}
+
+func TestPlanOwnerReconcilesTerminalTasksCreatedBeforePlan(t *testing.T) {
+	a, project, coordinator, builder := planTestApp(t)
+	now := time.Now().UTC()
+	a.tasks[project.ID] = []Task{
+		{ID: "task-m0", ProjectID: project.ID, Title: "M0 data probe", Status: "done", Result: "merged and independently verified", CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-time.Hour)},
+		{ID: "task-m1", ProjectID: project.ID, Title: "M1 watchlist", Status: "completed", Result: "tests pass; final review pending", CreatedAt: now.Add(-time.Hour), UpdatedAt: now},
+	}
+	plan, err := a.createPlanDraft(project, builder, builder.ID, WorkPlanDraftRequest{Title: "Milestones", Goal: "Finish", Steps: []PlanStep{
+		{ID: "m0", Title: "M0", Description: "Probe"},
+		{ID: "m1", Title: "M1", Description: "Watchlist", Dependencies: []string{"m0"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = a.submitPlan(project.ID, plan.ID, coordinator.ID, plan.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = a.reconcilePlanHistory(project, coordinator, PlanHistoryReconciliationRequest{
+		PlanID: plan.ID, ExpectedVersion: plan.Version, Steps: []PlanHistoryReconciliationStep{
+			{StepID: "m0", TaskIDs: []string{"task-m0"}, Decision: "accepted", Evidence: "Task merged and reviewer accepted it."},
+			{StepID: "m1", TaskIDs: []string{"task-m1"}, Decision: "needs_review", Evidence: "Implementation is terminal but still needs owner review."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Steps[0].Status != PlanStepCompleted || plan.Steps[1].Status != PlanStepAwaitingDecision {
+		t.Fatalf("reconciled steps = %+v", plan.Steps)
+	}
+	if len(plan.Steps[0].TaskAttempts) != 1 || plan.Steps[0].TaskAttempts[0].TaskID != "task-m0" {
+		t.Fatalf("historical attempts = %+v", plan.Steps[0].TaskAttempts)
+	}
+	result := a.listTasksFromResidentTool(project.ID, map[string]any{"query": "M0 M1", "limit": 10})
+	if !strings.Contains(result, "task-m0") || !strings.Contains(result, "task-m1") {
+		t.Fatalf("task history result = %s", result)
 	}
 }
 

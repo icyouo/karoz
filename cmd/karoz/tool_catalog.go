@@ -242,7 +242,7 @@ func residentToolAllowed(toolCtx ResidentToolContext, name string) bool {
 		return turnType == "dev"
 	case "create_task", "update_task_status":
 		return turnType == "dev"
-	case "save_plan_draft", "submit_plan", "advance_plan":
+	case "save_plan_draft", "submit_plan", "advance_plan", "reconcile_plan_history":
 		return turnType == "plan"
 	case "list_agent_templates", "add_agent", "create_agent_team", "delete_agent":
 		return capabilitiesForAgent(toolCtx.Agent).CanManageAgents

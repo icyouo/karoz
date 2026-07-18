@@ -147,6 +147,12 @@ func (a *app) residentToolRegistry() *tooldomain.Registry[ResidentToolContext] {
 			"get_plan": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				return a.getPlanFromResidentTool(toolCtx.Project.ID, args), nil
 			},
+			"list_tasks": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.listTasksFromResidentTool(toolCtx.Project.ID, args), nil
+			},
+			"get_task": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.getTaskFromResidentTool(toolCtx.Project.ID, args), nil
+			},
 			"save_plan_draft": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				return a.savePlanDraftFromResidentTool(toolCtx.Project, toolCtx.Agent, args), nil
 			},
@@ -155,6 +161,9 @@ func (a *app) residentToolRegistry() *tooldomain.Registry[ResidentToolContext] {
 			},
 			"advance_plan": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				return a.advancePlanFromResidentTool(toolCtx.Project, toolCtx.Agent, args), nil
+			},
+			"reconcile_plan_history": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.reconcilePlanHistoryFromResidentTool(toolCtx.Project, toolCtx.Agent, args), nil
 			},
 		}
 		specs := append(residentToolSpecs(), residentPlanToolSpecs()...)
@@ -216,7 +225,7 @@ func residentToolHasSideEffects(name string) bool {
 	switch name {
 	case "repo_list", "repo_read", "repo_search", "list_skills", "read_skill",
 		"web_search", "web_fetch", "search_archive", "list_pending", "get_messages",
-		"list_artifacts", "get_artifact", "list_agent_templates", "list_groups", "list_plans", "get_plan":
+		"list_artifacts", "get_artifact", "list_agent_templates", "list_groups", "list_plans", "get_plan", "list_tasks", "get_task":
 		return false
 	default:
 		return true
