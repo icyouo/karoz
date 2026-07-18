@@ -116,7 +116,7 @@
     .agent-chat-title > div { min-width: 0; display: flex; align-items: baseline; gap: 7px; overflow: hidden; }
     .agent-chat-title strong { display: block; color: var(--text-primary); font-size: 13px; line-height: 18px; font-weight: 650; }
     .agent-chat-title span { display: block; min-width: 0; color: var(--text-secondary); font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #agentHeaderMeta { display: inline-flex; align-items: center; gap: 6px; overflow: hidden; }
+    #agentHeaderMeta { display: inline-flex; align-items: center; overflow: hidden; }
     .agent-meta-role { flex: 0 0 auto; color: var(--text-secondary); }
     .agent-meta-chip { flex: 0 0 auto; height: 22px; border: 1px solid var(--border-subtle); background: transparent; color: var(--text-secondary); padding: 0 7px; font-family: var(--font-mono); font-size: 10px; line-height: 20px; cursor: pointer; }
     .agent-meta-chip:hover, .agent-meta-chip.active { border-color: var(--accent-muted); color: var(--accent); }
@@ -127,16 +127,11 @@
     .agent-working-pulse i:nth-child(2) { animation-delay: .14s; }
     .agent-working-pulse i:nth-child(3) { animation-delay: .28s; }
     @keyframes agentPulse { 0%, 80%, 100% { opacity: .28; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
-    .agent-chat-tools { display: flex; align-items: center; gap: 8px; }
+    .agent-chat-tools { display: flex; min-width: 0; align-items: center; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+    .agent-chat-tools::-webkit-scrollbar { display: none; }
+    .agent-runtime-tools { display: flex; align-items: center; gap: 3px; }
     .agent-chat-tools button { width: auto; min-width: 54px; padding: 6px 9px; font-family: var(--font-mono); font-size: 11px; }
     .agent-chat-tools button.active { border-color: var(--accent-muted); color: var(--accent); }
-    .workspace-menu { position: fixed; z-index: 30; left: auto; top: 58px; right: 16px; width: min(320px, calc(100vw - 32px)); max-height: min(360px, calc(100dvh - 72px)); overflow: hidden; border: 1px solid var(--border); background: var(--bg-elevated); display: none; }
-    .workspace-menu.open { display: flex; flex-direction: column; }
-    .workspace-menu-head { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 6px 8px 6px 10px; }
-    .workspace-menu-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-size: 12px; line-height: 18px; font-weight: 650; }
-    .workspace-menu-head button.icon { width: 26px; height: 26px; flex: 0 0 26px; border-color: transparent; color: var(--text-secondary); font-size: 12px; }
-    .workspace-file-list { min-height: 0; overflow: auto; padding: 6px 0; }
-    .workspace-file-list .muted { padding: 8px 10px; }
     .workspace-file { width: 100%; border: 0; border-left: 2px solid transparent; background: transparent; color: var(--text-primary); padding: 8px 10px; text-align: left; }
     .workspace-file:hover { border-left-color: var(--accent-muted); background: var(--bg-surface); }
     .preview-pane { display: none; width: 100%; min-width: 360px; min-height: 0; justify-self: stretch; align-self: stretch; box-sizing: border-box; flex-direction: column; border-left: 1px solid var(--border); border-right: 0; background: var(--bg-root); color: var(--text-primary); }
@@ -647,6 +642,48 @@
       background: rgba(255, 255, 255, .035);
       color: var(--text-primary);
     }
+    .agent-chat-tools .runtime-tool {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+      color: var(--text-tertiary);
+    }
+    .agent-chat-tools .runtime-tool strong {
+      min-width: 15px;
+      border-radius: 5px;
+      background: rgba(255, 255, 255, .045);
+      padding: 1px 4px;
+      color: inherit;
+      font: 600 9px/14px var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      text-align: center;
+    }
+    .agent-chat-tools .runtime-tool i {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 2px rgba(213, 223, 115, .08);
+    }
+    .agent-tool-separator { width: 1px; height: 18px; flex: 0 0 1px; background: var(--border-subtle); }
+    .artifact-view-tabs {
+      display: flex;
+      gap: 14px;
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 0 14px;
+    }
+    .artifact-view-tabs button {
+      width: auto;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      color: var(--text-tertiary);
+      padding: 10px 0 8px;
+      font: 500 10.5px/16px var(--font-mono);
+    }
+    .artifact-view-tabs button:hover,
+    .artifact-view-tabs button.active { border-bottom-color: var(--accent-muted); color: var(--text-primary); }
     .agent-working-pulse i { width: 4px; height: 4px; background: var(--accent); }
 
     .chat-viewport {
@@ -856,14 +893,6 @@
     .skill-suggest-item { border-bottom-color: var(--border-subtle); padding: 10px 12px; }
     .skill-suggest-item.active, .skill-suggest-item:hover { background: rgba(213, 223, 115, .06); }
 
-    .workspace-menu {
-      border-color: var(--border);
-      border-radius: 15px;
-      background: rgba(18, 27, 21, .98);
-      box-shadow: var(--shadow-panel), inset 0 1px 0 rgba(255, 255, 255, .035);
-      backdrop-filter: blur(20px);
-    }
-    .workspace-menu-head { min-height: 46px; border-bottom-color: var(--border-subtle); padding: 8px 10px 8px 13px; }
     .workspace-file { border: 0; border-radius: 9px; margin: 2px 6px; width: calc(100% - 12px); padding: 9px 10px; }
     .workspace-file:hover { border: 0; background: rgba(213, 223, 115, .055); color: var(--text-primary); }
     .agent-chat-shell > aside.preview-pane,
@@ -1035,8 +1064,8 @@
 
     @media (max-width: 1250px) {
       .agent-chat-shell.side-open { grid-template-columns: minmax(0, 1fr) clamp(340px, 44%, 620px); }
-      .agent-meta-chip span { display: none; }
-      .agent-meta-chip { padding: 0 6px; }
+      .agent-chat-tools .runtime-tool span { display: none; }
+      .agent-chat-tools .runtime-tool { padding: 6px; }
     }
     @media (max-width: 1120px) {
       .app { grid-template-columns: 58px 248px minmax(0, 1fr); }
@@ -1114,10 +1143,8 @@
                 </div>
               </div>
               <div class="agent-chat-tools" aria-label="Workspace tools">
-                <button id="toggleWorkspaceFiles" class="secondary" title="Session files">Files</button>
-                <button id="togglePlansPane" class="secondary" title="WorkPlans">Plans</button>
-                <button id="toggleArtifactsPane" class="secondary" title="Artifacts">Artifacts</button>
-                <button id="toggleBlackboardPane" class="secondary" title="Blackboard">Blackboard</button>
+                <div id="agentRuntimeTools" class="agent-runtime-tools" aria-label="Agent runtime views"></div>
+                <span class="agent-tool-separator" aria-hidden="true"></span>
                 <button id="togglePreviewPane" class="secondary" title="Preview">Preview</button>
               </div>
             </header>
@@ -1150,13 +1177,6 @@
             </div>
             <div id="sidePaneBody" class="preview-frame-wrap"></div>
           </aside>
-        </div>
-        <div id="workspaceMenu" class="workspace-menu">
-          <div class="workspace-menu-head">
-            <strong>Session files</strong>
-            <button id="refreshWorkspaceFiles" class="secondary icon" title="Refresh files">↻</button>
-          </div>
-          <div id="workspaceFileList" class="workspace-file-list custom-scrollbar"></div>
         </div>
       </div>
       <div id="taskView" class="view">
@@ -1390,7 +1410,7 @@
   </div>
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script>
-    const state = { settings: null, projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], archive: [], workspaceFiles: [], preview: null, sidePanel: null, agentWorkingById: {}, chatMessages: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
+    const state = { settings: null, projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, sidePanel: null, agentWorkingById: {}, chatMessages: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
     let taskPollTimer = null;
     let agentPollTimer = null;
     let runtimeStateRefreshTimer = null;
@@ -1761,41 +1781,21 @@
       const boardCount = (state.blackboard || []).length;
       const role = titleCaseCompact(shortAgentRole());
       const workText = currentAgentWorking() ? ' · Working' : '';
-      const chip = (panel, label, count) => '<button class="agent-meta-chip ' + (state.sidePanel === panel ? 'active' : '') + '" data-side-panel="' + panel + '" title="Open ' + label + '"><span>' + label + '</span> <strong>' + count + '</strong></button>';
-      $('agentHeaderMeta').innerHTML = '<span class="agent-meta-role">' + escapeHTML(role + workText) + '</span>'
-        + chip('inbox', 'Inbox', (state.inbox || []).length)
-        + chip('memory', 'Memory', (state.memory || []).length)
-        + chip('pending', 'Pending', pending)
+      const chip = (panel, label, count, title, attention = 0) => '<button class="runtime-tool secondary ' + (state.sidePanel === panel ? 'active' : '') + '" data-side-panel="' + panel + '" title="' + escapeHTML(title || ('Open ' + label)) + '"><span>' + label + '</span><strong>' + count + '</strong>' + (attention > 0 ? '<i title="' + attention + ' pending" aria-label="' + attention + ' pending"></i>' : '') + '</button>';
+      $('agentHeaderMeta').textContent = role + workText;
+      $('agentRuntimeTools').innerHTML = chip('inbox', 'Inbox', (state.inbox || []).length)
+        + chip('plans', 'Plans', (state.plans || []).filter(item => !['completed', 'cancelled'].includes(item.status)).length, 'Open WorkPlans')
 		+ chip('artifacts', 'Artifacts', (state.artifacts || []).filter(item => item.status !== 'superseded').length)
-        + chip('plans', 'Plans', (state.plans || []).filter(item => !['completed', 'cancelled'].includes(item.status)).length)
-        + chip('blackboard', 'Board', boardCount);
+        + chip('memory', 'Memory', (state.memory || []).length, pending > 0 ? ('Open Memory · ' + pending + ' pending') : 'Open Memory', pending)
+        + chip('blackboard', 'Activity', boardCount, 'Open agent activity');
       $('agentHeaderMeta').title = 'inbox ' + (state.inbox || []).length + ' · memory ' + (state.memory || []).length + ' · pending ' + pending + ' · blackboard ' + boardCount + ' · archived ' + (state.archive || []).length;
       renderAgentWorkingState();
       if (['blackboard', 'artifacts', 'plans', 'inbox', 'memory', 'pending'].includes(state.sidePanel)) renderSidePane();
     }
-    async function loadWorkspaceFiles(render = true) {
+    async function loadWorkspaceFiles() {
       if (!state.project || !state.agent) return;
       const res = await api('/api/projects/' + state.project.id + '/agents/' + encodeURIComponent(currentAgentID()) + '/workspace/files').catch(() => ({ data: [] }));
       state.workspaceFiles = res.data || [];
-      if (render) renderWorkspaceFiles();
-    }
-    function renderWorkspaceFiles() {
-      const box = $('workspaceFileList');
-      box.innerHTML = '';
-      if (!state.workspaceFiles.length) {
-        const empty = document.createElement('div');
-        empty.className = 'muted';
-        empty.textContent = 'No generated files.';
-        box.appendChild(empty);
-        return;
-      }
-      state.workspaceFiles.forEach(file => {
-        const b = document.createElement('button');
-        b.className = 'workspace-file';
-        b.innerHTML = '<strong>' + escapeHTML(file.filename) + '</strong><div class="muted">' + escapeHTML(file.path) + ' · ' + formatBytes(file.size_bytes || 0) + '</div>';
-        b.onclick = () => openWorkspaceFile(file.path);
-        box.appendChild(b);
-      });
     }
     async function openWorkspaceFile(path) {
       if (!state.project || !state.agent) return;
@@ -1803,7 +1803,6 @@
       state.preview = preview;
       state.sidePanel = 'preview';
       renderSidePane();
-      $('workspaceMenu').classList.remove('open');
     }
     function closeSidePane() {
       state.sidePanel = null;
@@ -1828,10 +1827,7 @@
       const open = !!state.sidePanel && (state.sidePanel !== 'preview' || !!state.preview);
       shell.classList.toggle('side-open', open);
       $('togglePreviewPane').classList.toggle('active', state.sidePanel === 'preview' && !!state.preview);
-      $('toggleBlackboardPane').classList.toggle('active', state.sidePanel === 'blackboard');
-	  $('toggleArtifactsPane').classList.toggle('active', state.sidePanel === 'artifacts');
-      $('togglePlansPane').classList.toggle('active', state.sidePanel === 'plans');
-      document.querySelectorAll('#agentHeaderMeta button[data-side-panel]').forEach(button => {
+      document.querySelectorAll('#agentRuntimeTools button[data-side-panel]').forEach(button => {
         button.classList.toggle('active', state.sidePanel === button.dataset.sidePanel);
       });
       if (!open) {
@@ -2007,8 +2003,26 @@
 	function renderArtifactsPane(body) {
 	  $('sidePaneTitle').textContent = 'Artifacts';
 	  const entries = (state.artifacts || []).filter(item => item.status !== 'superseded');
-	  body.innerHTML = '<div class="blackboard-view"><div class="blackboard-section-title">Artifact registry · ' + entries.length + '</div><div id="artifactList" class="blackboard-log custom-scrollbar"></div></div>';
+	  const fileCount = (state.workspaceFiles || []).length;
+	  body.innerHTML = '<div class="blackboard-view"><div class="artifact-view-tabs"><button data-artifact-view="registry" class="' + (state.artifactView === 'registry' ? 'active' : '') + '">Registry · ' + entries.length + '</button><button data-artifact-view="files" class="' + (state.artifactView === 'files' ? 'active' : '') + '">Workspace files' + (fileCount ? ' · ' + fileCount : '') + '</button></div><div id="artifactList" class="blackboard-log custom-scrollbar"></div></div>';
+	  body.querySelectorAll('[data-artifact-view]').forEach(button => {
+		button.onclick = () => setArtifactView(button.dataset.artifactView);
+	  });
 	  const list = $('artifactList');
+	  if (state.artifactView === 'files') {
+		if (!state.workspaceFiles.length) {
+		  list.innerHTML = '<div class="muted" style="padding:12px">No workspace files for this agent.</div>';
+		  return;
+		}
+		state.workspaceFiles.forEach(file => {
+		  const item = document.createElement('button');
+		  item.className = 'workspace-file';
+		  item.innerHTML = '<strong>' + escapeHTML(file.filename) + '</strong><div class="muted">' + escapeHTML(file.path) + ' · ' + formatBytes(file.size_bytes || 0) + '</div>';
+		  item.onclick = () => openWorkspaceFile(file.path);
+		  list.appendChild(item);
+		});
+		return;
+	  }
 	  if (!entries.length) {
 		list.innerHTML = '<div class="muted" style="padding:12px">No Artifacts yet.</div>';
 		return;
@@ -2048,6 +2062,12 @@
 		}
 		list.appendChild(item);
 	  });
+	}
+	async function setArtifactView(view) {
+	  state.artifactView = view === 'files' ? 'files' : 'registry';
+	  if (state.artifactView === 'files') await loadWorkspaceFiles();
+	  state.sidePanel = 'artifacts';
+	  renderSidePane();
 	}
 	async function openArtifactPreview(artifactID) {
 	  const preview = await api('/api/projects/' + state.project.id + '/artifacts/' + encodeURIComponent(artifactID) + '/preview');
@@ -2712,58 +2732,23 @@
       renderExtraWorkspaces();
       openModal('settingsModal');
     };
-    $('toggleWorkspaceFiles').onclick = async () => {
-      await loadWorkspaceFiles(true);
-      const menu = $('workspaceMenu');
-      menu.classList.toggle('open');
-      if (menu.classList.contains('open')) positionWorkspaceMenu();
-    };
-    $('agentHeaderMeta').onclick = async (event) => {
+    $('agentRuntimeTools').onclick = async (event) => {
       const button = event.target.closest('button[data-side-panel]');
       if (!button) return;
       await openRuntimePanel(button.dataset.sidePanel);
-    };
-    $('refreshWorkspaceFiles').onclick = async () => {
-      await loadWorkspaceFiles(true);
-      positionWorkspaceMenu();
     };
     $('togglePreviewPane').onclick = async () => {
       if (state.sidePanel === 'preview') {
         closeSidePane();
         return;
       }
-      await loadWorkspaceFiles(false);
+      await loadWorkspaceFiles();
       const first = state.workspaceFiles.find(file => /\.html?$/i.test(file.filename)) || state.workspaceFiles[0];
       if (first) await openWorkspaceFile(first.path);
     };
-    $('toggleBlackboardPane').onclick = async () => {
-      await openRuntimePanel('blackboard');
-    };
-	$('toggleArtifactsPane').onclick = async () => {
-	  await openRuntimePanel('artifacts');
-	};
-	$('togglePlansPane').onclick = async () => {
-	  await openRuntimePanel('plans');
-	};
     $('closeSidePane').onclick = () => {
       closeSidePane();
     };
-    window.addEventListener('resize', () => {
-      if ($('workspaceMenu').classList.contains('open')) positionWorkspaceMenu();
-    });
-    function positionWorkspaceMenu() {
-      const button = $('toggleWorkspaceFiles');
-      const menu = $('workspaceMenu');
-      const rect = button.getBoundingClientRect();
-      const gap = 8;
-      const width = menu.offsetWidth || Math.min(320, window.innerWidth - 32);
-      const height = menu.offsetHeight || 240;
-      const left = Math.min(Math.max(8, rect.right - width), window.innerWidth - width - 8);
-      const top = Math.min(Math.max(8, rect.bottom + gap), window.innerHeight - height - 8);
-      menu.style.left = left + 'px';
-      menu.style.top = top + 'px';
-      menu.style.right = 'auto';
-    }
     $('openAddAgent').onclick = async () => {
       if (!state.project) return notify('Select a project first.', 'error');
       await loadAgentTemplates();
@@ -3068,7 +3053,7 @@
         }
         await loadTasks();
         await loadResidentRuntimeState();
-        await loadWorkspaceFiles(false);
+        await loadWorkspaceFiles();
         const latestHTML = state.workspaceFiles.find(file => /\.html?$/i.test(file.filename));
         if (latestHTML) await openWorkspaceFile(latestHTML.path);
       } catch (err) {
