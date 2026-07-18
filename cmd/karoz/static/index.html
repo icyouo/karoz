@@ -1539,6 +1539,19 @@
       $('agentView').classList.toggle('active', view === 'agent');
       $('taskView').classList.toggle('active', view === 'task');
     }
+    async function switchViewAndRefresh(view) {
+      switchView(view);
+      if (!state.project) return;
+      try {
+        if (view === 'agent') {
+          await refreshAgentStates();
+        } else {
+          await loadTasks();
+        }
+      } catch (err) {
+        notify('Could not refresh the ' + view + ' list: ' + err.message, 'error');
+      }
+    }
     async function loadAgents() {
       if (!state.project) return;
       const projectID = state.project.id;
@@ -2790,8 +2803,8 @@
         document.querySelectorAll('.modal-backdrop.open').forEach(modal => closeModal(modal.id));
       }
     });
-    $('agentTab').onclick = () => switchView('agent');
-    $('taskTab').onclick = () => switchView('task');
+    $('agentTab').onclick = () => { void switchViewAndRefresh('agent'); };
+    $('taskTab').onclick = () => { void switchViewAndRefresh('task'); };
     $('addRoleTab').onclick = () => setAddAgentMode('role');
     $('addTeamTab').onclick = () => setAddAgentMode('team');
     function setAddAgentMode(mode) {
