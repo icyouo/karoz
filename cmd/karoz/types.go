@@ -25,6 +25,9 @@ type app struct {
 	memories              map[string][]AgentMemoryEntry
 	blackboard            map[string][]AgentBlackboardEntry
 	artifacts             map[string][]Artifact
+	groups                map[string][]AgentGroup
+	groupInbox            map[string][]GroupInboxMessage
+	plans                 map[string][]WorkPlan
 	inbox                 map[string][]AgentInboxMessage
 	taskHooks             map[string][]TaskRuntimeHook
 	agentRoutes           map[string][]AgentRoute
@@ -188,6 +191,11 @@ type Task struct {
 	Description    string     `json:"description"`
 	Goal           string     `json:"goal"`
 	ArtifactIDs    []string   `json:"artifact_ids,omitempty"`
+	OwnerAgentID   string     `json:"owner_agent_id,omitempty"`
+	PlanID         string     `json:"plan_id,omitempty"`
+	PlanStepID     string     `json:"plan_step_id,omitempty"`
+	Attempt        int        `json:"attempt,omitempty"`
+	ParentTaskID   string     `json:"parent_task_id,omitempty"`
 	Result         string     `json:"result,omitempty"`
 	FailureSummary string     `json:"failure_summary,omitempty"`
 	WorktreePath   string     `json:"worktree_path,omitempty"`
@@ -264,11 +272,12 @@ type AgentTeamCreateResponse struct {
 }
 
 type AgentTeam struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Agents      []AgentTeamMember `json:"agents"`
-	Edges       []AgentTeamEdge   `json:"edges"`
+	ID                  string            `json:"id"`
+	Name                string            `json:"name"`
+	Description         string            `json:"description"`
+	CoordinatorMemberID string            `json:"coordinator_member_id"`
+	Agents              []AgentTeamMember `json:"agents"`
+	Edges               []AgentTeamEdge   `json:"edges"`
 }
 
 type AgentTeamMember struct {
@@ -352,11 +361,16 @@ type AgentInterrupt = runtimedomain.Interrupt
 type codexToolCall = tooldomain.Call
 
 type TaskCreateRequest struct {
-	Type        string   `json:"type"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	Goal        string   `json:"goal"`
-	ArtifactIDs []string `json:"artifact_ids,omitempty"`
+	Type         string   `json:"type"`
+	Title        string   `json:"title"`
+	Description  string   `json:"description"`
+	Goal         string   `json:"goal"`
+	ArtifactIDs  []string `json:"artifact_ids,omitempty"`
+	OwnerAgentID string   `json:"owner_agent_id,omitempty"`
+	PlanID       string   `json:"plan_id,omitempty"`
+	PlanStepID   string   `json:"plan_step_id,omitempty"`
+	Attempt      int      `json:"attempt,omitempty"`
+	ParentTaskID string   `json:"parent_task_id,omitempty"`
 }
 
 type TaskLogResponse struct {

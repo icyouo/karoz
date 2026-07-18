@@ -203,7 +203,7 @@ func residentAgentManagementToolSpecs() []map[string]any {
 }
 
 func (a *app) residentToolSpecsForContext(ctx context.Context, toolCtx ResidentToolContext) []map[string]any {
-	all := residentToolSpecs()
+	all := append(residentToolSpecs(), residentPlanToolSpecs()...)
 	if capabilitiesForAgent(toolCtx.Agent).CanManageAgents {
 		all = append(all, residentAgentManagementToolSpecs()...)
 	}
@@ -226,7 +226,7 @@ func toolNameFromSpec(spec map[string]any) string {
 
 func residentDynamicToolsAllowed(toolCtx ResidentToolContext) bool {
 	turnType := normalizeChatTurnType(toolCtx.TurnType)
-	return turnType == "plan" || turnType == "dev"
+	return turnType == "dev"
 }
 
 func residentToolAllowed(toolCtx ResidentToolContext, name string) bool {
@@ -239,9 +239,11 @@ func residentToolAllowed(toolCtx ResidentToolContext, name string) bool {
 	turnType := normalizeChatTurnType(toolCtx.TurnType)
 	switch name {
 	case "write_workspace_file", "show_preview":
-		return turnType == "plan" || turnType == "dev"
+		return turnType == "dev"
 	case "create_task", "update_task_status":
 		return turnType == "dev"
+	case "save_plan_draft", "submit_plan", "advance_plan":
+		return turnType == "plan"
 	case "list_agent_templates", "add_agent", "create_agent_team", "delete_agent":
 		return capabilitiesForAgent(toolCtx.Agent).CanManageAgents
 	default:

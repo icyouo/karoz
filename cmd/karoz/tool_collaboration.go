@@ -7,6 +7,10 @@ import (
 )
 
 func (a *app) sendToAgent(projectID, sourceAgentID, parentRunID string, args map[string]any) string {
+	return a.sendToAgentWithRoute(projectID, sourceAgentID, parentRunID, args, false)
+}
+
+func (a *app) sendToAgentWithRoute(projectID, sourceAgentID, parentRunID string, args map[string]any, groupRouted bool) string {
 	targetAgentRef := toolStringArg(args, "target_agent_id", 128)
 	body := toolStringArg(args, "body", 20000)
 	if targetAgentRef == "" || body == "" {
@@ -19,6 +23,19 @@ func (a *app) sendToAgent(projectID, sourceAgentID, parentRunID string, args map
 	target, ok := a.projectAgent(project, targetAgentRef)
 	if !ok || target.ID == sourceAgentID {
 		return toolJSON(map[string]any{"error": "invalid_target", "message": "target agent must exist and differ from source"})
+	}
+	if !groupRouted {
+		targetGroup, targetGrouped := a.groupForAgent(projectID, target.ID)
+		sourceGroup, sourceGrouped := a.groupForAgent(projectID, sourceAgentID)
+		if targetGrouped && sourceAgentID == "karoz" {
+			return toolJSON(map[string]any{"error": "group_route_required", "message": "Karoz communicates with a group inbox, not directly with group members", "group_id": targetGroup.ID})
+		}
+		if targetGrouped && (!sourceGrouped || sourceGroup.ID != targetGroup.ID) {
+			if sourceGrouped && sourceGroup.CoordinatorAgentID != sourceAgentID {
+				return toolJSON(map[string]any{"error": "group_coordinator_required", "message": "only the source group coordinator may communicate across groups"})
+			}
+			return toolJSON(map[string]any{"error": "group_route_required", "message": "cross-group work must target the destination group inbox", "group_id": targetGroup.ID})
+		}
 	}
 	intent := toolStringArg(args, "intent", 64)
 	if intent == "" {
@@ -171,6 +188,8 @@ func (a *app) replyToInboxMessage(projectID, sourceAgentID, parentRunID string, 
 		return toolJSON(map[string]any{"error": "save_failed", "message": err.Error()})
 	}
 	a.markInboxReplied(projectID, sourceAgentID, original.ID, body, msg.ID)
+	a.recordPlanReviewDelivery(projectID, original.ID, sourceAgentID, body)
+	a.recordPlanGroupDelivery(projectID, original.ID, body)
 	a.appendAgentMessage(projectID, original.SourceAgentID, "system", "reply", "[peer]<from:"+a.agentNickname(project, sourceAgentID)+"> "+subject+"\n\n"+body)
 	a.triggerAgentHandoffResponse(project, target, msg)
 	return toolJSON(map[string]any{"message_id": msg.ID, "reply_to_id": original.ID, "correlation_id": msg.CorrelationID, "parent_run_id": msg.ParentRunID, "status": HandoffDelivered, "target": map[string]any{"nickname": a.agentNickname(project, original.SourceAgentID)}, "delivery": map[string]any{"state": HandoffDelivered, "retry_required": false, "auto_response": true}})

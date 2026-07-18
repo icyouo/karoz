@@ -135,8 +135,30 @@ func (a *app) residentToolRegistry() *tooldomain.Registry[ResidentToolContext] {
 			"mark_activity": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				return a.markBlackboardActivity(toolCtx.Project.ID, toolCtx.Agent, args), nil
 			},
+			"list_groups": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.listGroupsFromResidentTool(toolCtx.Project.ID), nil
+			},
+			"send_to_group": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.sendToGroup(toolCtx.Project.ID, toolCtx.Agent.ID, toolCtx.RunID, args), nil
+			},
+			"list_plans": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.listPlansFromResidentTool(toolCtx.Project.ID), nil
+			},
+			"get_plan": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.getPlanFromResidentTool(toolCtx.Project.ID, args), nil
+			},
+			"save_plan_draft": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.savePlanDraftFromResidentTool(toolCtx.Project, toolCtx.Agent, args), nil
+			},
+			"submit_plan": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.submitPlanFromResidentTool(toolCtx.Project.ID, toolCtx.Agent, args), nil
+			},
+			"advance_plan": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.advancePlanFromResidentTool(toolCtx.Project, toolCtx.Agent, args), nil
+			},
 		}
-		specs := append(residentToolSpecs(), residentAgentManagementToolSpecs()...)
+		specs := append(residentToolSpecs(), residentPlanToolSpecs()...)
+		specs = append(specs, residentAgentManagementToolSpecs()...)
 		for _, spec := range specs {
 			definition := definitionFromResidentToolSpec(spec)
 			handler, exists := handlers[definition.Name]
@@ -194,7 +216,7 @@ func residentToolHasSideEffects(name string) bool {
 	switch name {
 	case "repo_list", "repo_read", "repo_search", "list_skills", "read_skill",
 		"web_search", "web_fetch", "search_archive", "list_pending", "get_messages",
-		"list_artifacts", "get_artifact", "list_agent_templates":
+		"list_artifacts", "get_artifact", "list_agent_templates", "list_groups", "list_plans", "get_plan":
 		return false
 	default:
 		return true

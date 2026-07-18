@@ -14,6 +14,7 @@ import (
 const (
 	ScheduledRunHandoff       = runtimedomain.ScheduledHandoff
 	ScheduledRunTaskEvent     = runtimedomain.ScheduledTaskEvent
+	ScheduledRunPlanEvent     = runtimedomain.ScheduledPlanEvent
 	ScheduledRunIdleReconcile = runtimedomain.ScheduledIdleReconcile
 )
 
@@ -35,6 +36,13 @@ type HandoffRunPayload struct {
 type TaskEventRunPayload struct {
 	TaskID string `json:"task_id"`
 	HookID string `json:"hook_id"`
+}
+
+type PlanEventRunPayload struct {
+	PlanID string `json:"plan_id"`
+	StepID string `json:"step_id,omitempty"`
+	Event  string `json:"event"`
+	TaskID string `json:"task_id,omitempty"`
 }
 
 type IdleReconcileRunPayload struct {
@@ -190,6 +198,8 @@ func (a *app) executeScheduledRun(ctx context.Context, job ScheduledRun) error {
 		return a.executeHandoffScheduledRun(ctx, job)
 	case ScheduledRunTaskEvent:
 		return a.executeTaskEventScheduledRun(ctx, job)
+	case ScheduledRunPlanEvent:
+		return a.executePlanEventScheduledRun(ctx, job)
 	case ScheduledRunIdleReconcile:
 		return a.executeIdleReconcileScheduledRun(ctx, job)
 	default:

@@ -51,15 +51,16 @@ func residentAgentTemplateByID(id string) (AgentTemplate, bool) {
 }
 
 func defaultKarozAgentTemplate() AgentTemplate {
-	return agentTemplate("karoz", "Karoz", "Karoz", "coordinate project goals, resident agents, artifacts, and tracked execution", "Act as the project's resident chief of staff. Help the user directly, coordinate other agents only when useful, keep project work moving, and converge results into clear decisions, artifacts, or tasks.", "K", "Coordinates project-wide work while remaining a direct resident Agent.")
+	return agentTemplate("karoz", "Karoz", "Karoz", "route project goals, manage resident capabilities, and coordinate groups", "Act as the project's control-plane coordinator. Receive user intent, inspect project-level state, reuse or provision the smallest suitable agent or group, and route business execution to that owner. Manage agents, groups, plans, tasks, conflicts, and escalations, but do not become the ordinary executor or WorkPlan owner. Communicate with grouped agents through their group coordinator.", "K", "Routes project work, manages groups, and coordinates execution without owning ordinary business tasks.")
 }
 
 func residentAgentTeams() []AgentTeam {
 	return []AgentTeam{
 		{
-			ID:          "build-lane",
-			Name:        "Build Lane",
-			Description: "Default engineering lane: architect plans, builder implements, reviewer validates.",
+			ID:                  "build-lane",
+			Name:                "Build Lane",
+			Description:         "Default engineering lane: architect plans, builder implements, reviewer validates.",
+			CoordinatorMemberID: "architect",
 			Agents: []AgentTeamMember{
 				{ID: "architect", Nickname: "architect", TemplateID: "architect", Role: "design phased work, ownership, dependencies, and handoffs", AcceptFrom: []string{"builder", "reviewer"}, ReportTo: []string{"builder", "reviewer"}, StartupOrder: 1},
 				{ID: "builder", Nickname: "builder", TemplateID: "implementation-lead", Role: "implement approved slices", AcceptFrom: []string{"architect", "reviewer"}, ReportTo: []string{"reviewer"}, StartupOrder: 2, DependsOn: []string{"architect"}},
@@ -68,9 +69,10 @@ func residentAgentTeams() []AgentTeam {
 			Edges: []AgentTeamEdge{{From: "architect", To: "builder", Kind: "task"}, {From: "builder", To: "reviewer", Kind: "review"}, {From: "reviewer", To: "builder", Kind: "task"}, {From: "reviewer", To: "architect", Kind: "task"}},
 		},
 		{
-			ID:          "build-ultra",
-			Name:        "Build Ultra",
-			Description: "High-parallelism build lane for large, explicitly splittable engineering work.",
+			ID:                  "build-ultra",
+			Name:                "Build Ultra",
+			Description:         "High-parallelism build lane for large, explicitly splittable engineering work.",
+			CoordinatorMemberID: "pmo",
 			Agents: []AgentTeamMember{
 				{ID: "pmo", Nickname: "pmo", TemplateID: "pmo-coordinator", Role: "coordinate builders, track progress, enforce delivery cadence", AcceptFrom: []string{"builder-1", "builder-2", "builder-3", "builder-4", "reviewer"}, ReportTo: []string{"builder-1", "builder-2", "builder-3", "builder-4", "reviewer"}, StartupOrder: 1},
 				{ID: "builder-1", Nickname: "builder-1", TemplateID: "implementation-lead", Role: "implement PMO-assigned slice 1 without duplicating other builders", AcceptFrom: []string{"pmo", "reviewer"}, ReportTo: []string{"pmo", "reviewer"}, StartupOrder: 2, DependsOn: []string{"pmo"}},
@@ -87,9 +89,10 @@ func residentAgentTeams() []AgentTeam {
 			},
 		},
 		{
-			ID:          "product-discovery",
-			Name:        "Product Discovery",
-			Description: "Pre-implementation lane that turns vague product intent into scoped technical plans.",
+			ID:                  "product-discovery",
+			Name:                "Product Discovery",
+			Description:         "Pre-implementation lane that turns vague product intent into scoped technical plans.",
+			CoordinatorMemberID: "facilitator",
 			Agents: []AgentTeamMember{
 				{ID: "facilitator", Nickname: "facilitator", TemplateID: "product-strategist", Role: "clarify the real problem and define a narrow wedge", AcceptFrom: []string{"challenger", "architect"}, ReportTo: []string{"challenger", "architect"}, StartupOrder: 1},
 				{ID: "challenger", Nickname: "challenger", TemplateID: "research-scan", Role: "challenge scope and leverage", AcceptFrom: []string{"facilitator", "architect"}, ReportTo: []string{"architect"}, StartupOrder: 2, DependsOn: []string{"facilitator"}},
@@ -98,9 +101,10 @@ func residentAgentTeams() []AgentTeam {
 			Edges: []AgentTeamEdge{{From: "facilitator", To: "challenger", Kind: "task"}, {From: "facilitator", To: "architect", Kind: "task"}, {From: "challenger", To: "architect", Kind: "review"}},
 		},
 		{
-			ID:          "ui-polish",
-			Name:        "UI Polish",
-			Description: "UI execution lane: audit, focused frontend polish, and UX regression validation.",
+			ID:                  "ui-polish",
+			Name:                "UI Polish",
+			Description:         "UI execution lane: audit, focused frontend polish, and UX regression validation.",
+			CoordinatorMemberID: "designer",
 			Agents: []AgentTeamMember{
 				{ID: "designer", Nickname: "designer", TemplateID: "product-designer", Role: "audit the interface and produce concrete design refinements", AcceptFrom: []string{"refiner", "qa"}, ReportTo: []string{"refiner", "qa"}, StartupOrder: 1},
 				{ID: "refiner", Nickname: "refiner", TemplateID: "frontend-specialist", Role: "implement focused UI and interaction refinements", AcceptFrom: []string{"designer", "qa"}, ReportTo: []string{"qa"}, StartupOrder: 2, DependsOn: []string{"designer"}},
@@ -109,9 +113,10 @@ func residentAgentTeams() []AgentTeam {
 			Edges: []AgentTeamEdge{{From: "designer", To: "refiner", Kind: "task"}, {From: "designer", To: "qa", Kind: "review"}, {From: "refiner", To: "qa", Kind: "task"}, {From: "qa", To: "refiner", Kind: "review"}},
 		},
 		{
-			ID:          "verify-ship",
-			Name:        "Verify Ship",
-			Description: "Post-change verification lane for an existing implementation before release or merge.",
+			ID:                  "verify-ship",
+			Name:                "Verify Ship",
+			Description:         "Post-change verification lane for an existing implementation before release or merge.",
+			CoordinatorMemberID: "release",
 			Agents: []AgentTeamMember{
 				{ID: "qa", Nickname: "qa", TemplateID: "qa-driver", Role: "validate existing implementation user flows and capture reproducible defects", AcceptFrom: []string{"debugger", "release"}, ReportTo: []string{"debugger", "release"}, StartupOrder: 1},
 				{ID: "debugger", Nickname: "debugger", TemplateID: "debug-investigator", Role: "identify root cause for hard failures", AcceptFrom: []string{"qa", "release"}, ReportTo: []string{"release"}, StartupOrder: 2, DependsOn: []string{"qa"}},

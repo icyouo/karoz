@@ -209,7 +209,7 @@ func TestCreateAgentTeamCreatesGroupedAgentsAndRoutes(t *testing.T) {
 			t.Fatalf("agent missing group tag: %+v", agent)
 		}
 	}
-	if len(resp.Routes) != 9 {
+	if len(resp.Routes) != 7 {
 		t.Fatalf("routes = %+v", resp.Routes)
 	}
 	var reviewer, architect Agent
@@ -1262,7 +1262,8 @@ func toolSpecNames(specs []map[string]any) map[string]bool {
 
 func TestResidentToolRegistryCoversStaticDefinitions(t *testing.T) {
 	a := &app{}
-	expected := toolSpecNames(append(residentToolSpecs(), residentAgentManagementToolSpecs()...))
+	expectedSpecs := append(residentToolSpecs(), residentPlanToolSpecs()...)
+	expected := toolSpecNames(append(expectedSpecs, residentAgentManagementToolSpecs()...))
 	definitions := a.residentToolRegistry().Definitions()
 	if len(definitions) != len(expected) {
 		t.Fatalf("registry definitions = %d, expected %d", len(definitions), len(expected))

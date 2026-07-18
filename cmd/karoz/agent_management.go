@@ -201,6 +201,13 @@ func (a *app) createAgentTeam(project Project, req AgentTeamCreateRequest) (Agen
 		agents = append(agents, agent)
 		memberIDToAgentID[member.ID] = agent.ID
 	}
+	coordinatorAgentID := memberIDToAgentID[team.CoordinatorMemberID]
+	if coordinatorAgentID == "" && len(agents) > 0 {
+		coordinatorAgentID = agents[0].ID
+	}
+	if _, err := a.upsertAgentGroup(project.ID, groupID, team.Name, team.ID, coordinatorAgentID, agents); err != nil {
+		return AgentTeamCreateResponse{}, err
+	}
 	routes := a.routesForProject(project.ID)
 	routeSeen := map[string]bool{}
 	routeDirectionSeen := map[string]bool{}
@@ -231,12 +238,7 @@ func (a *app) createAgentTeam(project Project, req AgentTeamCreateRequest) (Agen
 		routeSeen[key] = true
 		routeDirectionSeen[directionKey] = true
 	}
-	for _, member := range agents {
-		if member.ID == "karoz" {
-			continue
-		}
-		appendRoute("karoz", member.ID, "request")
-	}
+	appendRoute("karoz", coordinatorAgentID, "request")
 	// Edge kinds provide the preferred semantic intent for the explicit workflow.
 	for _, edge := range team.Edges {
 		from := memberIDToAgentID[edge.From]
@@ -320,6 +322,9 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	if agentID == "karoz" {
 		return fmt.Errorf("default agent cannot be deleted")
 	}
+	if group, ok := a.groupForAgent(project.ID, agentID); ok && group.CoordinatorAgentID == agentID {
+		return fmt.Errorf("group coordinator cannot be deleted before coordination is transferred")
+	}
 	key := agentMessageKey(project.ID, agentID)
 	a.mu.Lock()
 	agents := a.agents[project.ID]
@@ -364,7 +369,7 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	if err := a.saveAgentRoutes(); err != nil {
 		return err
 	}
-	return nil
+	return a.reconcileAgentGroups()
 }
 
 func (a *app) routesForProject(projectID string) []AgentRoute {

@@ -101,7 +101,7 @@ func TestResidentToolPolicyAndReadOnlyRepositoryTools(t *testing.T) {
 		t.Fatalf("ask policy = %+v", ask)
 	}
 	plan := askSpecs("plan")
-	if !plan["write_workspace_file"] || !plan["bash"] || plan["create_task"] {
+	if plan["write_workspace_file"] || !plan["bash"] || plan["create_task"] || !plan["save_plan_draft"] || !plan["advance_plan"] {
 		t.Fatalf("plan policy = %+v", plan)
 	}
 	dev := askSpecs("dev")

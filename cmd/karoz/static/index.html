@@ -1115,6 +1115,7 @@
               </div>
               <div class="agent-chat-tools" aria-label="Workspace tools">
                 <button id="toggleWorkspaceFiles" class="secondary" title="Session files">Files</button>
+                <button id="togglePlansPane" class="secondary" title="WorkPlans">Plans</button>
                 <button id="toggleArtifactsPane" class="secondary" title="Artifacts">Artifacts</button>
                 <button id="toggleBlackboardPane" class="secondary" title="Blackboard">Blackboard</button>
                 <button id="togglePreviewPane" class="secondary" title="Preview">Preview</button>
@@ -1389,7 +1390,7 @@
   </div>
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script>
-    const state = { settings: null, projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], archive: [], workspaceFiles: [], preview: null, sidePanel: null, agentWorkingById: {}, chatMessages: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
+    const state = { settings: null, projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], archive: [], workspaceFiles: [], preview: null, sidePanel: null, agentWorkingById: {}, chatMessages: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
     let taskPollTimer = null;
     let agentPollTimer = null;
     let runtimeStateRefreshTimer = null;
@@ -1738,17 +1739,21 @@
       const projectID = state.project.id;
       const agentID = currentAgentID();
       const agentPath = '/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID);
-      const [inbox, memory, blackboard, artifactPayload] = await Promise.all([
+      const [inbox, memory, blackboard, artifactPayload, groupPayload, planPayload] = await Promise.all([
         api(agentPath + '/inbox').catch(() => []),
         api(agentPath + '/memory').catch(() => []),
         api('/api/projects/' + projectID + '/agent-blackboard').catch(() => []),
 		api('/api/projects/' + projectID + '/artifacts').catch(() => ({ artifacts: [] })),
+        api('/api/projects/' + projectID + '/groups').catch(() => ({ groups: [] })),
+        api('/api/projects/' + projectID + '/plans').catch(() => ({ plans: [] })),
       ]);
       if (!state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       state.inbox = inbox || [];
       state.memory = memory || [];
       state.blackboard = blackboard || [];
 	  state.artifacts = (artifactPayload && artifactPayload.artifacts) || [];
+      state.groups = (groupPayload && groupPayload.groups) || [];
+      state.plans = (planPayload && planPayload.plans) || [];
       renderRuntimeStrip();
     }
     function renderRuntimeStrip() {
@@ -1762,10 +1767,11 @@
         + chip('memory', 'Memory', (state.memory || []).length)
         + chip('pending', 'Pending', pending)
 		+ chip('artifacts', 'Artifacts', (state.artifacts || []).filter(item => item.status !== 'superseded').length)
+        + chip('plans', 'Plans', (state.plans || []).filter(item => !['completed', 'cancelled'].includes(item.status)).length)
         + chip('blackboard', 'Board', boardCount);
       $('agentHeaderMeta').title = 'inbox ' + (state.inbox || []).length + ' · memory ' + (state.memory || []).length + ' · pending ' + pending + ' · blackboard ' + boardCount + ' · archived ' + (state.archive || []).length;
       renderAgentWorkingState();
-      if (['blackboard', 'artifacts', 'inbox', 'memory', 'pending'].includes(state.sidePanel)) renderSidePane();
+      if (['blackboard', 'artifacts', 'plans', 'inbox', 'memory', 'pending'].includes(state.sidePanel)) renderSidePane();
     }
     async function loadWorkspaceFiles(render = true) {
       if (!state.project || !state.agent) return;
@@ -1824,6 +1830,7 @@
       $('togglePreviewPane').classList.toggle('active', state.sidePanel === 'preview' && !!state.preview);
       $('toggleBlackboardPane').classList.toggle('active', state.sidePanel === 'blackboard');
 	  $('toggleArtifactsPane').classList.toggle('active', state.sidePanel === 'artifacts');
+      $('togglePlansPane').classList.toggle('active', state.sidePanel === 'plans');
       document.querySelectorAll('#agentHeaderMeta button[data-side-panel]').forEach(button => {
         button.classList.toggle('active', state.sidePanel === button.dataset.sidePanel);
       });
@@ -1841,6 +1848,10 @@
 		  renderArtifactsPane(body);
 		  return;
 		}
+        if (state.sidePanel === 'plans') {
+          renderPlansPane(body);
+          return;
+        }
         if (state.sidePanel === 'inbox') {
           renderRuntimeListPane(body, 'Inbox', state.inbox || [], renderInboxEntry);
           return;
@@ -1952,6 +1963,47 @@
         list.appendChild(item);
       });
     }
+	function renderPlansPane(body) {
+	  $('sidePaneTitle').textContent = 'WorkPlans';
+	  const entries = state.plans || [];
+	  body.innerHTML = '<div class="blackboard-view"><div class="blackboard-section-title">Durable todo orchestration · ' + entries.length + '</div><div id="planList" class="blackboard-log custom-scrollbar"></div></div>';
+	  const list = $('planList');
+	  if (!entries.length) {
+		list.innerHTML = '<div class="muted" style="padding:12px">No WorkPlans yet. Use Plan mode with a non-Karoz agent to create one.</div>';
+		return;
+	  }
+	  entries.forEach(plan => {
+		const item = document.createElement('div');
+		item.className = 'blackboard-entry';
+		const done = (plan.steps || []).filter(step => ['completed', 'skipped'].includes(step.status)).length;
+		const group = (state.groups || []).find(entry => entry.id === plan.owner_group_id);
+		item.innerHTML = '<div class="blackboard-entry-head"><span class="blackboard-entry-kind">' + escapeHTML(plan.status || 'draft') + '</span><span class="blackboard-entry-time">' + done + '/' + (plan.steps || []).length + '</span></div>'
+		  + '<div class="blackboard-entry-summary">' + escapeHTML(plan.title || plan.id) + '</div>'
+		  + '<div class="blackboard-entry-meta">Owner: ' + escapeHTML(group ? group.name + ' coordinator · ' + plan.owner_agent_id : plan.owner_agent_id) + '</div>'
+		  + '<div class="blackboard-entry-detail">' + escapeHTML(plan.goal || '') + '</div>'
+		  + '<div class="blackboard-entry-detail">' + (plan.steps || []).map(step => escapeHTML((step.status || 'pending') + ' · ' + step.title)).join('<br>') + '</div>'
+		  + '<div class="artifact-actions"></div>';
+		const actions = item.querySelector('.artifact-actions');
+		if (plan.status === 'draft') {
+		  const submit = document.createElement('button'); submit.className = 'secondary'; submit.textContent = 'Submit';
+		  submit.onclick = () => submitPlanFromUI(plan); actions.appendChild(submit);
+		}
+		if (plan.status === 'awaiting_approval' || plan.status === 'draft' || plan.status === 'paused') {
+		  const activate = document.createElement('button'); activate.textContent = plan.status === 'paused' ? 'Resume' : 'Approve & start';
+		  activate.onclick = () => activatePlanFromUI(plan); actions.appendChild(activate);
+		}
+		list.appendChild(item);
+	  });
+	}
+	async function submitPlanFromUI(plan) {
+	  await api('/api/projects/' + state.project.id + '/plans/' + encodeURIComponent(plan.id) + '/submit', { method: 'POST', body: JSON.stringify({ actor_id: 'user', expected_version: plan.version }) });
+	  await loadResidentRuntimeState(); state.sidePanel = 'plans'; renderSidePane();
+	}
+	async function activatePlanFromUI(plan) {
+	  await api('/api/projects/' + state.project.id + '/plans/' + encodeURIComponent(plan.id) + '/activate', { method: 'POST', body: JSON.stringify({ approved_by: 'user', expected_version: plan.version }) });
+	  await loadResidentRuntimeState(); state.sidePanel = 'plans'; renderSidePane();
+	}
+
 	function renderArtifactsPane(body) {
 	  $('sidePaneTitle').textContent = 'Artifacts';
 	  const entries = (state.artifacts || []).filter(item => item.status !== 'superseded');
@@ -2689,6 +2741,9 @@
     };
 	$('toggleArtifactsPane').onclick = async () => {
 	  await openRuntimePanel('artifacts');
+	};
+	$('togglePlansPane').onclick = async () => {
+	  await openRuntimePanel('plans');
 	};
     $('closeSidePane').onclick = () => {
       closeSidePane();

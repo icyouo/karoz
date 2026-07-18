@@ -54,7 +54,7 @@ func TestResidentRuntimeUsesProviderAndDynamicToolPorts(t *testing.T) {
 	if err != nil || output != "provider output" {
 		t.Fatalf("provider output = %q err=%v", output, err)
 	}
-	toolCtx := ResidentToolContext{Project: project, Agent: agent, Workdir: project.Path, TurnType: "plan"}
+	toolCtx := ResidentToolContext{Project: project, Agent: agent, Workdir: project.Path, TurnType: "dev"}
 	specs := toolSpecNames(a.residentToolSpecsForContext(context.Background(), toolCtx))
 	if !specs["mcp__fake__echo"] {
 		t.Fatalf("dynamic specs = %+v", specs)

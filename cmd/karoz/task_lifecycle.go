@@ -10,17 +10,22 @@ func (a *app) createTask(project Project, req TaskCreateRequest) Task {
 	now := time.Now().UTC()
 	typ := normalizeTaskType(req.Type)
 	task := Task{
-		ID:          taskID(),
-		ProjectID:   project.ID,
-		Type:        typ,
-		Status:      "pending",
-		Title:       firstNonEmpty(strings.TrimSpace(req.Title), defaultTaskTitle(typ)),
-		Description: strings.TrimSpace(req.Description),
-		Goal:        strings.TrimSpace(req.Goal),
-		ArtifactIDs: append([]string{}, req.ArtifactIDs...),
-		BaseBranch:  project.DefaultBranch,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           taskID(),
+		ProjectID:    project.ID,
+		Type:         typ,
+		Status:       "pending",
+		Title:        firstNonEmpty(strings.TrimSpace(req.Title), defaultTaskTitle(typ)),
+		Description:  strings.TrimSpace(req.Description),
+		Goal:         strings.TrimSpace(req.Goal),
+		ArtifactIDs:  append([]string{}, req.ArtifactIDs...),
+		OwnerAgentID: strings.TrimSpace(req.OwnerAgentID),
+		PlanID:       strings.TrimSpace(req.PlanID),
+		PlanStepID:   strings.TrimSpace(req.PlanStepID),
+		Attempt:      req.Attempt,
+		ParentTaskID: strings.TrimSpace(req.ParentTaskID),
+		BaseBranch:   project.DefaultBranch,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 	a.mu.Lock()
 	a.tasks[project.ID] = append([]Task{task}, a.tasks[project.ID]...)

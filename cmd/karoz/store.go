@@ -24,6 +24,12 @@ func (a *app) bootstrap() error {
 	if err := a.loadAgents(); err != nil {
 		return err
 	}
+	if err := a.loadProjectCoordinationState(); err != nil {
+		return err
+	}
+	if err := a.reconcileAgentGroups(); err != nil {
+		return err
+	}
 	if err := a.loadArtifacts(); err != nil {
 		return err
 	}

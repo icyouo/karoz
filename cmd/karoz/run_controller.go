@@ -11,6 +11,7 @@ const (
 	RunTriggerUserDirect = runtimedomain.TriggerUserDirect
 	RunTriggerHandoff    = runtimedomain.TriggerHandoff
 	RunTriggerTaskEvent  = runtimedomain.TriggerTaskEvent
+	RunTriggerPlanEvent  = runtimedomain.TriggerPlanEvent
 	RunTriggerSystem     = runtimedomain.TriggerSystem
 )
 

@@ -9,6 +9,9 @@ import (
 )
 
 func (a *app) notifyTaskRuntimeHooks(project Project, task Task) {
+	if plan, changed := a.markPlanTaskTerminal(project.ID, task); changed {
+		a.schedulePlanEvent(project.ID, plan.OwnerAgentID, plan.ID, task.PlanStepID, "task_terminal", task.ID)
+	}
 	key := project.ID + "/" + task.ID
 	success := task.Status == "done"
 	summary := task.Result
@@ -47,6 +50,9 @@ func (a *app) notifyTaskRuntimeHooks(project Project, task Task) {
 }
 
 func (a *app) triggerAgentTaskEvent(project Project, task Task, hook TaskRuntimeHook) {
+	if task.PlanID != "" {
+		return
+	}
 	if strings.EqualFold(os.Getenv("KAROZ_AGENT_AUTO_RESPOND"), "0") || strings.EqualFold(os.Getenv("KAROZ_AGENT_AUTO_RESPOND"), "false") {
 		return
 	}

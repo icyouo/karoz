@@ -28,6 +28,10 @@ func (a *app) handleProjectScoped(w http.ResponseWriter, r *http.Request) {
 		a.handleProjectSkills(w, r, project)
 	case "agent-teams":
 		a.handleAgentTeams(w, r, project, parts[2:])
+	case "groups":
+		a.handleGroups(w, r, project, parts[2:])
+	case "plans":
+		a.handlePlans(w, r, project, parts[2:])
 	case "agent-blackboard":
 		a.handleAgentBlackboard(w, r, project)
 	case "artifacts":

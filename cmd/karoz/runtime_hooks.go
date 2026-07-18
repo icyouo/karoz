@@ -105,6 +105,12 @@ func (a *app) maybeTriggerKarozIdleReconcile(event RuntimeEvent) {
 	if event.Kind == "handoff_created" || event.Kind == "handoff_changed" {
 		return
 	}
+	// Active WorkPlans have their own owner and event loop. Karoz observes them
+	// but must not race their coordinator by treating plan transitions as idle
+	// project backlog.
+	if event.Kind == "plan_changed" {
+		return
+	}
 	a.mu.Lock()
 	hasKaroz := false
 	for _, agent := range a.agents[event.ProjectID] {
@@ -274,7 +280,7 @@ func (a *app) taskBacklog(projectID string, limit int) []Task {
 	a.mu.Unlock()
 	var out []Task
 	for _, task := range items {
-		if taskStatusIsBacklog(task.Status) {
+		if task.PlanID == "" && taskStatusIsBacklog(task.Status) {
 			out = append(out, task)
 			if limit > 0 && len(out) >= limit {
 				break

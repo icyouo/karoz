@@ -11,12 +11,13 @@ const (
 	TriggerUserDirect Trigger = "user_direct"
 	TriggerHandoff    Trigger = "handoff"
 	TriggerTaskEvent  Trigger = "task_event"
+	TriggerPlanEvent  Trigger = "plan_event"
 	TriggerSystem     Trigger = "system"
 )
 
 func NormalizeTrigger(trigger Trigger) Trigger {
 	switch trigger {
-	case TriggerUserDirect, TriggerHandoff, TriggerTaskEvent, TriggerSystem:
+	case TriggerUserDirect, TriggerHandoff, TriggerTaskEvent, TriggerPlanEvent, TriggerSystem:
 		return trigger
 	default:
 		return TriggerSystem
@@ -100,6 +101,7 @@ type ScheduledKind string
 const (
 	ScheduledHandoff       ScheduledKind = "handoff"
 	ScheduledTaskEvent     ScheduledKind = "task_event"
+	ScheduledPlanEvent     ScheduledKind = "plan_event"
 	ScheduledIdleReconcile ScheduledKind = "idle_reconcile"
 )
 
