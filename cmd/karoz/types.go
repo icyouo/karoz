@@ -300,6 +300,7 @@ type AgentTeamEdge struct {
 type AgentUpdateRequest struct {
 	Nickname     string  `json:"nickname"`
 	SystemPrompt *string `json:"system_prompt"`
+	ChatMode     *string `json:"chat_mode"`
 }
 
 type CLI2APIRequest struct {

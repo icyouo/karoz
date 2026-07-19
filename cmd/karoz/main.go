@@ -42,6 +42,7 @@ func main() {
 		log.Printf("recover interrupted tasks: %v", err)
 	}
 	a.resumeScheduledRuns()
+	a.resumeActionablePlans()
 
 	addr := getenv("KAROZ_ADDR", "127.0.0.1:8088")
 	log.Printf("karoz listening on %s projects_root=%s data_dir=%s", addr, a.settings.ProjectsRoot, a.settings.DataDir)

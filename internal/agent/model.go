@@ -23,6 +23,7 @@ type Agent struct {
 	GroupOrder    int        `json:"group_order,omitempty"`
 	Type          string     `json:"type"`
 	Runtime       string     `json:"runtime"`
+	ChatMode      string     `json:"chat_mode,omitempty"`
 	SessionID     string     `json:"session_id"`
 	State         string     `json:"state"`
 	StatusMessage string     `json:"status_message"`

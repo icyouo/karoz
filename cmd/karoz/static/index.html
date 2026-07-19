@@ -927,6 +927,214 @@
     .blackboard-entry { padding: 15px 14px; transition: background .2s ease; }
     .blackboard-entry:hover { background: rgba(255, 255, 255, .018); }
 
+    .preview-head #closeSidePane {
+      width: 30px;
+      height: 30px;
+      border-color: transparent;
+      background: transparent;
+      color: var(--text-tertiary);
+    }
+    .preview-head #closeSidePane:hover {
+      border-color: var(--border-subtle);
+      background: rgba(255, 255, 255, .035);
+      color: var(--text-primary);
+      box-shadow: none;
+    }
+    .plan-view {
+      display: flex;
+      width: 100%;
+      min-height: 100%;
+      flex-direction: column;
+      background:
+        radial-gradient(circle at 100% 0, rgba(213, 223, 115, .045), transparent 21rem),
+        var(--bg-root);
+    }
+    .plan-list { min-height: 0; flex: 1; overflow: auto; }
+    .plan-card {
+      position: relative;
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 21px 18px 25px;
+      overflow: hidden;
+    }
+    .plan-card::before {
+      content: "";
+      position: absolute;
+      top: 21px;
+      bottom: 25px;
+      left: 0;
+      width: 2px;
+      background: var(--border-subtle);
+    }
+    .plan-card[data-plan-status="active"]::before,
+    .plan-card[data-plan-status="reviewing"]::before { background: var(--accent-muted); }
+    .plan-card-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .plan-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--text-secondary);
+      font: 650 9.5px/14px var(--font-mono);
+      letter-spacing: .045em;
+      text-transform: uppercase;
+    }
+    .plan-status::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      border: 1px solid currentColor;
+      box-shadow: inset 0 0 0 1px var(--bg-root);
+    }
+    .plan-card[data-plan-status="active"] .plan-status,
+    .plan-card[data-plan-status="reviewing"] .plan-status { color: var(--accent); }
+    .plan-card[data-plan-status="active"] .plan-status::before,
+    .plan-card[data-plan-status="reviewing"] .plan-status::before { background: currentColor; }
+    .plan-progress-copy {
+      color: var(--text-tertiary);
+      font: 550 9.5px/14px var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+    .plan-title {
+      margin: 12px 0 0;
+      max-width: 32ch;
+      color: var(--text-primary);
+      font-size: 16px;
+      line-height: 1.35;
+      font-weight: 660;
+      letter-spacing: -.018em;
+      text-wrap: balance;
+    }
+    .plan-goal {
+      display: -webkit-box;
+      max-width: 64ch;
+      margin: 10px 0 0;
+      overflow: hidden;
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.65;
+      text-wrap: pretty;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 3;
+    }
+    .plan-context {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px 14px;
+      margin-top: 13px;
+      color: var(--text-tertiary);
+      font: 500 9.5px/14px var(--font-mono);
+    }
+    .plan-context span { display: inline-flex; min-width: 0; align-items: center; gap: 6px; }
+    .plan-context span::before { content: "↳"; color: var(--accent-muted); }
+    .plan-progress-track {
+      height: 3px;
+      margin-top: 17px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .055);
+    }
+    .plan-progress-track i {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--accent);
+      box-shadow: 0 0 12px rgba(213, 223, 115, .24);
+      transition: width .35s var(--ease-out);
+    }
+    .plan-steps-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 22px;
+      padding-bottom: 7px;
+      color: var(--text-tertiary);
+      font: 620 9px/14px var(--font-mono);
+      letter-spacing: .055em;
+      text-transform: uppercase;
+    }
+    .plan-steps-head span:last-child { letter-spacing: 0; text-transform: none; }
+    .plan-steps { border-top: 1px solid var(--border-subtle); }
+    .plan-step { border-bottom: 1px solid var(--border-subtle); }
+    .plan-step > summary {
+      display: grid;
+      grid-template-columns: 20px minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: start;
+      padding: 11px 2px;
+      cursor: pointer;
+      list-style: none;
+      transition: background .18s ease, color .18s ease;
+    }
+    .plan-step > summary::-webkit-details-marker { display: none; }
+    .plan-step > summary:hover { background: rgba(255, 255, 255, .018); }
+    .plan-step > summary:focus-visible { outline: 1px solid var(--accent-muted); outline-offset: -1px; }
+    .plan-step-marker {
+      display: inline-flex;
+      width: 15px;
+      height: 15px;
+      align-items: center;
+      justify-content: center;
+      margin-top: 1px;
+      border: 1px solid #445149;
+      border-radius: 50%;
+      color: var(--text-tertiary);
+      font: 700 8px/1 var(--font-mono);
+    }
+    .plan-step.status-completed .plan-step-marker {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--accent-ink);
+    }
+    .plan-step.status-reviewing .plan-step-marker,
+    .plan-step.status-in_progress .plan-step-marker {
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(213, 223, 115, .055);
+    }
+    .plan-step.status-blocked .plan-step-marker { border-color: #d47970; color: #e29a92; }
+    .plan-step.status-skipped .plan-step-marker { border-style: dashed; }
+    .plan-step-copy { min-width: 0; }
+    .plan-step-copy strong {
+      display: block;
+      color: var(--text-primary);
+      font-size: 11.5px;
+      line-height: 1.45;
+      font-weight: 570;
+      overflow-wrap: anywhere;
+    }
+    .plan-step.status-pending .plan-step-copy strong { color: var(--text-secondary); }
+    .plan-step-copy small {
+      display: block;
+      margin-top: 3px;
+      color: var(--text-tertiary);
+      font: 500 9px/13px var(--font-mono);
+    }
+    .plan-step-tail {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: #59655e;
+      font: 500 8.5px/14px var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+    .plan-step-tail::after { content: "⌄"; color: var(--text-tertiary); transition: transform .18s ease; }
+    .plan-step[open] .plan-step-tail::after { transform: rotate(180deg); }
+    .plan-step-detail { padding: 0 2px 15px 30px; color: var(--text-secondary); }
+    .plan-step-detail > p { max-width: 62ch; margin: 0; font-size: 11px; line-height: 1.6; text-wrap: pretty; }
+    .plan-step-detail-meta { margin-top: 8px; color: var(--text-tertiary); font: 500 8.5px/13px var(--font-mono); }
+    .plan-criteria { margin-top: 13px; }
+    .plan-criteria > span { color: var(--text-tertiary); font: 620 8.5px/13px var(--font-mono); letter-spacing: .05em; text-transform: uppercase; }
+    .plan-criteria ul { display: grid; gap: 7px; margin: 8px 0 0; padding: 0; list-style: none; }
+    .plan-criteria li { position: relative; padding-left: 14px; color: var(--text-secondary); font-size: 10.5px; line-height: 1.5; }
+    .plan-criteria li::before { content: "·"; position: absolute; left: 2px; color: var(--accent-muted); }
+    .plan-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding-top: 16px; }
+    .plan-actions:empty { display: none; }
+    .plan-actions button { min-width: 0; padding: 7px 10px; font-size: 10px; }
+    .plan-empty { display: grid; min-height: 260px; place-items: center; padding: 28px; text-align: center; }
+    .plan-empty strong { display: block; color: var(--text-primary); font-size: 13px; font-weight: 630; }
+    .plan-empty span { display: block; max-width: 34ch; margin-top: 7px; color: var(--text-tertiary); font-size: 11px; line-height: 1.55; }
+
     #taskView.active {
       padding: clamp(18px, 3vw, 34px);
       background:
@@ -1173,7 +1381,7 @@
           <aside id="sidePane" class="preview-pane">
             <div class="preview-head">
               <strong id="sidePaneTitle">Preview</strong>
-              <button id="closeSidePane" class="secondary icon" title="Close panel">×</button>
+              <button id="closeSidePane" class="secondary icon" title="Close panel" aria-label="Close panel"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
             </div>
             <div id="sidePaneBody" class="preview-frame-wrap"></div>
           </aside>
@@ -1417,6 +1625,7 @@
     let runtimeEvents = null;
     let runtimeEventsProjectID = '';
     let projectSelectionSeq = 0;
+    let chatModeSaveSerial = 0;
     let pendingConfirmation = null;
     const $ = (id) => document.getElementById(id);
     function notify(message, kind = 'error') {
@@ -1728,8 +1937,63 @@
         .map(part => part.slice(0, 1).toUpperCase() + part.slice(1))
         .join(' ');
     }
+    function normalizeAgentChatType(value) {
+      const mode = String(value || '').trim().toLowerCase();
+      return ['ask', 'plan', 'dev'].includes(mode) ? mode : 'ask';
+    }
+    function renderAgentChatType() {
+      document.querySelectorAll('.chat-mode').forEach(button => {
+        const active = button.dataset.chatType === state.chatType;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+      });
+    }
+    function restoreAgentChatType() {
+      state.chatType = normalizeAgentChatType(state.agent && state.agent.chat_mode);
+      renderAgentChatType();
+    }
+    async function saveAgentChatType(value) {
+      if (!state.project || !state.agent) return;
+      const mode = normalizeAgentChatType(value);
+      const projectID = state.project.id;
+      const agentID = state.agent.id;
+      const previous = normalizeAgentChatType(state.agent.chat_mode);
+      const serial = ++chatModeSaveSerial;
+      state.chatType = mode;
+      state.agent.chat_mode = mode;
+      const localAgent = state.agents.find(agent => agent.id === agentID);
+      if (localAgent) localAgent.chat_mode = mode;
+      renderAgentChatType();
+      document.querySelectorAll('.chat-mode').forEach(button => { button.disabled = true; });
+      try {
+        const updated = await api('/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID), { method: 'PATCH', body: JSON.stringify({ chat_mode: mode }) });
+        if (state.project && state.project.id === projectID) {
+          const index = state.agents.findIndex(agent => agent.id === agentID);
+          if (index >= 0) state.agents[index] = updated;
+          if (state.agent && state.agent.id === agentID && state.chatType === mode) {
+            state.agent = updated;
+            state.chatType = normalizeAgentChatType(updated.chat_mode);
+            renderAgentChatType();
+          }
+        }
+      } catch (err) {
+        if (state.project && state.project.id === projectID) {
+          const item = state.agents.find(agent => agent.id === agentID);
+          if (item) item.chat_mode = previous;
+          if (state.agent && state.agent.id === agentID && state.chatType === mode) {
+            state.agent.chat_mode = previous;
+            state.chatType = previous;
+            renderAgentChatType();
+          }
+        }
+        notify('Could not save agent mode: ' + (err.message || String(err)), 'error');
+      } finally {
+        if (serial === chatModeSaveSerial) document.querySelectorAll('.chat-mode').forEach(button => { button.disabled = false; });
+      }
+    }
     function updateAgentChrome() {
       const label = currentAgentLabel();
+      restoreAgentChatType();
       $('agentMessage').placeholder = 'Message ' + label + '...';
       $('agentStatus').textContent = label + ' resident session';
       $('agentHeaderName').textContent = label;
@@ -1959,33 +2223,92 @@
         list.appendChild(item);
       });
     }
+	function planStatusLabel(status, step = false) {
+	  const labels = step
+		? { pending: 'Queued', in_progress: 'In progress', reviewing: 'In review', completed: 'Complete', blocked: 'Blocked', skipped: 'Skipped' }
+		: { draft: 'Draft', awaiting_approval: 'Awaiting approval', active: 'Active', paused: 'Paused', completed: 'Complete', cancelled: 'Cancelled', failed: 'Failed' };
+	  return labels[status] || titleCaseCompact(String(status || (step ? 'pending' : 'draft')).replace(/_/g, ' '));
+	}
+	function compactPlanActor(agentID) {
+	  if (!agentID) return 'Unassigned';
+	  const agent = (state.agents || []).find(entry => entry.id === agentID);
+	  if (agent) return agent.nickname || agent.display_name || agent.short_name || agent.name || agentID;
+	  const parts = String(agentID).split('-').filter(Boolean);
+	  return titleCaseCompact(parts[parts.length - 1] || agentID);
+	}
+	function planStepMarker(status) {
+	  return status === 'completed' ? '✓' : status === 'reviewing' ? '◇' : status === 'in_progress' ? '•' : status === 'blocked' ? '!' : status === 'skipped' ? '—' : '';
+	}
+	function planStepMeta(step) {
+	  const status = step.status || 'pending';
+	  if (status === 'reviewing') {
+		const pendingReview = (step.reviews || []).find(review => review.status === 'pending');
+		return pendingReview ? 'Review pending · ' + compactPlanActor(pendingReview.reviewer_agent_id) : 'Awaiting review';
+	  }
+	  if (status === 'pending' && (step.dependencies || []).length) return 'Waiting on ' + step.dependencies.join(', ');
+	  return planStatusLabel(status, true) + ' · ' + compactPlanActor(step.assigned_agent_id);
+	}
+	function conflictingGroupPlan(plan) {
+	  if (!plan || plan.owner_type !== 'group' || !plan.owner_group_id) return null;
+	  return (state.plans || []).find(candidate => candidate.id !== plan.id && candidate.owner_type === 'group' && candidate.owner_group_id === plan.owner_group_id && ['active', 'paused'].includes(candidate.status)) || null;
+	}
 	function renderPlansPane(body) {
-	  $('sidePaneTitle').textContent = 'WorkPlans';
+	  $('sidePaneTitle').textContent = 'Plans';
 	  const entries = state.plans || [];
-	  body.innerHTML = '<div class="blackboard-view"><div class="blackboard-section-title">Durable todo orchestration · ' + entries.length + '</div><div id="planList" class="blackboard-log custom-scrollbar"></div></div>';
+	  body.innerHTML = '<div class="plan-view">'
+		+ '<div id="planList" class="plan-list custom-scrollbar"></div>'
+		+ '</div>';
 	  const list = $('planList');
 	  if (!entries.length) {
-		list.innerHTML = '<div class="muted" style="padding:12px">No WorkPlans yet. Use Plan mode with a non-Karoz agent to create one.</div>';
+		list.innerHTML = '<div class="plan-empty"><div><strong>No plans yet</strong><span>Switch a resident agent to Plan mode to turn a complex request into tracked execution steps.</span></div></div>';
 		return;
 	  }
 	  entries.forEach(plan => {
-		const item = document.createElement('div');
-		item.className = 'blackboard-entry';
-		const done = (plan.steps || []).filter(step => ['completed', 'skipped'].includes(step.status)).length;
+		const steps = plan.steps || [];
+		const done = steps.filter(step => ['completed', 'skipped'].includes(step.status)).length;
+		const reviewing = steps.filter(step => step.status === 'reviewing').length;
+		const running = steps.filter(step => step.status === 'in_progress').length;
+		const queued = steps.filter(step => !step.status || step.status === 'pending').length;
 		const group = (state.groups || []).find(entry => entry.id === plan.owner_group_id);
-		item.innerHTML = '<div class="blackboard-entry-head"><span class="blackboard-entry-kind">' + escapeHTML(plan.status || 'draft') + '</span><span class="blackboard-entry-time">' + done + '/' + (plan.steps || []).length + '</span></div>'
-		  + '<div class="blackboard-entry-summary">' + escapeHTML(plan.title || plan.id) + '</div>'
-		  + '<div class="blackboard-entry-meta">Owner: ' + escapeHTML(group ? group.name + ' coordinator · ' + plan.owner_agent_id : plan.owner_agent_id) + '</div>'
-		  + '<div class="blackboard-entry-detail">' + escapeHTML(plan.goal || '') + '</div>'
-		  + '<div class="blackboard-entry-detail">' + (plan.steps || []).map(step => escapeHTML((step.status || 'pending') + ' · ' + step.title)).join('<br>') + '</div>'
-		  + '<div class="artifact-actions"></div>';
-		const actions = item.querySelector('.artifact-actions');
+		const owner = group ? (group.name + ' · ' + compactPlanActor(plan.owner_agent_id)) : compactPlanActor(plan.owner_agent_id);
+		const percent = steps.length ? Math.round((done / steps.length) * 100) : 0;
+		const stepSummary = [[running, 'running'], [reviewing, 'in review'], [queued, 'queued']].filter(entry => entry[0]).map(entry => entry[0] + ' ' + entry[1]).join(' · ') || 'all resolved';
+		const item = document.createElement('article');
+		item.className = 'plan-card';
+		item.dataset.planStatus = plan.status || 'draft';
+		item.innerHTML = '<div class="plan-card-head"><span class="plan-status">' + escapeHTML(planStatusLabel(plan.status)) + '</span><span class="plan-progress-copy">' + done + ' of ' + steps.length + ' complete</span></div>'
+		  + '<h3 class="plan-title">' + escapeHTML(plan.title || plan.id) + '</h3>'
+		  + (plan.goal ? '<p class="plan-goal" title="' + escapeHTML(plan.goal) + '">' + escapeHTML(plan.goal) + '</p>' : '')
+		  + '<div class="plan-context"><span title="' + escapeHTML(plan.owner_agent_id || '') + '">' + escapeHTML(owner) + '</span><span>max ' + escapeHTML(String(plan.max_concurrency || 1)) + ' parallel</span><span>revision ' + escapeHTML(String(plan.revision || 1)) + '</span></div>'
+		  + '<div class="plan-progress-track" role="progressbar" aria-label="Plan progress" aria-valuemin="0" aria-valuemax="' + steps.length + '" aria-valuenow="' + done + '"><i style="width:' + percent + '%"></i></div>'
+		  + '<div class="plan-steps-head"><span>Execution</span><span>' + stepSummary + '</span></div>'
+		  + '<div class="plan-steps"></div>'
+		  + '<div class="plan-actions"></div>';
+		const stepList = item.querySelector('.plan-steps');
+		steps.forEach((step, index) => {
+		  const status = step.status || 'pending';
+		  const detail = document.createElement('details');
+		  detail.className = 'plan-step status-' + status;
+		  const dependencies = (step.dependencies || []).length ? '<div class="plan-step-detail-meta">Depends on · ' + escapeHTML(step.dependencies.join(', ')) + '</div>' : '';
+		  const criteria = (step.acceptance_criteria || []).length
+			? '<div class="plan-criteria"><span>Acceptance</span><ul>' + step.acceptance_criteria.map(criterion => '<li>' + escapeHTML(criterion) + '</li>').join('') + '</ul></div>'
+			: '';
+		  detail.innerHTML = '<summary><span class="plan-step-marker" aria-hidden="true">' + planStepMarker(status) + '</span><span class="plan-step-copy"><strong>' + escapeHTML(step.title || step.id) + '</strong><small>' + escapeHTML(planStepMeta(step)) + '</small></span><span class="plan-step-tail">' + String(index + 1).padStart(2, '0') + '</span></summary>'
+			+ '<div class="plan-step-detail">' + (step.description ? '<p>' + escapeHTML(step.description) + '</p>' : '') + dependencies + criteria + '</div>';
+		  stepList.appendChild(detail);
+		});
+		const actions = item.querySelector('.plan-actions');
 		if (plan.status === 'draft') {
-		  const submit = document.createElement('button'); submit.className = 'secondary'; submit.textContent = 'Submit';
+		  const submit = document.createElement('button'); submit.className = 'secondary'; submit.textContent = 'Submit for approval';
 		  submit.onclick = () => submitPlanFromUI(plan); actions.appendChild(submit);
 		}
 		if (plan.status === 'awaiting_approval' || plan.status === 'draft' || plan.status === 'paused') {
-		  const activate = document.createElement('button'); activate.textContent = plan.status === 'paused' ? 'Resume' : 'Approve & start';
+		  const conflict = conflictingGroupPlan(plan);
+		  const activate = document.createElement('button'); activate.textContent = plan.status === 'paused' ? 'Resume plan' : 'Approve & start';
+		  if (conflict) {
+			activate.disabled = true;
+			activate.title = 'This group is already running ' + (conflict.title || conflict.id);
+		  }
 		  activate.onclick = () => activatePlanFromUI(plan); actions.appendChild(activate);
 		}
 		list.appendChild(item);
@@ -1996,8 +2319,13 @@
 	  await loadResidentRuntimeState(); state.sidePanel = 'plans'; renderSidePane();
 	}
 	async function activatePlanFromUI(plan) {
-	  await api('/api/projects/' + state.project.id + '/plans/' + encodeURIComponent(plan.id) + '/activate', { method: 'POST', body: JSON.stringify({ approved_by: 'user', expected_version: plan.version }) });
-	  await loadResidentRuntimeState(); state.sidePanel = 'plans'; renderSidePane();
+	  try {
+		await api('/api/projects/' + state.project.id + '/plans/' + encodeURIComponent(plan.id) + '/activate', { method: 'POST', body: JSON.stringify({ approved_by: 'user', expected_version: plan.version }) });
+		await loadResidentRuntimeState(); state.sidePanel = 'plans'; renderSidePane();
+	  } catch (err) {
+		notify(err.message || String(err), 'error');
+		await loadResidentRuntimeState(); state.sidePanel = 'plans'; renderSidePane();
+	  }
 	}
 
 	function renderArtifactsPane(body) {
@@ -2859,13 +3187,7 @@
       $('teamCreateFields').hidden = state.addMode !== 'team';
     }
     document.querySelectorAll('.chat-mode').forEach(button => {
-      button.onclick = () => {
-        state.chatType = button.dataset.chatType || 'ask';
-        document.querySelectorAll('.chat-mode').forEach(item => {
-          item.classList.toggle('active', item === button);
-          item.setAttribute('aria-selected', String(item === button));
-        });
-      };
+      button.onclick = () => saveAgentChatType(button.dataset.chatType || 'ask');
     });
     async function loadAgentTemplates() {
       if (state.templates.length) return;

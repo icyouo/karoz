@@ -84,6 +84,7 @@ func (a *app) agentWithRuntimeState(project Project, agent Agent) Agent {
 	if strings.TrimSpace(agent.Runtime) == "" {
 		agent.Runtime = "resident"
 	}
+	agent.ChatMode = normalizeChatTurnType(agent.ChatMode)
 	if strings.TrimSpace(agent.State) == "" {
 		agent.State = "idle"
 	}
@@ -300,6 +301,14 @@ func (a *app) updateProjectAgent(project Project, agentID string, req AgentUpdat
 		}
 		if req.SystemPrompt != nil {
 			agents[i].SystemPrompt = strings.TrimSpace(*req.SystemPrompt)
+		}
+		if req.ChatMode != nil {
+			mode := strings.ToLower(strings.TrimSpace(*req.ChatMode))
+			if mode != "ask" && mode != "plan" && mode != "dev" {
+				a.mu.Unlock()
+				return Agent{}, errors.New("chat_mode must be ask, plan, or dev")
+			}
+			agents[i].ChatMode = mode
 		}
 		agents[i].UpdatedAt = time.Now().UTC()
 		a.agents[project.ID] = agents

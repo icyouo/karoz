@@ -135,7 +135,15 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 			return
 		}
 		userText = messageTextWithAttachments(userText, attachments)
-		turnType := normalizeChatTurnType(req.Type)
+		turnType := normalizeChatTurnType(firstNonEmpty(req.Type, agent.ChatMode))
+		if turnType != agent.ChatMode {
+			updated, updateErr := a.updateProjectAgent(project, agent.ID, AgentUpdateRequest{ChatMode: &turnType})
+			if updateErr != nil {
+				writeError(w, http.StatusInternalServerError, updateErr)
+				return
+			}
+			agent = updated
+		}
 		run, started := a.beginAgentRun(AgentRunInput{ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: turnType})
 		messageStored := false
 		if !started {

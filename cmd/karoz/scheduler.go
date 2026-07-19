@@ -39,10 +39,11 @@ type TaskEventRunPayload struct {
 }
 
 type PlanEventRunPayload struct {
-	PlanID string `json:"plan_id"`
-	StepID string `json:"step_id,omitempty"`
-	Event  string `json:"event"`
-	TaskID string `json:"task_id,omitempty"`
+	PlanID      string `json:"plan_id"`
+	PlanVersion int64  `json:"plan_version,omitempty"`
+	StepID      string `json:"step_id,omitempty"`
+	Event       string `json:"event"`
+	TaskID      string `json:"task_id,omitempty"`
 }
 
 type IdleReconcileRunPayload struct {

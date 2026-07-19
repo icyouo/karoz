@@ -264,29 +264,58 @@ func (a *app) reconcilePlanHistory(project Project, actor Agent, req PlanHistory
 }
 
 func (a *app) activatePlan(project Project, planID, approvedBy string, expectedVersion int64) (WorkPlan, error) {
-	plan, ok := a.planByID(project.ID, planID)
-	if !ok {
+	now := time.Now().UTC()
+	a.mu.Lock()
+	items := a.plans[project.ID]
+	planIndex := -1
+	for i := range items {
+		if items[i].ID == planID {
+			planIndex = i
+			break
+		}
+	}
+	if planIndex < 0 {
+		a.mu.Unlock()
 		return WorkPlan{}, errors.New("plan not found")
 	}
+	plan := items[planIndex]
+	if expectedVersion > 0 && plan.Version != expectedVersion {
+		a.mu.Unlock()
+		return WorkPlan{}, errors.New("plan version changed; reload before updating")
+	}
 	if plan.Status != PlanAwaitingApproval && plan.Status != PlanDraft && plan.Status != PlanPaused {
+		a.mu.Unlock()
 		return WorkPlan{}, errors.New("plan cannot be activated from status " + plan.Status)
 	}
-	now := time.Now().UTC()
+	if plan.OwnerType == "group" && strings.TrimSpace(plan.OwnerGroupID) != "" {
+		for _, candidate := range items {
+			if candidate.ID == plan.ID || candidate.OwnerType != "group" || candidate.OwnerGroupID != plan.OwnerGroupID || !planReservesGroupExecutionSlot(candidate.Status) {
+				continue
+			}
+			a.mu.Unlock()
+			return WorkPlan{}, fmt.Errorf("group %s already has execution plan %q (%s); complete or cancel it before activating another", plan.OwnerGroupID, candidate.Title, candidate.ID)
+		}
+	}
 	previousStatus := plan.Status
 	plan.Status = PlanActive
 	plan.ApprovedBy = firstNonEmpty(strings.TrimSpace(approvedBy), "user")
 	plan.ApprovedAt = &now
 	refreshReadyPlanSteps(&plan)
-	updated, err := a.replacePlan(plan, expectedVersion)
-	if err != nil {
-		return WorkPlan{}, err
-	}
+	plan.Version++
+	plan.UpdatedAt = now
+	items[planIndex] = plan
+	a.plans[project.ID] = items
+	a.mu.Unlock()
 	if err := a.savePlansForProject(project.ID); err != nil {
 		return WorkPlan{}, err
 	}
 	a.emitRuntimeStateChanged(RuntimeEvent{ProjectID: project.ID, Kind: "plan_changed", EntityID: plan.ID, From: previousStatus, To: PlanActive, Reason: "plan_activated", CreatedAt: now})
-	a.schedulePlanEvent(project.ID, updated.OwnerAgentID, updated.ID, "", "plan_activated", "")
-	return updated, nil
+	a.schedulePlanEvent(project.ID, plan.OwnerAgentID, plan.ID, "", "plan_activated", "")
+	return plan, nil
+}
+
+func planReservesGroupExecutionSlot(status string) bool {
+	return status == PlanActive || status == PlanPaused
 }
 
 func refreshReadyPlanSteps(plan *WorkPlan) {
@@ -462,7 +491,76 @@ func (a *app) advancePlan(project Project, actor Agent, planID string, req PlanA
 		return WorkPlan{}, err
 	}
 	a.emitRuntimeStateChanged(RuntimeEvent{ProjectID: project.ID, Kind: "plan_changed", EntityID: plan.ID, To: updated.Status, Reason: req.Action, CreatedAt: now})
+	if stepID, shouldContinue := planOwnerContinuation(updated); shouldContinue {
+		a.schedulePlanEvent(project.ID, updated.OwnerAgentID, updated.ID, stepID, "plan_advanced", "")
+	}
 	return updated, nil
+}
+
+func planOwnerContinuation(plan WorkPlan) (string, bool) {
+	if plan.Status != PlanActive {
+		return "", false
+	}
+	allResolved := len(plan.Steps) > 0
+	for _, step := range plan.Steps {
+		if step.Status == PlanStepAwaitingDecision {
+			return step.ID, true
+		}
+		if step.Status == PlanStepReviewing {
+			for _, review := range step.Reviews {
+				if review.Status == "delivered" {
+					return step.ID, true
+				}
+			}
+		}
+		if step.Status != PlanStepCompleted && step.Status != PlanStepSkipped && step.Status != PlanStepCancelled {
+			allResolved = false
+		}
+	}
+	if allResolved {
+		return "", true
+	}
+	active := 0
+	for _, step := range plan.Steps {
+		if step.Status == PlanStepRunning || step.Status == PlanStepDispatching || step.Status == PlanStepReviewing {
+			active++
+		}
+	}
+	limit := plan.MaxConcurrency
+	if limit <= 0 {
+		limit = 1
+	}
+	if active >= limit {
+		return "", false
+	}
+	for _, step := range plan.Steps {
+		if step.Status == PlanStepReady || step.Status == PlanStepChangesRequested {
+			return step.ID, true
+		}
+	}
+	return "", false
+}
+
+func (a *app) resumeActionablePlans() {
+	pending := map[string]bool{}
+	for _, job := range a.ensureSchedulerQueue().Jobs() {
+		if job.Kind == ScheduledRunPlanEvent && (job.Status == ScheduledRunQueued || job.Status == ScheduledRunRunning) {
+			pending[job.ProjectID+"/"+job.SourceID] = true
+		}
+	}
+	a.mu.Lock()
+	var plans []WorkPlan
+	for _, projectPlans := range a.plans {
+		plans = append(plans, projectPlans...)
+	}
+	a.mu.Unlock()
+	for _, plan := range plans {
+		stepID, actionable := planOwnerContinuation(plan)
+		if !actionable || pending[plan.ProjectID+"/"+plan.ID] {
+			continue
+		}
+		a.schedulePlanEvent(plan.ProjectID, plan.OwnerAgentID, plan.ID, stepID, "plan_recovered", "")
+	}
 }
 
 func (a *app) markPlanTaskTerminal(projectID string, task Task) (WorkPlan, bool) {
@@ -567,11 +665,15 @@ func (a *app) schedulePlanEvent(projectID, ownerAgentID, planID, stepID, event, 
 	if strings.EqualFold(os.Getenv("KAROZ_AGENT_AUTO_RESPOND"), "0") || strings.EqualFold(os.Getenv("KAROZ_AGENT_AUTO_RESPOND"), "false") {
 		return
 	}
+	var planVersion int64
+	if plan, ok := a.planByID(projectID, planID); ok {
+		planVersion = plan.Version
+	}
 	job, err := newScheduledRun(
 		ScheduledRunPlanEvent,
 		AgentRunInput{ProjectID: projectID, AgentID: ownerAgentID, Trigger: RunTriggerPlanEvent, TurnType: "plan", SourceID: planID},
-		"plan_event/"+projectID+"/"+planID+"/"+event+"/"+firstNonEmpty(taskID, stepID, "root"),
-		PlanEventRunPayload{PlanID: planID, StepID: stepID, Event: event, TaskID: taskID},
+		fmt.Sprintf("plan_event/%s/%s/%s/%s/v%d", projectID, planID, event, firstNonEmpty(taskID, stepID, "root"), planVersion),
+		PlanEventRunPayload{PlanID: planID, PlanVersion: planVersion, StepID: stepID, Event: event, TaskID: taskID},
 		3*time.Minute,
 	)
 	if err == nil {
@@ -592,12 +694,15 @@ func (a *app) executePlanEventScheduledRun(ctx context.Context, job ScheduledRun
 	if !ok || plan.Status != PlanActive {
 		return nil
 	}
+	if payload.PlanVersion > 0 && payload.PlanVersion < plan.Version {
+		return nil
+	}
 	owner, ok := a.projectAgent(project, plan.OwnerAgentID)
 	if !ok {
 		return errors.New("plan owner not found")
 	}
 	planJSON, _ := json.Marshal(plan)
-	prompt := fmt.Sprintf("[plan event] event=%s plan_id=%s step_id=%s task_id=%s\n\nCurrent WorkPlan:\n%s\n\nYou own this active WorkPlan. Continue advancing its todo list. Inspect task/review/group-result evidence, then call advance_plan with one concrete action. Task completion alone never completes a step. You may accept it, delegate review, request rework, block it, dispatch a local task, delegate cross-group work through the group inbox, or complete the plan when every required step is accepted. Do not only summarize.", payload.Event, plan.ID, payload.StepID, payload.TaskID, string(planJSON))
+	prompt := fmt.Sprintf("[plan event] event=%s plan_id=%s plan_version=%d step_id=%s task_id=%s\n\nCurrent WorkPlan:\n%s\n\nYou own this active WorkPlan. Continue advancing its todo list. Inspect task/review/group-result evidence, then call advance_plan with one concrete action. Task completion alone never completes a step. You may accept it, delegate review, request rework, block it, dispatch a local task, delegate cross-group work through the group inbox, or complete the plan when every required step is accepted. Do not only summarize.", payload.Event, plan.ID, payload.PlanVersion, payload.StepID, payload.TaskID, string(planJSON))
 	out, err := a.runResidentAgentTurn(ctx, project, owner, prompt, "plan", nil)
 	if err != nil {
 		return err

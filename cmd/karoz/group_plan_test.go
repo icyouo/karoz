@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +68,216 @@ func TestWorkPlanOwnershipAndTaskCompletionRequiresDecision(t *testing.T) {
 	plan, err = a.advancePlan(project, coordinator, plan.ID, PlanActionRequest{Action: "accept_step", StepID: "implement", Result: "verified", ExpectedVersion: plan.Version})
 	if err != nil || plan.Steps[0].Status != PlanStepCompleted || plan.Steps[1].Status != PlanStepReady {
 		t.Fatalf("accept = %+v err=%v", plan.Steps, err)
+	}
+}
+
+func TestGroupAllowsOnlyOneExecutionPlan(t *testing.T) {
+	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
+	a, project, coordinator, builder := planTestApp(t)
+	draft := func(author Agent, title string) WorkPlan {
+		t.Helper()
+		plan, err := a.createPlanDraft(project, author, author.ID, WorkPlanDraftRequest{Title: title, Goal: "Ship it", Steps: []PlanStep{{ID: "ship", Title: "Ship", Description: "Ship the work"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	first := draft(builder, "First group plan")
+	second := draft(builder, "Second group plan")
+	first, err := a.activatePlan(project, first.ID, "user", first.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.activatePlan(project, second.ID, "user", second.Version); err == nil || !strings.Contains(err.Error(), first.ID) {
+		t.Fatalf("second group activation should identify the conflict, err=%v", err)
+	}
+	unchanged, _ := a.planByID(project.ID, second.ID)
+	if unchanged.Status != PlanDraft || unchanged.Version != second.Version {
+		t.Fatalf("conflicting plan changed: %+v", unchanged)
+	}
+
+	first, err = a.advancePlan(project, coordinator, first.ID, PlanActionRequest{Action: "pause", ExpectedVersion: first.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.activatePlan(project, second.ID, "user", second.Version); err == nil {
+		t.Fatal("a paused group plan must continue reserving the execution slot")
+	}
+	first, err = a.advancePlan(project, coordinator, first.ID, PlanActionRequest{Action: "cancel", ExpectedVersion: first.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = a.activatePlan(project, second.ID, "user", second.Version)
+	if err != nil || second.Status != PlanActive {
+		t.Fatalf("terminal plan should release the group slot: plan=%+v err=%v", second, err)
+	}
+
+	otherLead := Agent{ID: "other-lead", ProjectID: project.ID, Nickname: "Other Lead", GroupID: "other", GroupName: "Other", GroupRole: "coordinator"}
+	otherBuilder := Agent{ID: "other-builder", ProjectID: project.ID, Nickname: "Other Builder", GroupID: "other", GroupName: "Other", GroupRole: "builder"}
+	a.agents[project.ID] = append(a.agents[project.ID], otherLead, otherBuilder)
+	if _, err := a.upsertAgentGroup(project.ID, "other", "Other", "", otherLead.ID, []Agent{otherLead, otherBuilder}); err != nil {
+		t.Fatal(err)
+	}
+	other := draft(otherBuilder, "Independent group plan")
+	if _, err := a.activatePlan(project, other.ID, "user", other.Version); err != nil {
+		t.Fatalf("an independent group should have its own execution slot: %v", err)
+	}
+
+	standalone := Agent{ID: "solo", ProjectID: project.ID, Nickname: "Solo"}
+	a.agents[project.ID] = append(a.agents[project.ID], standalone)
+	soloFirst := draft(standalone, "Solo first")
+	soloSecond := draft(standalone, "Solo second")
+	if _, err := a.activatePlan(project, soloFirst.ID, "user", soloFirst.Version); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.activatePlan(project, soloSecond.ID, "user", soloSecond.Version); err != nil {
+		t.Fatalf("standalone agents are not subject to the group execution slot: %v", err)
+	}
+}
+
+func TestGroupExecutionPlanActivationIsAtomic(t *testing.T) {
+	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
+	a, project, _, builder := planTestApp(t)
+	makePlan := func(title string) WorkPlan {
+		plan, err := a.createPlanDraft(project, builder, builder.ID, WorkPlanDraftRequest{Title: title, Goal: "Ship it", Steps: []PlanStep{{ID: "ship", Title: "Ship", Description: "Ship the work"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+	first := makePlan("Concurrent first")
+	second := makePlan("Concurrent second")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	activate := func(plan WorkPlan) {
+		<-start
+		_, err := a.activatePlan(project, plan.ID, "user", plan.Version)
+		results <- err
+	}
+	go activate(first)
+	go activate(second)
+	close(start)
+	firstErr, secondErr := <-results, <-results
+	if (firstErr == nil) == (secondErr == nil) {
+		t.Fatalf("exactly one concurrent activation must succeed: first=%v second=%v", firstErr, secondErr)
+	}
+	active := 0
+	for _, plan := range a.plansForProject(project.ID) {
+		if plan.OwnerGroupID == "build" && plan.Status == PlanActive {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("active group plans = %d, want 1", active)
+	}
+}
+
+func TestAcceptedPlanStepSchedulesOwnerContinuation(t *testing.T) {
+	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "1")
+	a, project, coordinator, _ := planTestApp(t)
+	plan := WorkPlan{
+		ID: "plan-follow-up", ProjectID: project.ID, Title: "Continue the plan", Goal: "Finish both steps", Status: PlanActive,
+		OwnerType: "group", OwnerGroupID: "build", OwnerAgentID: coordinator.ID, MaxConcurrency: 1, Version: 7,
+		Steps: []PlanStep{
+			{ID: "step-1", Title: "First", Status: PlanStepAwaitingDecision, Version: 2},
+			{ID: "step-2", Title: "Second", Status: PlanStepPending, Dependencies: []string{"step-1"}, Version: 1},
+		},
+	}
+	a.plans[project.ID] = []WorkPlan{plan}
+	jobs := make(chan ScheduledRun, 1)
+	a.schedulerExecutors[ScheduledRunPlanEvent] = func(_ context.Context, job ScheduledRun) error {
+		jobs <- job
+		return nil
+	}
+
+	updated, err := a.advancePlan(project, coordinator, plan.ID, PlanActionRequest{Action: "accept_step", StepID: "step-1", Result: "verified", ExpectedVersion: plan.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Steps[1].Status != PlanStepReady {
+		t.Fatalf("next step status = %s, want ready", updated.Steps[1].Status)
+	}
+	select {
+	case job := <-jobs:
+		var payload PlanEventRunPayload
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Event != "plan_advanced" || payload.StepID != "step-2" || payload.PlanVersion != updated.Version {
+			t.Fatalf("follow-up payload = %+v, updated version=%d", payload, updated.Version)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("plan owner did not receive a follow-up event")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for a.agentRunActive(project.ID, coordinator.ID) || a.scheduledAgentRunCount(project.ID, coordinator.ID) > 0 || a.scheduledAgentWorkerActive(project.ID, coordinator.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("plan follow-up worker did not become idle")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestPlanOwnerContinuationOnlyWhenActionable(t *testing.T) {
+	cases := []struct {
+		name string
+		plan WorkPlan
+		want bool
+	}{
+		{name: "ready step", plan: WorkPlan{Status: PlanActive, MaxConcurrency: 1, Steps: []PlanStep{{ID: "next", Status: PlanStepReady}}}, want: true},
+		{name: "capacity available", plan: WorkPlan{Status: PlanActive, MaxConcurrency: 2, Steps: []PlanStep{{ID: "running", Status: PlanStepRunning}, {ID: "next", Status: PlanStepReady}}}, want: true},
+		{name: "capacity full", plan: WorkPlan{Status: PlanActive, MaxConcurrency: 1, Steps: []PlanStep{{ID: "running", Status: PlanStepRunning}, {ID: "next", Status: PlanStepReady}}}, want: false},
+		{name: "task decision", plan: WorkPlan{Status: PlanActive, Steps: []PlanStep{{ID: "review", Status: PlanStepAwaitingDecision}}}, want: true},
+		{name: "delivered review", plan: WorkPlan{Status: PlanActive, Steps: []PlanStep{{ID: "review", Status: PlanStepReviewing, Reviews: []PlanReview{{Status: "delivered"}}}}}, want: true},
+		{name: "pending review", plan: WorkPlan{Status: PlanActive, Steps: []PlanStep{{ID: "review", Status: PlanStepReviewing, Reviews: []PlanReview{{Status: "pending"}}}}}, want: false},
+		{name: "complete plan", plan: WorkPlan{Status: PlanActive, Steps: []PlanStep{{ID: "done", Status: PlanStepCompleted}}}, want: true},
+		{name: "paused plan", plan: WorkPlan{Status: PlanPaused, Steps: []PlanStep{{ID: "next", Status: PlanStepReady}}}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, got := planOwnerContinuation(tc.plan)
+			if got != tc.want {
+				t.Fatalf("planOwnerContinuation() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResumeActionablePlansSchedulesRecoveredOwner(t *testing.T) {
+	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "1")
+	a, project, coordinator, _ := planTestApp(t)
+	plan := WorkPlan{
+		ID: "plan-recovered", ProjectID: project.ID, Title: "Recovered plan", Goal: "Continue after restart", Status: PlanActive,
+		OwnerType: "group", OwnerGroupID: "build", OwnerAgentID: coordinator.ID, MaxConcurrency: 1, Version: 4,
+		Steps: []PlanStep{{ID: "next", Title: "Next", Status: PlanStepReady, Version: 2}},
+	}
+	a.plans[project.ID] = []WorkPlan{plan}
+	jobs := make(chan ScheduledRun, 1)
+	a.schedulerExecutors[ScheduledRunPlanEvent] = func(_ context.Context, job ScheduledRun) error {
+		jobs <- job
+		return nil
+	}
+
+	a.resumeActionablePlans()
+	select {
+	case job := <-jobs:
+		var payload PlanEventRunPayload
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Event != "plan_recovered" || payload.StepID != "next" || payload.PlanVersion != plan.Version {
+			t.Fatalf("recovery payload = %+v", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("actionable plan was not resumed")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for a.agentRunActive(project.ID, coordinator.ID) || a.scheduledAgentRunCount(project.ID, coordinator.ID) > 0 || a.scheduledAgentWorkerActive(project.ID, coordinator.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("recovered plan worker did not become idle")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

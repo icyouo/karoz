@@ -91,3 +91,57 @@ func TestAgentMessagePostAlwaysUsesResidentSSEStream(t *testing.T) {
 		}
 	}
 }
+
+func TestResidentAgentChatModePersistsAndDefaultsMessageMode(t *testing.T) {
+	dataDir := t.TempDir()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: t.TempDir()})
+	a.modelProvider = fakeModelProvider{}
+	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
+	a.agents[project.ID] = []Agent{{ID: "designer", ProjectID: project.ID, Name: "Designer", Role: "design"}}
+
+	patch := httptest.NewRequest(http.MethodPatch, "/agents/designer", strings.NewReader(`{"chat_mode":"plan"}`))
+	patch.Header.Set("Content-Type", "application/json")
+	patchResponse := httptest.NewRecorder()
+	a.handleAgents(patchResponse, patch, project, []string{"designer"})
+	if patchResponse.Code != http.StatusOK {
+		t.Fatalf("chat mode patch status = %d body=%s", patchResponse.Code, patchResponse.Body.String())
+	}
+	stored, ok := a.projectAgent(project, "designer")
+	if !ok || stored.ChatMode != "plan" {
+		t.Fatalf("stored agent mode = %+v", stored)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/agents/designer/messages", strings.NewReader(`{"message":"plan this"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	a.handleAgents(response, request, project, []string{"designer", "messages"})
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"type":"plan"`) {
+		t.Fatalf("saved mode was not used by default: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/agents/designer/messages", strings.NewReader(`{"message":"implement this","type":"dev"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	a.handleAgents(response, request, project, []string{"designer", "messages"})
+	stored, _ = a.projectAgent(project, "designer")
+	if response.Code != http.StatusOK || stored.ChatMode != "dev" {
+		t.Fatalf("explicit message mode was not persisted: status=%d agent=%+v", response.Code, stored)
+	}
+
+	after := newApp(Settings{DataDir: dataDir, ProjectsRoot: t.TempDir()})
+	if err := after.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, ok := after.projectAgent(project, "designer")
+	if !ok || reloaded.ChatMode != "dev" {
+		t.Fatalf("reloaded agent mode = %+v", reloaded)
+	}
+
+	invalid := httptest.NewRequest(http.MethodPatch, "/agents/designer", strings.NewReader(`{"chat_mode":"execute"}`))
+	invalid.Header.Set("Content-Type", "application/json")
+	invalidResponse := httptest.NewRecorder()
+	a.handleAgents(invalidResponse, invalid, project, []string{"designer"})
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid chat mode status = %d body=%s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+}
