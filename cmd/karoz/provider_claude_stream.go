@@ -10,10 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
 )
 
 type claudeStreamResult struct {
@@ -30,75 +27,63 @@ type claudeToolAccumulator struct {
 }
 
 func invokeClaudeDirectStream(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
-	parentCtx := ctx
-	toolCtx, cancelTools := context.WithTimeout(parentCtx, residentToolPhaseTimeout)
-	defer cancelTools()
-	messages := []map[string]any{{"role": "user", "content": prompt + "\n\nProject workspace: " + workdir}}
-	toolRounds := 0
-	limitReason := "resident tool loop limit"
-toolLoop:
-	for modelRound := 0; modelRound < 16 && toolRounds < maxResidentToolRounds; modelRound++ {
-		streamed, interrupts, err := streamClaudeStep(toolCtx, model, effort, messages, tools, callbacks)
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) && parentCtx.Err() == nil {
-				limitReason = "resident tool phase time budget"
-				break toolLoop
-			}
-			return err
-		}
-		if len(streamed.AssistantContent) > 0 {
-			messages = append(messages, map[string]any{"role": "assistant", "content": streamed.AssistantContent})
-		}
-		if len(interrupts) > 0 {
-			messages = append(messages, map[string]any{"role": "user", "content": renderAgentInterruptsForModel(interrupts)})
-			continue
-		}
-		if len(streamed.ToolCalls) == 0 {
-			return nil
-		}
-		toolRounds++
-		results := make([]map[string]any, 0, len(streamed.ToolCalls))
-		reachedLimit := false
-		for _, call := range streamed.ToolCalls {
-			if callbacks.OnToolStart != nil {
-				callbacks.OnToolStart(call)
-			}
-			result, callErr := executeTool(call)
-			success := callErr == nil && toolResultSuccess(result)
-			if callErr != nil {
-				result = `{"error":"tool_failed","message":` + strconv.Quote(callErr.Error()) + `}`
-			}
-			result = limitToolResultForModel(result)
-			if callbacks.OnToolResult != nil {
-				callbacks.OnToolResult(call, result, success)
-			}
-			results = append(results, map[string]any{"type": "tool_result", "tool_use_id": firstNonEmpty(call.CallID, call.ID), "content": result, "is_error": !success})
-			if callbacks.PollInterrupts != nil {
-				if pending := callbacks.PollInterrupts(); len(pending) > 0 {
-					if callbacks.OnInterrupt != nil {
-						callbacks.OnInterrupt(pending)
-					}
-					results = append(results, map[string]any{"type": "text", "text": renderAgentInterruptsForModel(pending)})
-				}
-			}
-			if toolCtx.Err() != nil && parentCtx.Err() == nil {
-				limitReason = "resident tool phase time budget"
-				reachedLimit = true
-				break
-			}
-		}
-		messages = append(messages, map[string]any{"role": "user", "content": results})
-		if reachedLimit {
-			break toolLoop
-		}
+	return invokeResidentToolLoop(ctx, newClaudeStreamWire(workdir, prompt, model, effort), tools, callbacks, executeTool)
+}
+
+// claudeStreamWire adapts the Claude messages SSE protocol to the shared
+// resident tool loop. It owns the messages history and the per-round
+// tool_result buffer that becomes the next user message.
+type claudeStreamWire struct {
+	messages []map[string]any
+	model    string
+	effort   string
+	results  []map[string]any
+}
+
+func newClaudeStreamWire(workdir, prompt, model, effort string) *claudeStreamWire {
+	return &claudeStreamWire{
+		messages: []map[string]any{{"role": "user", "content": prompt + "\n\nProject workspace: " + workdir}},
+		model:    model,
+		effort:   effort,
 	}
-	if err := parentCtx.Err(); err != nil {
-		return err
+}
+
+func (w *claudeStreamWire) step(ctx context.Context, tools []map[string]any, callbacks AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {
+	streamed, interrupts, err := streamClaudeStep(ctx, w.model, w.effort, w.messages, tools, callbacks)
+	return residentStepOutput{Text: streamed.Text, ToolCalls: streamed.ToolCalls, AssistantContent: streamed.AssistantContent}, interrupts, err
+}
+
+func (w *claudeStreamWire) appendAssistantTurn(streamed residentStepOutput) {
+	if len(streamed.AssistantContent) > 0 {
+		w.messages = append(w.messages, map[string]any{"role": "assistant", "content": streamed.AssistantContent})
 	}
-	messages = append(messages, map[string]any{"role": "user", "content": "You have reached the " + limitReason + ". Stop using tools and provide the best concise answer now."})
-	finalCtx, cancelFinal := context.WithTimeout(parentCtx, residentFinalTimeout)
-	defer cancelFinal()
-	_, _, err := streamClaudeStep(finalCtx, model, effort, messages, nil, callbacks)
+}
+
+func (w *claudeStreamWire) appendInterruptTurn(_ residentStepOutput, interrupts []AgentInterrupt) {
+	w.messages = append(w.messages, map[string]any{"role": "user", "content": renderAgentInterruptsForModel(interrupts)})
+}
+
+func (w *claudeStreamWire) appendToolCall(codexToolCall) {}
+
+func (w *claudeStreamWire) appendToolResult(call codexToolCall, result string, success bool) {
+	w.results = append(w.results, map[string]any{"type": "tool_result", "tool_use_id": firstNonEmpty(call.CallID, call.ID), "content": result, "is_error": !success})
+}
+
+func (w *claudeStreamWire) appendInlineInterrupts(interrupts []AgentInterrupt) {
+	w.results = append(w.results, map[string]any{"type": "text", "text": renderAgentInterruptsForModel(interrupts)})
+}
+
+func (w *claudeStreamWire) flushToolResults() {
+	w.messages = append(w.messages, map[string]any{"role": "user", "content": w.results})
+	w.results = nil
+}
+
+func (w *claudeStreamWire) appendLimitMessage(limitReason string) {
+	w.messages = append(w.messages, map[string]any{"role": "user", "content": "You have reached the " + limitReason + ". Stop using tools and provide the best concise answer now."})
+}
+
+func (w *claudeStreamWire) finalize(parentCtx, finalCtx context.Context, callbacks AgentStreamCallbacks) error {
+	_, _, err := streamClaudeStep(finalCtx, w.model, w.effort, w.messages, nil, callbacks)
 	if err != nil && parentCtx.Err() != nil {
 		return parentCtx.Err()
 	}
@@ -106,65 +91,9 @@ toolLoop:
 }
 
 func streamClaudeStep(ctx context.Context, model, effort string, messages []map[string]any, tools []map[string]any, callbacks AgentStreamCallbacks) (claudeStreamResult, []AgentInterrupt, error) {
-	if callbacks.PollInterrupts != nil {
-		if pending := callbacks.PollInterrupts(); len(pending) > 0 {
-			if callbacks.OnInterrupt != nil {
-				callbacks.OnInterrupt(pending)
-			}
-			return claudeStreamResult{}, pending, nil
-		}
-	}
-	stepCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	request, err := newClaudeRequest(stepCtx, model, effort, messages, tools)
-	if err != nil {
-		return claudeStreamResult{}, nil, err
-	}
-	interruptCh := make(chan []AgentInterrupt, 1)
-	stopPolling := make(chan struct{})
-	var pollers sync.WaitGroup
-	if callbacks.PollInterrupts != nil {
-		pollers.Add(1)
-		go func() {
-			defer pollers.Done()
-			ticker := time.NewTicker(40 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-stopPolling:
-					return
-				case <-stepCtx.Done():
-					return
-				case <-ticker.C:
-					if pending := callbacks.PollInterrupts(); len(pending) > 0 {
-						interruptCh <- pending
-						cancel()
-						return
-					}
-				}
-			}
-		}()
-	}
-	streamed, streamErr := streamClaudeResponse(request, callbacks.OnDelta)
-	close(stopPolling)
-	pollers.Wait()
-	var interrupts []AgentInterrupt
-	select {
-	case interrupts = <-interruptCh:
-	default:
-	}
-	if len(interrupts) == 0 && callbacks.PollInterrupts != nil {
-		interrupts = callbacks.PollInterrupts()
-	}
-	if len(interrupts) > 0 {
-		if callbacks.OnInterrupt != nil {
-			callbacks.OnInterrupt(interrupts)
-		}
-		if errors.Is(streamErr, context.Canceled) {
-			streamErr = nil
-		}
-	}
-	return streamed, interrupts, streamErr
+	return runResidentStep(ctx, callbacks, func(stepCtx context.Context) (*http.Request, error) {
+		return newClaudeRequest(stepCtx, model, effort, messages, tools)
+	}, streamClaudeResponse)
 }
 
 func newClaudeRequest(ctx context.Context, model, effort string, messages []map[string]any, tools []map[string]any) (*http.Request, error) {

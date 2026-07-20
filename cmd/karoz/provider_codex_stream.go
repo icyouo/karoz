@@ -5,21 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
-)
-
-const (
-	maxCodexToolOutputChars  = 12000
-	maxResidentToolRounds    = 8
-	residentToolPhaseTimeout = 90 * time.Second
-	residentFinalTimeout     = 30 * time.Second
 )
 
 func invokeCodexDirect(ctx context.Context, workdir, prompt string) (CLI2APIResponse, error) {
@@ -49,73 +39,63 @@ func invokeCodexDirect(ctx context.Context, workdir, prompt string) (CLI2APIResp
 }
 
 func invokeCodexDirectStream(ctx context.Context, workdir, prompt, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
-	parentCtx := ctx
-	toolCtx, cancelTools := context.WithTimeout(parentCtx, residentToolPhaseTimeout)
-	defer cancelTools()
-	input := []map[string]any{codexMessage("user", prompt+"\n\nProject workspace: "+workdir)}
-	toolRounds := 0
-	limitReason := "resident tool loop limit"
-toolLoop:
-	for modelRound := 0; modelRound < 16 && toolRounds < maxResidentToolRounds; modelRound++ {
-		streamed, interrupts, err := streamCodexStep(toolCtx, input, model, thinkingEffort, tools, callbacks)
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) && parentCtx.Err() == nil {
-				limitReason = "resident tool phase time budget"
-				break toolLoop
-			}
-			return err
-		}
-		if len(interrupts) > 0 {
-			if strings.TrimSpace(streamed.Text) != "" {
-				input = append(input, codexMessage("assistant", streamed.Text))
-			}
-			input = append(input, codexMessage("user", renderAgentInterruptsForModel(interrupts)))
-			continue
-		}
-		if len(streamed.ToolCalls) == 0 {
-			return nil
-		}
-		toolRounds++
-		for _, call := range streamed.ToolCalls {
-			input = append(input, codexFunctionCallItem(call))
-			if callbacks.OnToolStart != nil {
-				callbacks.OnToolStart(call)
-			}
-			result, err := executeTool(call)
-			success := err == nil && toolResultSuccess(result)
-			if err != nil {
-				result = `{"error":"tool_failed","message":` + strconv.Quote(err.Error()) + `}`
-			}
-			result = limitToolResultForModel(result)
-			if callbacks.OnToolResult != nil {
-				callbacks.OnToolResult(call, result, success)
-			}
-			input = append(input, map[string]any{
-				"type":    "function_call_output",
-				"call_id": firstNonEmpty(call.CallID, call.ID),
-				"output":  result,
-			})
-			if callbacks.PollInterrupts != nil {
-				if interrupts := callbacks.PollInterrupts(); len(interrupts) > 0 {
-					if callbacks.OnInterrupt != nil {
-						callbacks.OnInterrupt(interrupts)
-					}
-					input = append(input, codexMessage("user", renderAgentInterruptsForModel(interrupts)))
-				}
-			}
-			if toolCtx.Err() != nil && parentCtx.Err() == nil {
-				limitReason = "resident tool phase time budget"
-				break toolLoop
-			}
-		}
+	return invokeResidentToolLoop(ctx, newCodexStreamWire(workdir, prompt, model, thinkingEffort), tools, callbacks, executeTool)
+}
+
+// codexStreamWire adapts the Codex responses SSE protocol to the shared
+// resident tool loop. It owns the responses API input items.
+type codexStreamWire struct {
+	input          []map[string]any
+	model          string
+	thinkingEffort string
+}
+
+func newCodexStreamWire(workdir, prompt, model, thinkingEffort string) *codexStreamWire {
+	return &codexStreamWire{
+		input:          []map[string]any{codexMessage("user", prompt+"\n\nProject workspace: "+workdir)},
+		model:          model,
+		thinkingEffort: thinkingEffort,
 	}
-	if err := parentCtx.Err(); err != nil {
-		return err
+}
+
+func (w *codexStreamWire) step(ctx context.Context, tools []map[string]any, callbacks AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {
+	streamed, interrupts, err := streamCodexStep(ctx, w.input, w.model, w.thinkingEffort, tools, callbacks)
+	return residentStepOutput{Text: streamed.Text, ToolCalls: streamed.ToolCalls}, interrupts, err
+}
+
+func (w *codexStreamWire) appendAssistantTurn(residentStepOutput) {}
+
+func (w *codexStreamWire) appendInterruptTurn(streamed residentStepOutput, interrupts []AgentInterrupt) {
+	if strings.TrimSpace(streamed.Text) != "" {
+		w.input = append(w.input, codexMessage("assistant", streamed.Text))
 	}
-	input = append(input, codexMessage("user", "You have reached the "+limitReason+". Stop using tools and provide the best concise answer now. Directly answer the latest user message using the evidence already collected, state any uncertainty, and name the next concrete step."))
-	finalCtx, cancelFinal := context.WithTimeout(parentCtx, residentFinalTimeout)
-	defer cancelFinal()
-	httpReq, err := newCodexDirectRequestWithInput(finalCtx, compactCodexInputForFinal(input, 90000), model, thinkingEffort, nil)
+	w.input = append(w.input, codexMessage("user", renderAgentInterruptsForModel(interrupts)))
+}
+
+func (w *codexStreamWire) appendToolCall(call codexToolCall) {
+	w.input = append(w.input, codexFunctionCallItem(call))
+}
+
+func (w *codexStreamWire) appendToolResult(call codexToolCall, result string, _ bool) {
+	w.input = append(w.input, map[string]any{
+		"type":    "function_call_output",
+		"call_id": firstNonEmpty(call.CallID, call.ID),
+		"output":  result,
+	})
+}
+
+func (w *codexStreamWire) appendInlineInterrupts(interrupts []AgentInterrupt) {
+	w.input = append(w.input, codexMessage("user", renderAgentInterruptsForModel(interrupts)))
+}
+
+func (w *codexStreamWire) flushToolResults() {}
+
+func (w *codexStreamWire) appendLimitMessage(limitReason string) {
+	w.input = append(w.input, codexMessage("user", "You have reached the "+limitReason+". Stop using tools and provide the best concise answer now. Directly answer the latest user message using the evidence already collected, state any uncertainty, and name the next concrete step."))
+}
+
+func (w *codexStreamWire) finalize(parentCtx, finalCtx context.Context, callbacks AgentStreamCallbacks) error {
+	httpReq, err := newCodexDirectRequestWithInput(finalCtx, compactCodexInputForFinal(w.input, 90000), w.model, w.thinkingEffort, nil)
 	if err != nil {
 		return err
 	}
@@ -159,100 +139,9 @@ type codexStreamResult struct {
 }
 
 func streamCodexStep(ctx context.Context, input []map[string]any, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks) (codexStreamResult, []AgentInterrupt, error) {
-	if callbacks.PollInterrupts != nil {
-		if interrupts := callbacks.PollInterrupts(); len(interrupts) > 0 {
-			if callbacks.OnInterrupt != nil {
-				callbacks.OnInterrupt(interrupts)
-			}
-			return codexStreamResult{}, interrupts, nil
-		}
-	}
-	stepCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	httpReq, err := newCodexDirectRequestWithInput(stepCtx, input, model, thinkingEffort, tools)
-	if err != nil {
-		return codexStreamResult{}, nil, err
-	}
-	interruptCh := make(chan []AgentInterrupt, 1)
-	stopPolling := make(chan struct{})
-	var pollers sync.WaitGroup
-	if callbacks.PollInterrupts != nil {
-		pollers.Add(1)
-		go func() {
-			defer pollers.Done()
-			ticker := time.NewTicker(40 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-stopPolling:
-					return
-				case <-stepCtx.Done():
-					return
-				case <-ticker.C:
-					interrupts := callbacks.PollInterrupts()
-					if len(interrupts) == 0 {
-						continue
-					}
-					interruptCh <- interrupts
-					cancel()
-					return
-				}
-			}
-		}()
-	}
-	streamed, streamErr := streamCodexResponse(httpReq, callbacks.OnDelta)
-	close(stopPolling)
-	pollers.Wait()
-	var interrupts []AgentInterrupt
-	select {
-	case interrupts = <-interruptCh:
-	default:
-	}
-	if len(interrupts) == 0 && callbacks.PollInterrupts != nil {
-		interrupts = callbacks.PollInterrupts()
-	}
-	if len(interrupts) > 0 {
-		if callbacks.OnInterrupt != nil {
-			callbacks.OnInterrupt(interrupts)
-		}
-		if errors.Is(streamErr, context.Canceled) {
-			streamErr = nil
-		}
-	}
-	return streamed, interrupts, streamErr
-}
-
-func limitToolResultForModel(result string) string {
-	result = strings.TrimSpace(result)
-	if len(result) <= maxCodexToolOutputChars {
-		return result
-	}
-	notice := fmt.Sprintf("\n\n[karoz truncated tool result: original_chars=%d limit_chars=%d; use narrower tool arguments if more detail is needed.]", len(result), maxCodexToolOutputChars)
-	keep := maxCodexToolOutputChars - len(notice)
-	if keep < 0 {
-		keep = 0
-	}
-	return strings.TrimSpace(result[:keep]) + notice
-}
-
-func renderAgentInterruptsForModel(interrupts []AgentInterrupt) string {
-	var b strings.Builder
-	b.WriteString("User sent the following additional message")
-	if len(interrupts) != 1 {
-		b.WriteString("s")
-	}
-	b.WriteString(" while you were working. Treat them as the latest user input and adjust your next steps accordingly:\n")
-	for _, item := range interrupts {
-		b.WriteString("- ")
-		if item.TurnType != "" {
-			b.WriteString("[")
-			b.WriteString(item.TurnType)
-			b.WriteString("] ")
-		}
-		b.WriteString(limitString(item.Body, 4000))
-		b.WriteString("\n")
-	}
-	return b.String()
+	return runResidentStep(ctx, callbacks, func(stepCtx context.Context) (*http.Request, error) {
+		return newCodexDirectRequestWithInput(stepCtx, input, model, thinkingEffort, tools)
+	}, streamCodexResponse)
 }
 
 func newCodexDirectRequest(ctx context.Context, workdir, prompt string) (*http.Request, error) {
