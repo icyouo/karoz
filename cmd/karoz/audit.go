@@ -15,7 +15,7 @@ func (a *app) handleProjectAudit(w http.ResponseWriter, r *http.Request, project
 		return
 	}
 	writeJSON(w, map[string]any{
-		"exported_at": time.Now().UTC().Format(time.RFC3339),
+		"exported_at": time.Now().UTC().Unix(),
 		"project":     project,
 		"agents":      a.projectAgents(project),
 		"tasks":       a.tasksForProject(project.ID),

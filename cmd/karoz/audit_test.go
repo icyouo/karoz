@@ -40,7 +40,7 @@ func TestProjectAuditExport(t *testing.T) {
 		t.Fatalf("audit status = %d body=%s", recorder.Code, limitString(recorder.Body.String(), 200))
 	}
 	var payload struct {
-		ExportedAt string                 `json:"exported_at"`
+		ExportedAt int64                  `json:"exported_at"`
 		Project    Project                `json:"project"`
 		Agents     []Agent                `json:"agents"`
 		Tasks      []Task                 `json:"tasks"`
@@ -51,8 +51,8 @@ func TestProjectAuditExport(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("audit decode err=%v body=%s", err, limitString(recorder.Body.String(), 400))
 	}
-	if _, err := time.Parse(time.RFC3339, payload.ExportedAt); err != nil {
-		t.Fatalf("exported_at is not RFC3339: %q", payload.ExportedAt)
+	if payload.ExportedAt <= 0 || time.Since(time.Unix(payload.ExportedAt, 0)) > time.Minute {
+		t.Fatalf("exported_at is not a fresh unix timestamp: %d", payload.ExportedAt)
 	}
 	if payload.Project.ID != project.ID {
 		t.Fatalf("audit project = %+v", payload.Project)
