@@ -74,13 +74,22 @@ func projectID(path string) string {
 }
 
 func taskID() string {
-	sum := sha1.Sum([]byte(fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())))
-	return hex.EncodeToString(sum[:])[:16]
+	return shortRandomID()
 }
 
 func messageID() string {
-	sum := sha1.Sum([]byte(fmt.Sprintf("msg-%d-%d", time.Now().UnixNano(), os.Getpid())))
-	return hex.EncodeToString(sum[:])[:16]
+	return shortRandomID()
+}
+
+// shortRandomID returns a crypto-random 16-hex-char ID. The former
+// time+pid-seeded IDs collided when minted concurrently within one clock
+// tick (SHA1 of identical input produces identical IDs).
+func shortRandomID() string {
+	id := randomID()
+	if len(id) > 16 {
+		id = id[:16]
+	}
+	return id
 }
 
 func randomID() string {
