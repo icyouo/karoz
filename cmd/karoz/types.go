@@ -48,6 +48,7 @@ type app struct {
 	residentTools         *tooldomain.Registry[ResidentToolContext]
 	modelProvider         runtimedomain.ModelProvider[CLI2APIRequest, ResidentToolContext, AgentStreamCallbacks]
 	dynamicTools          tooldomain.DynamicProvider
+	memoryAnalyzer        memoryAnalyzerFunc
 }
 
 type Settings = settingsdomain.Settings

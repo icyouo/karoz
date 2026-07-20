@@ -7,6 +7,14 @@ import (
 )
 
 func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, turnType string) string {
+	return a.buildResidentAgentPromptWithMemoryQuery(project, agent, userText, turnType, userText)
+}
+
+// buildResidentAgentPromptWithMemoryQuery builds the resident prompt, scoring
+// long-term memory retrieval against memoryQuery ("" skips the memory
+// section). The query is resolved by the turn path before this sync builder
+// runs; the builder itself never makes model calls.
+func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Agent, userText, turnType, memoryQuery string) string {
 	turnType = normalizeChatTurnType(turnType)
 	agentID := agent.ID
 	a.maybeCheckpointAgentSession(project.ID, agentID, false)
@@ -202,7 +210,7 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 			b.WriteString("\n")
 		}
 	}
-	if relevant := a.relevantMemoriesFor(project.ID, agent.ID, userText, 6); len(relevant) > 0 {
+	if relevant := a.relevantMemoriesFor(project.ID, agent.ID, memoryQuery, 6); len(relevant) > 0 {
 		b.WriteString("\n### Relevant remembered facts and decisions\n")
 		for _, entry := range relevant {
 			b.WriteString("- [")

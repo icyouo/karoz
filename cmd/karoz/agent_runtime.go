@@ -70,7 +70,8 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 		}
 		return a.drainAgentInterrupts(project.ID, agent.ID, runID)
 	}
-	prompt := a.buildResidentAgentPrompt(project, effectiveAgent, userText, turnType)
+	memoryQuery := a.memoryRetrievalQueryFor(ctx, effectiveAgent, userText)
+	prompt := a.buildResidentAgentPromptWithMemoryQuery(project, effectiveAgent, userText, turnType, memoryQuery)
 	if runID != "" {
 		if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateInvokingModel); !ok {
 			return "", fmt.Errorf("resident run %s is no longer active", runID)
