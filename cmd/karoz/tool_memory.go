@@ -87,29 +87,13 @@ func (a *app) searchArchive(projectID, agentID, query string, limit int) string 
 	archives := append([]AgentArchiveMessage{}, a.archives[key]...)
 	a.mu.Unlock()
 	terms := strings.Fields(query)
-	matchScore := func(text string) int {
-		text = strings.ToLower(text)
-		if strings.Contains(text, query) {
-			return len(terms) + 4
-		}
-		score := 0
-		for _, term := range terms {
-			if len([]rune(term)) < 2 {
-				continue
-			}
-			if strings.Contains(text, term) {
-				score++
-			}
-		}
-		return score
-	}
 	type memoryMatch struct {
 		entry AgentMemoryEntry
 		score int
 	}
 	var matchedMemories []memoryMatch
 	for _, entry := range memories {
-		if score := matchScore(entry.Summary + "\n" + entry.Detail); score > 0 {
+		if score := memoryMatchScore(query, terms, entry.Summary+"\n"+entry.Detail); score > 0 {
 			matchedMemories = append(matchedMemories, memoryMatch{entry: entry, score: score})
 		}
 	}
@@ -138,7 +122,7 @@ func (a *app) searchArchive(projectID, agentID, query string, limit int) string 
 		if msg.Role == "tool_call" || msg.Role == "tool_result" {
 			continue
 		}
-		if score := matchScore(msg.Body); score > 0 {
+		if score := memoryMatchScore(query, terms, msg.Body); score > 0 {
 			matchedMessages = append(matchedMessages, messageMatch{message: msg, score: score})
 		}
 	}
@@ -157,6 +141,74 @@ func (a *app) searchArchive(projectID, agentID, query string, limit int) string 
 		}
 	}
 	return toolJSON(map[string]any{"memory_entries": memoryResults, "messages": messageResults})
+}
+
+// memoryMatchScore scores text against a lowercased query and its terms. A
+// full-phrase containment scores above any per-term match so exact phrase
+// matches sort first.
+func memoryMatchScore(query string, terms []string, text string) int {
+	text = strings.ToLower(text)
+	if strings.Contains(text, query) {
+		return len(terms) + 4
+	}
+	score := 0
+	for _, term := range terms {
+		if len([]rune(term)) < 2 {
+			continue
+		}
+		if strings.Contains(text, term) {
+			score++
+		}
+	}
+	return score
+}
+
+// relevantMemoriesFor returns the agent's active fact/decision/done memories
+// whose text matches the query, best and most recently updated matches first.
+// Pending work is surfaced separately in the prompt; archived entries are
+// never relevant.
+func (a *app) relevantMemoriesFor(projectID, agentID, query string, limit int) []AgentMemoryEntry {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" || limit <= 0 {
+		return []AgentMemoryEntry{}
+	}
+	terms := strings.Fields(query)
+	key := projectAgentKey(projectID, agentID)
+	a.mu.Lock()
+	memories := append([]AgentMemoryEntry{}, a.memories[key]...)
+	a.mu.Unlock()
+	type memoryMatch struct {
+		entry AgentMemoryEntry
+		score int
+	}
+	var matched []memoryMatch
+	for _, entry := range memories {
+		if entry.State != "active" || entry.ArchivedAt != nil {
+			continue
+		}
+		switch entry.Layer {
+		case "fact", "decision", "done":
+		default:
+			continue
+		}
+		if score := memoryMatchScore(query, terms, entry.Summary+"\n"+entry.Detail); score >= 1 {
+			matched = append(matched, memoryMatch{entry: entry, score: score})
+		}
+	}
+	sort.SliceStable(matched, func(i, j int) bool {
+		if matched[i].score == matched[j].score {
+			return matched[i].entry.UpdatedAt.After(matched[j].entry.UpdatedAt)
+		}
+		return matched[i].score > matched[j].score
+	})
+	out := make([]AgentMemoryEntry, 0, min(limit, len(matched)))
+	for _, match := range matched {
+		out = append(out, match.entry)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 func (a *app) getArchivedMessages(projectID, agentID string, startSeq, endSeq int64, limit int) string {

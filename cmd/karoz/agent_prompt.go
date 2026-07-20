@@ -202,6 +202,20 @@ func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, t
 			b.WriteString("\n")
 		}
 	}
+	if relevant := a.relevantMemoriesFor(project.ID, agent.ID, userText, 6); len(relevant) > 0 {
+		b.WriteString("\n### Relevant remembered facts and decisions\n")
+		for _, entry := range relevant {
+			b.WriteString("- [")
+			b.WriteString(entry.Layer)
+			b.WriteString("; id: ")
+			b.WriteString(entry.ID)
+			b.WriteString("] ")
+			b.WriteString(entry.Summary)
+			b.WriteString(" — ")
+			b.WriteString(limitString(entry.Detail, 400))
+			b.WriteString("\n")
+		}
+	}
 	if entries := a.blackboardFor(project.ID, 8); len(entries) > 0 {
 		b.WriteString("\n### Latest blackboard\n")
 		for _, entry := range entries {
