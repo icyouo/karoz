@@ -42,6 +42,8 @@ func (a *app) handleProjectScoped(w http.ResponseWriter, r *http.Request) {
 		a.handleRuntimeEvents(w, r, project)
 	case "tasks":
 		a.handleTasks(w, r, project, parts[2:])
+	case "audit":
+		a.handleProjectAudit(w, r, project)
 	default:
 		http.NotFound(w, r)
 	}
