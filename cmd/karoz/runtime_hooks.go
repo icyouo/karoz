@@ -171,7 +171,7 @@ func (a *app) projectRuntimeQuiescentIgnoring(projectID, ignoredHook, ignoredAge
 	defer a.mu.Unlock()
 	prefix := projectID + "/"
 	for key, run := range a.agentRuns {
-		if ignoredAgentID != "" && key == agentMessageKey(projectID, ignoredAgentID) {
+		if ignoredAgentID != "" && key == projectAgentKey(projectID, ignoredAgentID) {
 			continue
 		}
 		if run.State.Active() && strings.HasPrefix(key, prefix) {

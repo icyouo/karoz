@@ -643,7 +643,7 @@ func (a *app) recordPlanGroupDelivery(projectID, handoffID, body string) {
 	if !found {
 		return
 	}
-	_ = a.saveGroupInboxForProject(projectID)
+	a.saveOrLog("group inbox", a.saveGroupInboxForProject(projectID))
 	plan, ok := a.planByID(projectID, linked.ParentPlanID)
 	if !ok {
 		return

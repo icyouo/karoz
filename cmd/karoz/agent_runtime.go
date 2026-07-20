@@ -10,11 +10,14 @@ import (
 func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent Agent, userText, turnType string, callbacks *AgentStreamCallbacks) (string, error) {
 	var out strings.Builder
 	runID := ""
+	effectiveAgent := normalizeAgentModelConfig(agent)
 	if run, active := a.activeAgentRun(project.ID, agent.ID); active {
 		runID = run.ID
+		effectiveAgent.Provider, effectiveAgent.Model = run.Provider, run.Model
+		effectiveAgent.ThinkingEffort, effectiveAgent.ModelConfigVersion = run.ThinkingEffort, run.ModelConfigVersion
 	}
 	toolCtx := ResidentToolContext{
-		Project: project, Agent: agent, Workdir: project.Path, RunID: runID,
+		Project: project, Agent: effectiveAgent, Workdir: project.Path, RunID: runID,
 		TurnType: normalizeChatTurnType(turnType), EnforceRunScope: runID != "", EnforcePolicy: true,
 	}
 	cb := AgentStreamCallbacks{}
@@ -67,17 +70,19 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 		}
 		return a.drainAgentInterrupts(project.ID, agent.ID, runID)
 	}
-	prompt := a.buildResidentAgentPrompt(project, agent, userText, turnType)
+	prompt := a.buildResidentAgentPrompt(project, effectiveAgent, userText, turnType)
 	if runID != "" {
 		if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateInvokingModel); !ok {
 			return "", fmt.Errorf("resident run %s is no longer active", runID)
 		}
 	}
 	request := CLI2APIRequest{
-		Provider: getenv("KAROZ_AGENT_PROVIDER", "auto"),
-		Prompt:   prompt,
-		Workdir:  project.Path,
-		Mode:     chatTurnRuntimeMode(turnType),
+		Provider:       effectiveAgent.Provider,
+		Model:          effectiveAgent.Model,
+		ThinkingEffort: effectiveAgent.ThinkingEffort,
+		Prompt:         prompt,
+		Workdir:        project.Path,
+		Mode:           chatTurnRuntimeMode(turnType),
 	}
 	provider := a.residentModelProvider()
 	if capabilities := provider.Capabilities(request); !capabilities.SupportsResidentRuntime() {
@@ -115,7 +120,7 @@ func (a *app) agentRouteAllowed(projectID, fromAgentID, toAgentID, intent string
 }
 
 func (a *app) activeMemoriesFor(projectID, agentID, layer string, limit int) []AgentMemoryEntry {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	items := append([]AgentMemoryEntry{}, a.memories[key]...)
 	a.mu.Unlock()
@@ -188,7 +193,7 @@ func (a *app) pendingInboxFor(projectID, agentID string, limit int) []AgentInbox
 }
 
 func (a *app) inboxFor(projectID, agentID string, limit int) []AgentInboxMessage {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	items := append([]AgentInboxMessage{}, a.inbox[key]...)
 	a.mu.Unlock()

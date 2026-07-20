@@ -30,7 +30,7 @@ func (a *app) createTask(project Project, req TaskCreateRequest) Task {
 	a.mu.Lock()
 	a.tasks[project.ID] = append([]Task{task}, a.tasks[project.ID]...)
 	a.mu.Unlock()
-	_ = a.saveTasks()
+	a.saveOrLog("tasks", a.saveTasks())
 	a.appendTaskLog(project.ID, task.ID, "task created: "+task.Title)
 	a.emitRuntimeStateChanged(RuntimeEvent{
 		ID:        randomID(),
@@ -64,7 +64,7 @@ func (a *app) runTask(project Project, task Task) Task {
 	}
 	task.UpdatedAt = time.Now().UTC()
 	a.updateTask(project.ID, task)
-	_ = a.saveTasks()
+	a.saveOrLog("tasks", a.saveTasks())
 	a.notifyTaskRuntimeHooks(project, task)
 	a.emitRuntimeStateChanged(RuntimeEvent{
 		ID:        randomID(),
@@ -117,7 +117,7 @@ func (a *app) runTaskAsync(project Project, task Task, source string) Task {
 	task.Result = ""
 	task.UpdatedAt = time.Now().UTC()
 	a.updateTask(project.ID, task)
-	_ = a.saveTasks()
+	a.saveOrLog("tasks", a.saveTasks())
 	a.appendTaskLog(project.ID, task.ID, "task queued for execution source="+source)
 	go func(started Task) {
 		a.appendTaskLog(project.ID, started.ID, "task started")
@@ -129,7 +129,7 @@ func (a *app) runTaskAsync(project Project, task Task, source string) Task {
 		}
 		started.UpdatedAt = time.Now().UTC()
 		a.updateTask(project.ID, started)
-		_ = a.saveTasks()
+		a.saveOrLog("tasks", a.saveTasks())
 		a.notifyTaskRuntimeHooks(project, started)
 		a.emitRuntimeStateChanged(RuntimeEvent{
 			ID:        randomID(),

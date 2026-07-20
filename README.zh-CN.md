@@ -167,6 +167,8 @@ KAROZ_TASK_PROVIDER=auto
 KAROZ_CODEX_AUTH_PATH=$HOME/.codex/auth.json
 KAROZ_CODEX_BASE_URL=https://chatgpt.com/backend-api/codex
 KAROZ_CODEX_MODEL=gpt-5.6-luna
+ANTHROPIC_API_KEY= # 可选备用；优先复用 Claude CLI OAuth
+KAROZ_ANTHROPIC_BASE_URL=https://api.anthropic.com
 KAROZ_CLI2API_BASE_URL=http://127.0.0.1:8317
 KAROZ_CLI2API_MODEL=claude
 KAROZ_CLI2API_API_KEY=
@@ -174,11 +176,16 @@ KAROZ_TRUST_PROJECT_MCP=0
 KAROZ_VERIFY_COMMAND=
 ```
 
-常驻 Provider（`KAROZ_AGENT_PROVIDER`）：
+`KAROZ_AGENT_PROVIDER` 只为历史 Agent 提供默认值。Studio 会为每个常驻 Agent 持久化 Provider、模型和 thinking effort；切换无需重启 Karoz，从下一次 Run 生效。活动 Run 会锁定启动时的 Provider 快照，切换前必须先停止该 Run。
+
+常驻 Provider：
 
 - `auto`：检测到 Codex OAuth 凭证时使用 `codex-direct`；否则明确报错，因为当前没有能力完整的常驻 Provider。
 - `codex-direct`：读取 Codex CLI OAuth 凭证并直接调用 Codex 上游 API。
 - `codex-oauth` / `codex-api`：同一流式常驻路径的兼容别名。
+- `claude`：通过受控的 stream-json/MCP bridge 复用本机 Claude CLI OAuth 登录；`ANTHROPIC_API_KEY` 仅作为可选备用。Claude 与 Codex 共用 Karoz 的流式、工具、interrupt 和 Bash 审批契约。
+
+Karoz 不会在 Codex 和 Claude 之间静默降级。`/api/runtime/providers` 会返回本机当前可用的 Provider 和模型。
 
 任务与诊断 Provider（`KAROZ_TASK_PROVIDER` 和 `/api/cli2api`）：
 
@@ -186,6 +193,8 @@ KAROZ_VERIFY_COMMAND=
 - `claude`：直接调用宿主机上的 `claude` CLI。
 - `cli2api`：调用 `KAROZ_CLI2API_BASE_URL` 指定的 OpenAI 兼容服务。
 - `stub`：不调用模型，适合界面和任务冒烟测试。
+
+浏览器中的目录选择对话框（创建或导入项目时使用）通过 AppleScript（`osascript`）调用 macOS 原生文件对话框，因此仅在 macOS 上可用；在其他平台上请求会干净地报错，改为手动输入路径即可。
 
 ## Docker
 

@@ -28,6 +28,7 @@ func NewRun(input RunInput, runID string, now time.Time) Run {
 	return Run{
 		ID: runID, ProjectID: input.ProjectID, AgentID: input.AgentID, Trigger: NormalizeTrigger(input.Trigger),
 		TurnType: input.TurnType, SourceID: input.SourceID, MessageID: input.MessageID,
+		Provider: input.Provider, Model: input.Model, ThinkingEffort: input.ThinkingEffort, ModelConfigVersion: input.ModelConfigVersion,
 		State: StatePreparingContext, StartedAt: now.UTC(), UpdatedAt: now.UTC(),
 	}
 }

@@ -175,7 +175,7 @@ func TestResidentToolsMemoryArchiveAndSendTo(t *testing.T) {
 	for i := 0; i < 55; i++ {
 		a.appendAgentMessage(project.ID, "karoz", "user", "question", "message")
 	}
-	if got := a.archives[agentMessageKey(project.ID, "karoz")]; len(got) == 0 {
+	if got := a.archives[projectAgentKey(project.ID, "karoz")]; len(got) == 0 {
 		t.Fatalf("expected archived messages after checkpoint")
 	}
 }
@@ -224,7 +224,7 @@ func TestCreateAgentTeamCreatesGroupedAgentsAndRoutes(t *testing.T) {
 	if !a.agentRouteAllowed(project.ID, architect.ID, reviewer.ID, "handoff") {
 		t.Fatal("report_to/accept_from topology did not create architect -> reviewer route")
 	}
-	a.inbox[agentMessageKey(project.ID, architect.ID)] = []AgentInboxMessage{{
+	a.inbox[projectAgentKey(project.ID, architect.ID)] = []AgentInboxMessage{{
 		ID: "review-findings", ProjectID: project.ID, SourceAgentID: reviewer.ID, TargetAgentID: architect.ID,
 		MessageType: "handoff", Intent: "handoff", Subject: "Review findings", Body: "P0 state transition gap",
 		Status: HandoffDelivered, CreatedAt: time.Now().UTC(),
@@ -676,7 +676,7 @@ func TestLimitToolResultForModelCapsCurrentLoopOutput(t *testing.T) {
 func TestGetArchivedMessagesCompactsToolResults(t *testing.T) {
 	projectID := "p1"
 	agentID := "karoz"
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	largeStdout := strings.Repeat("line\n", 5000)
 	a := &app{
 		agentMessages: map[string][]AgentMessage{
@@ -701,7 +701,7 @@ func TestGetArchivedMessagesCompactsToolResults(t *testing.T) {
 }
 
 func TestSearchArchiveUsesKeywordRelevanceAndOmitsToolPayloads(t *testing.T) {
-	key := agentMessageKey("p1", "architect")
+	key := projectAgentKey("p1", "architect")
 	a := &app{
 		memories: map[string][]AgentMemoryEntry{},
 		archives: map[string][]AgentArchiveMessage{key: {
@@ -1123,7 +1123,7 @@ func TestRuntimeIdleStateConsidersAgentsTasksAndHooks(t *testing.T) {
 		t.Fatal("running task should block runtime quiescence")
 	}
 	a.tasks["p1"] = nil
-	a.agentRuns[agentMessageKey("p1", "worker")] = AgentRun{ID: "r1", ProjectID: "p1", AgentID: "worker", State: RunStateInvokingModel}
+	a.agentRuns[projectAgentKey("p1", "worker")] = AgentRun{ID: "r1", ProjectID: "p1", AgentID: "worker", State: RunStateInvokingModel}
 	if a.projectRuntimeIdle("p1") {
 		t.Fatal("active agent should block idle reconciliation")
 	}
@@ -1186,7 +1186,7 @@ func TestDeleteProjectAgentRemovesAgentAndRoutes(t *testing.T) {
 		settings:    Settings{DataDir: t.TempDir()},
 		agents:      map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Name: "Karoz"}, {ID: "frontend", ProjectID: "p1", Name: "Frontend"}}},
 		agentRoutes: map[string][]AgentRoute{"p1": {{ID: "r1", ProjectID: "p1", FromAgentID: "karoz", ToAgentID: "frontend", Intent: "request"}}},
-		agentRuns:   map[string]AgentRun{agentMessageKey("p1", "frontend"): {ID: "r1", ProjectID: "p1", AgentID: "frontend", State: RunStateExecutingTool, Interrupts: []AgentInterrupt{{AgentID: "frontend", Body: "pending"}}}},
+		agentRuns:   map[string]AgentRun{projectAgentKey("p1", "frontend"): {ID: "r1", ProjectID: "p1", AgentID: "frontend", State: RunStateExecutingTool, Interrupts: []AgentInterrupt{{AgentID: "frontend", Body: "pending"}}}},
 	}
 	if err := a.deleteProjectAgent(project, "karoz"); err == nil {
 		t.Fatal("default agent delete should fail")
@@ -1200,7 +1200,7 @@ func TestDeleteProjectAgentRemovesAgentAndRoutes(t *testing.T) {
 	if len(a.agentRoutes["p1"]) != 0 {
 		t.Fatalf("routes = %+v", a.agentRoutes["p1"])
 	}
-	if _, ok := a.agentRuns[agentMessageKey("p1", "frontend")]; ok {
+	if _, ok := a.agentRuns[projectAgentKey("p1", "frontend")]; ok {
 		t.Fatal("agent run state was not cleared")
 	}
 }

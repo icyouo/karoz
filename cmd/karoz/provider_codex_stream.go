@@ -48,7 +48,7 @@ func invokeCodexDirect(ctx context.Context, workdir, prompt string) (CLI2APIResp
 	return CLI2APIResponse{Provider: "codex-direct", Output: output}, nil
 }
 
-func invokeCodexDirectStream(ctx context.Context, workdir, prompt string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
+func invokeCodexDirectStream(ctx context.Context, workdir, prompt, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
 	parentCtx := ctx
 	toolCtx, cancelTools := context.WithTimeout(parentCtx, residentToolPhaseTimeout)
 	defer cancelTools()
@@ -57,7 +57,7 @@ func invokeCodexDirectStream(ctx context.Context, workdir, prompt string, tools 
 	limitReason := "resident tool loop limit"
 toolLoop:
 	for modelRound := 0; modelRound < 16 && toolRounds < maxResidentToolRounds; modelRound++ {
-		streamed, interrupts, err := streamCodexStep(toolCtx, input, tools, callbacks)
+		streamed, interrupts, err := streamCodexStep(toolCtx, input, model, thinkingEffort, tools, callbacks)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) && parentCtx.Err() == nil {
 				limitReason = "resident tool phase time budget"
@@ -115,7 +115,7 @@ toolLoop:
 	input = append(input, codexMessage("user", "You have reached the "+limitReason+". Stop using tools and provide the best concise answer now. Directly answer the latest user message using the evidence already collected, state any uncertainty, and name the next concrete step."))
 	finalCtx, cancelFinal := context.WithTimeout(parentCtx, residentFinalTimeout)
 	defer cancelFinal()
-	httpReq, err := newCodexDirectRequestWithInput(finalCtx, compactCodexInputForFinal(input, 90000), nil)
+	httpReq, err := newCodexDirectRequestWithInput(finalCtx, compactCodexInputForFinal(input, 90000), model, thinkingEffort, nil)
 	if err != nil {
 		return err
 	}
@@ -158,7 +158,7 @@ type codexStreamResult struct {
 	Text      string
 }
 
-func streamCodexStep(ctx context.Context, input []map[string]any, tools []map[string]any, callbacks AgentStreamCallbacks) (codexStreamResult, []AgentInterrupt, error) {
+func streamCodexStep(ctx context.Context, input []map[string]any, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks) (codexStreamResult, []AgentInterrupt, error) {
 	if callbacks.PollInterrupts != nil {
 		if interrupts := callbacks.PollInterrupts(); len(interrupts) > 0 {
 			if callbacks.OnInterrupt != nil {
@@ -169,7 +169,7 @@ func streamCodexStep(ctx context.Context, input []map[string]any, tools []map[st
 	}
 	stepCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	httpReq, err := newCodexDirectRequestWithInput(stepCtx, input, tools)
+	httpReq, err := newCodexDirectRequestWithInput(stepCtx, input, model, thinkingEffort, tools)
 	if err != nil {
 		return codexStreamResult{}, nil, err
 	}
@@ -256,22 +256,24 @@ func renderAgentInterruptsForModel(interrupts []AgentInterrupt) string {
 }
 
 func newCodexDirectRequest(ctx context.Context, workdir, prompt string) (*http.Request, error) {
-	return newCodexDirectRequestWithInput(ctx, []map[string]any{codexMessage("user", prompt+"\n\nProject workspace: "+workdir)}, nil)
+	return newCodexDirectRequestWithInput(ctx, []map[string]any{codexMessage("user", prompt+"\n\nProject workspace: "+workdir)}, "", "", nil)
 }
 
-func newCodexDirectRequestWithInput(ctx context.Context, input []map[string]any, tools []map[string]any) (*http.Request, error) {
+func newCodexDirectRequestWithInput(ctx context.Context, input []map[string]any, model, thinkingEffort string, tools []map[string]any) (*http.Request, error) {
 	credential, err := resolveCodexCredential(ctx)
 	if err != nil {
 		return nil, err
 	}
+	model = firstNonEmpty(strings.TrimSpace(model), getenv("KAROZ_CODEX_MODEL", "gpt-5.6-luna"))
+	thinkingEffort = firstNonEmpty(strings.ToLower(strings.TrimSpace(thinkingEffort)), "medium")
 	payload := map[string]any{
-		"model":               getenv("KAROZ_CODEX_MODEL", "gpt-5.6-luna"),
+		"model":               model,
 		"instructions":        "You are Karoz, a project-scoped resident agent. Keep responses concise and actionable.",
 		"stream":              true,
 		"store":               false,
 		"parallel_tool_calls": true,
 		"include":             []string{"reasoning.encrypted_content"},
-		"reasoning":           map[string]any{"effort": "medium", "summary": "auto"},
+		"reasoning":           map[string]any{"effort": thinkingEffort, "summary": "auto"},
 		"input":               input,
 	}
 	if len(tools) > 0 {

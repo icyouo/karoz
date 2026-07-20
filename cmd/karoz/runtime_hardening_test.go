@@ -317,7 +317,7 @@ func TestCodexStreamInterruptsToollessResponse(t *testing.T) {
 	startedAt := time.Now()
 	var delivered atomic.Bool
 	var observed atomic.Int32
-	streamed, interrupts, err := streamCodexStep(context.Background(), []map[string]any{codexMessage("user", "hello")}, nil, AgentStreamCallbacks{
+	streamed, interrupts, err := streamCodexStep(context.Background(), []map[string]any{codexMessage("user", "hello")}, "", "", nil, AgentStreamCallbacks{
 		PollInterrupts: func() []AgentInterrupt {
 			if time.Since(startedAt) < 70*time.Millisecond || delivered.Swap(true) {
 				return nil

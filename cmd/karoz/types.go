@@ -298,22 +298,44 @@ type AgentTeamEdge struct {
 }
 
 type AgentUpdateRequest struct {
-	Nickname     string  `json:"nickname"`
-	SystemPrompt *string `json:"system_prompt"`
-	ChatMode     *string `json:"chat_mode"`
+	Nickname                   string  `json:"nickname"`
+	SystemPrompt               *string `json:"system_prompt"`
+	ChatMode                   *string `json:"chat_mode"`
+	Provider                   *string `json:"provider"`
+	Model                      *string `json:"model"`
+	ThinkingEffort             *string `json:"thinking_effort"`
+	ExpectedModelConfigVersion *int64  `json:"expected_model_config_version"`
 }
 
 type CLI2APIRequest struct {
-	Provider string `json:"provider"`
-	Prompt   string `json:"prompt"`
-	Workdir  string `json:"workdir,omitempty"`
-	Mode     string `json:"mode,omitempty"`
+	Provider       string `json:"provider"`
+	Model          string `json:"model,omitempty"`
+	ThinkingEffort string `json:"thinking_effort,omitempty"`
+	Prompt         string `json:"prompt"`
+	Workdir        string `json:"workdir,omitempty"`
+	Mode           string `json:"mode,omitempty"`
 }
 
 type CLI2APIResponse struct {
 	Provider string `json:"provider"`
 	Output   string `json:"output"`
 	Stub     bool   `json:"stub"`
+}
+
+type ResidentModelDescriptor struct {
+	Provider     string   `json:"provider"`
+	ID           string   `json:"id"`
+	DisplayName  string   `json:"display_name"`
+	EffortLevels []string `json:"effort_levels"`
+}
+
+type ResidentProviderDescriptor struct {
+	ID          string                    `json:"id"`
+	DisplayName string                    `json:"display_name"`
+	Transport   string                    `json:"transport"`
+	Available   bool                      `json:"available"`
+	Reason      string                    `json:"reason,omitempty"`
+	Models      []ResidentModelDescriptor `json:"models"`
 }
 
 type ResidentToolContext struct {

@@ -90,7 +90,7 @@ func (a *app) markInboxConsumed(projectID, agentID, messageID string) {
 }
 
 func (a *app) updateInboxMessage(projectID, agentID, messageID string, update func(*AgentInboxMessage)) bool {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	updated := false
 	for i := range a.inbox[key] {
@@ -111,7 +111,7 @@ func (a *app) updateInboxMessage(projectID, agentID, messageID string, update fu
 }
 
 func (a *app) inboxMessage(projectID, agentID, messageID string) (AgentInboxMessage, bool) {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, msg := range a.inbox[key] {
@@ -147,7 +147,7 @@ func (a *app) queueInboxMessage(projectID string, msg AgentInboxMessage) error {
 	msg.Status = HandoffQueued
 	msg.DeliveredAt = nil
 	msg.UpdatedAt = time.Now().UTC()
-	key := agentMessageKey(projectID, msg.TargetAgentID)
+	key := projectAgentKey(projectID, msg.TargetAgentID)
 	a.mu.Lock()
 	correlationCount := 0
 	for _, items := range a.inbox {

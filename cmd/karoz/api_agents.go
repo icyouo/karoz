@@ -51,7 +51,12 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 		}
 		updated, err := a.updateProjectAgent(project, agent.ID, req)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
+			status := http.StatusBadRequest
+			var busy *agentBusyModelConfigError
+			if errors.As(err, &busy) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err)
 			return
 		}
 		writeJSON(w, updated)
@@ -97,7 +102,7 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 	}
 	if len(parts) == 2 && parts[1] == "archive" && r.Method == http.MethodGet {
 		a.mu.Lock()
-		items := append([]AgentArchiveMessage{}, a.archives[agentMessageKey(project.ID, agent.ID)]...)
+		items := append([]AgentArchiveMessage{}, a.archives[projectAgentKey(project.ID, agent.ID)]...)
 		a.mu.Unlock()
 		if items == nil {
 			items = []AgentArchiveMessage{}

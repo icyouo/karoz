@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -39,5 +40,46 @@ func withLogging(next http.Handler) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
+	})
+}
+
+// recoveryWriter tracks whether a response has already been committed so
+// withRecovery only writes a 500 when nothing was sent yet. Flush is forwarded
+// explicitly so SSE handlers keep working through the wrapper.
+type recoveryWriter struct {
+	http.ResponseWriter
+	committed bool
+}
+
+func (w *recoveryWriter) WriteHeader(status int) {
+	w.committed = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *recoveryWriter) Write(data []byte) (int, error) {
+	w.committed = true
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *recoveryWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func withRecovery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wrapped := &recoveryWriter{ResponseWriter: w}
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Printf("panic serving %s %s: %v\n%s", r.Method, r.URL.Path, recovered, debug.Stack())
+				if !wrapped.committed {
+					wrapped.Header().Set("Content-Type", "application/json")
+					wrapped.WriteHeader(http.StatusInternalServerError)
+					_ = json.NewEncoder(wrapped).Encode(map[string]string{"error": "internal server error"})
+				}
+			}
+		}()
+		next.ServeHTTP(wrapped, r)
 	})
 }

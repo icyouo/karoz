@@ -12,7 +12,7 @@ import (
 func (a *app) agentMessagesFor(projectID, agentID string) []AgentMessage {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	out := append([]AgentMessage{}, a.agentMessages[agentMessageKey(projectID, agentID)]...)
+	out := append([]AgentMessage{}, a.agentMessages[projectAgentKey(projectID, agentID)]...)
 	return out
 }
 
@@ -72,7 +72,7 @@ func (a *app) appendAgentMessage(projectID, agentID, role, intent, body string) 
 }
 
 func (a *app) appendAgentMessageForRun(projectID, agentID, runID, role, intent, body string) (AgentMessage, bool) {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
 	if !ok || !run.State.Active() || strings.TrimSpace(runID) == "" || run.ID != runID {
@@ -89,7 +89,7 @@ func (a *app) appendAgentMessageLocked(projectID, agentID, role, intent, body st
 	if a.agentMessages == nil {
 		a.agentMessages = map[string][]AgentMessage{}
 	}
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	session := a.ensureAgentSessionLocked(projectID, agentID)
 	msg := AgentMessage{
 		ID:        messageID(),
@@ -123,7 +123,7 @@ func (a *app) ensureAgentSessionLocked(projectID, agentID string) AgentSessionSt
 	if a.agentSessions == nil {
 		a.agentSessions = map[string]AgentSessionState{}
 	}
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	if state, ok := a.agentSessions[key]; ok && strings.TrimSpace(state.SessionID) != "" {
 		return state
 	}
@@ -144,7 +144,7 @@ func (a *app) agentSessionState(projectID, agentID string) AgentSessionState {
 
 func (a *app) updateAgentSessionState(state AgentSessionState) {
 	a.mu.Lock()
-	a.agentSessions[agentMessageKey(state.ProjectID, state.AgentID)] = state
+	a.agentSessions[projectAgentKey(state.ProjectID, state.AgentID)] = state
 	a.mu.Unlock()
 	if err := a.saveAgentSessions(); err != nil {
 		log.Printf("save agent sessions: %v", err)
@@ -263,7 +263,7 @@ func (a *app) archiveAgentMessages(projectID, agentID string, messages []AgentMe
 	if endSeq < startSeq {
 		return
 	}
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	now := time.Now().UTC()
 	a.mu.Lock()
 	existing := map[int64]bool{}

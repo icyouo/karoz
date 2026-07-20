@@ -8,6 +8,8 @@ services:
       KAROZ_DATA_DIR: "/data"
       KAROZ_PROJECTS_ROOT: "/workspace"
       KAROZ_CODEX_AUTH_PATH: "/host/config/codex/auth.json"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      KAROZ_ANTHROPIC_BASE_URL: "${KAROZ_ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
       CODEX_HOME: "/host/config/codex"
       HOME: "/home/karoz"
     volumes:

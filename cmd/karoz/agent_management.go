@@ -85,6 +85,7 @@ func (a *app) agentWithRuntimeState(project Project, agent Agent) Agent {
 		agent.Runtime = "resident"
 	}
 	agent.ChatMode = normalizeChatTurnType(agent.ChatMode)
+	agent = normalizeAgentModelConfig(agent)
 	if strings.TrimSpace(agent.State) == "" {
 		agent.State = "idle"
 	}
@@ -104,6 +105,28 @@ func (a *app) agentWithRuntimeState(project Project, agent Agent) Agent {
 	agent.SessionID = residentSessionID(project.ID, agent.ID)
 	agent.MessageCount = len(messages)
 	agent.LastSeenAt = lastSeen
+	return agent
+}
+
+func normalizeAgentModelConfig(agent Agent) Agent {
+	if strings.TrimSpace(agent.Provider) == "" {
+		agent.Provider = normalizeResidentProvider(getenv("KAROZ_AGENT_PROVIDER", "auto"))
+	} else {
+		agent.Provider = normalizeResidentProvider(agent.Provider)
+	}
+	if strings.TrimSpace(agent.Model) == "" {
+		if agent.Provider == "claude" {
+			agent.Model = "claude-sonnet-4-6"
+		} else {
+			agent.Model = getenv("KAROZ_CODEX_MODEL", "gpt-5.6-luna")
+		}
+	}
+	if strings.TrimSpace(agent.ThinkingEffort) == "" && agent.Model != "claude-haiku-4-5" {
+		agent.ThinkingEffort = "medium"
+	}
+	if agent.ModelConfigVersion < 1 {
+		agent.ModelConfigVersion = 1
+	}
 	return agent
 }
 
@@ -295,6 +318,7 @@ func (a *app) updateProjectAgent(project Project, agentID string, req AgentUpdat
 		if agents[i].ID != agentID {
 			continue
 		}
+		agents[i] = normalizeAgentModelConfig(agents[i])
 		if nickname := strings.TrimSpace(req.Nickname); nickname != "" {
 			agents[i].Nickname = nickname
 			agents[i].DisplayName = nickname
@@ -310,6 +334,34 @@ func (a *app) updateProjectAgent(project Project, agentID string, req AgentUpdat
 			}
 			agents[i].ChatMode = mode
 		}
+		modelConfigChanged := req.Provider != nil || req.Model != nil || req.ThinkingEffort != nil
+		if modelConfigChanged {
+			key := projectAgentKey(project.ID, agentID)
+			if run, ok := a.agentRuns[key]; ok && run.State.Active() {
+				a.mu.Unlock()
+				return Agent{}, &agentBusyModelConfigError{}
+			}
+			if req.ExpectedModelConfigVersion != nil && *req.ExpectedModelConfigVersion != agents[i].ModelConfigVersion {
+				a.mu.Unlock()
+				return Agent{}, errors.New("model configuration changed; reload before updating")
+			}
+			provider, model, effort := agents[i].Provider, agents[i].Model, agents[i].ThinkingEffort
+			if req.Provider != nil {
+				provider = normalizeResidentProvider(*req.Provider)
+			}
+			if req.Model != nil {
+				model = strings.TrimSpace(*req.Model)
+			}
+			if req.ThinkingEffort != nil {
+				effort = strings.ToLower(strings.TrimSpace(*req.ThinkingEffort))
+			}
+			if err := validateResidentModelConfig(provider, model, effort); err != nil {
+				a.mu.Unlock()
+				return Agent{}, err
+			}
+			agents[i].Provider, agents[i].Model, agents[i].ThinkingEffort = provider, model, effort
+			agents[i].ModelConfigVersion++
+		}
 		agents[i].UpdatedAt = time.Now().UTC()
 		a.agents[project.ID] = agents
 		updated := agents[i]
@@ -323,6 +375,12 @@ func (a *app) updateProjectAgent(project Project, agentID string, req AgentUpdat
 	return Agent{}, fmt.Errorf("agent %s not found", agentID)
 }
 
+type agentBusyModelConfigError struct{}
+
+func (*agentBusyModelConfigError) Error() string {
+	return "stop the active agent run before changing provider or model"
+}
+
 func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	agentID = strings.TrimSpace(agentID)
 	if agentID == "" {
@@ -334,7 +392,7 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	if group, ok := a.groupForAgent(project.ID, agentID); ok && group.CoordinatorAgentID == agentID {
 		return fmt.Errorf("group coordinator cannot be deleted before coordination is transferred")
 	}
-	key := agentMessageKey(project.ID, agentID)
+	key := projectAgentKey(project.ID, agentID)
 	a.mu.Lock()
 	agents := a.agents[project.ID]
 	next := make([]Agent, 0, len(agents))
@@ -360,12 +418,13 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	}
 	a.agentRoutes[project.ID] = routes
 	delete(a.agentRuns, key)
-	if cancel := a.agentRunCancels[key]; cancel != nil {
-		cancel()
-	}
+	cancel := a.agentRunCancels[key]
 	delete(a.agentRunCancels, key)
 	queue := a.schedulerQueue
 	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if queue != nil {
 		queue.CancelAgent(project.ID, agentID, "agent deleted", time.Now().UTC())
 	}

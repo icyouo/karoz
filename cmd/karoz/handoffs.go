@@ -106,10 +106,6 @@ func normalizeHandoffMessage(msg AgentInboxMessage) (AgentInboxMessage, bool) {
 	return msg, changed
 }
 
-func validHandoffTransition(from, to string) bool {
-	return collaborationdomain.ValidHandoffTransition(from, to)
-}
-
 func (a *app) transitionHandoff(projectID, agentID, messageID, next, result string) (AgentInboxMessage, bool) {
 	a.handoffOpsMu.Lock()
 	defer a.handoffOpsMu.Unlock()

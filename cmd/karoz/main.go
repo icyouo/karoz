@@ -2,12 +2,20 @@ package main
 
 import (
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "mcp-bridge" {
+		if err := runClaudeMCPBridge(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			log.Printf("mcp bridge: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	projectsRootFromEnv := strings.TrimSpace(os.Getenv("KAROZ_PROJECTS_ROOT")) != ""
 	settings := Settings{
 		DataDir:      getenv("KAROZ_DATA_DIR", ".karoz"),
@@ -45,8 +53,33 @@ func main() {
 	a.resumeActionablePlans()
 
 	addr := getenv("KAROZ_ADDR", "127.0.0.1:8088")
+	warnIfNonLoopbackAddr(addr)
 	log.Printf("karoz listening on %s projects_root=%s data_dir=%s", addr, a.settings.ProjectsRoot, a.settings.DataDir)
-	if err := http.ListenAndServe(addr, withLogging(a.httpHandler())); err != nil {
+	if err := http.ListenAndServe(addr, withLogging(withRecovery(a.httpHandler()))); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// warnIfNonLoopbackAddr logs a prominent warning when Karoz is configured to
+// listen on anything other than a loopback address. Karoz has no HTTP
+// authentication, so it must never be reachable from a LAN or public network.
+func warnIfNonLoopbackAddr(addr string) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return
+	}
+	log.Printf("\n"+
+		"==============================================================\n"+
+		" WARNING: Karoz is listening on a non-loopback address (%s).\n"+
+		" Karoz has NO authentication: anyone who can reach this port\n"+
+		" can drive agents and execute commands on this machine.\n"+
+		" Do NOT expose Karoz to a LAN or public network.\n"+
+		"==============================================================", addr)
 }

@@ -13,7 +13,7 @@ func TestNewMuxRoutesProjectAndScopedRequests(t *testing.T) {
 	mux := NewMux(Handlers{
 		Index: handler("index"), Settings: handler("settings"), FolderDialog: handler("folder"),
 		AgentTemplates: handler("agents"), AgentTeamTemplates: handler("teams"), Diagnostics: handler("diagnostics"),
-		CLI2API: handler("cli"), Projects: handler("projects"), ProjectScoped: handler("scoped"),
+		CLI2API: handler("cli"), RuntimeProviders: handler("providers"), Projects: handler("projects"), ProjectScoped: handler("scoped"),
 	})
 	for path, want := range map[string]string{"/api/projects": "projects", "/api/projects/p1/agents": "scoped", "/api/settings": "settings"} {
 		response := httptest.NewRecorder()

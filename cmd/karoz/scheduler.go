@@ -108,7 +108,7 @@ func (a *app) scheduleAgentRun(job ScheduledRun) (string, bool) {
 	}
 	job.UpdatedAt = now
 	job.Status = ScheduledRunQueued
-	key := agentMessageKey(job.ProjectID, job.AgentID)
+	key := projectAgentKey(job.ProjectID, job.AgentID)
 	queue := a.ensureSchedulerQueue()
 	enqueued := queue.Enqueue(job)
 	if !enqueued.Accepted {
@@ -239,12 +239,12 @@ func (a *app) ensureSchedulerExecutorsLocked() {
 }
 
 func (a *app) scheduledAgentRunCount(projectID, agentID string) int {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	return a.ensureSchedulerQueue().PendingCount(key)
 }
 
 func (a *app) scheduledAgentWorkerActive(projectID, agentID string) bool {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	return a.ensureSchedulerQueue().WorkerActive(key)
 }
 

@@ -46,7 +46,7 @@ func (a *app) beginAgentRun(input AgentRunInput) (AgentRun, bool) {
 	input.TurnType = normalizeChatTurnType(input.TurnType)
 	input.SourceID = strings.TrimSpace(input.SourceID)
 	input.MessageID = strings.TrimSpace(input.MessageID)
-	key := agentMessageKey(input.ProjectID, input.AgentID)
+	key := projectAgentKey(input.ProjectID, input.AgentID)
 	now := time.Now().UTC()
 	a.mu.Lock()
 	if a.agentRuns == nil {
@@ -58,6 +58,15 @@ func (a *app) beginAgentRun(input AgentRunInput) (AgentRun, bool) {
 	if current, ok := a.agentRuns[key]; ok && current.State.Active() {
 		a.mu.Unlock()
 		return current, false
+	}
+	for _, candidate := range a.agents[input.ProjectID] {
+		if candidate.ID != input.AgentID {
+			continue
+		}
+		candidate = normalizeAgentModelConfig(candidate)
+		input.Provider, input.Model = candidate.Provider, candidate.Model
+		input.ThinkingEffort, input.ModelConfigVersion = candidate.ThinkingEffort, candidate.ModelConfigVersion
+		break
 	}
 	runID := strings.TrimSpace(input.RunID)
 	if runID == "" {
@@ -82,7 +91,7 @@ func (a *app) beginAgentRun(input AgentRunInput) (AgentRun, bool) {
 }
 
 func (a *app) transitionAgentRun(projectID, agentID, expectedRunID string, next RunState) (AgentRun, bool) {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
 	if !ok || !run.State.Active() || strings.TrimSpace(expectedRunID) == "" || run.ID != expectedRunID {
@@ -118,7 +127,7 @@ func (a *app) finishAgentRun(projectID, agentID, expectedRunID string, final Run
 	if final != RunStateFailed && final != RunStateCancelled {
 		final = RunStateDone
 	}
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	now := time.Now().UTC()
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
@@ -152,7 +161,7 @@ func (a *app) finishAgentRun(projectID, agentID, expectedRunID string, final Run
 }
 
 func (a *app) activeAgentRun(projectID, agentID string) (AgentRun, bool) {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	run, ok := a.agentRuns[key]
@@ -168,7 +177,7 @@ func (a *app) bindAgentRunContext(parent context.Context, projectID, agentID, ex
 	if parent == nil {
 		parent = context.Background()
 	}
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	ctx, cancel := context.WithCancel(parent)
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
@@ -190,7 +199,7 @@ func (a *app) bindAgentRunContext(parent context.Context, projectID, agentID, ex
 }
 
 func (a *app) cancelAgentRun(projectID, agentID string) (AgentRun, bool) {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
 	cancel := a.agentRunCancels[key]
@@ -214,7 +223,7 @@ func (a *app) enqueueAgentInterrupt(projectID, agentID string, msg AgentMessage,
 		TurnType:  normalizeChatTurnType(turnType),
 		CreatedAt: time.Now().UTC(),
 	}
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
 	if !ok || !run.State.Active() {
@@ -229,7 +238,7 @@ func (a *app) enqueueAgentInterrupt(projectID, agentID string, msg AgentMessage,
 }
 
 func (a *app) drainAgentInterrupts(projectID, agentID, expectedRunID string) []AgentInterrupt {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
 	if !ok || run.ID != expectedRunID || len(run.Interrupts) == 0 {

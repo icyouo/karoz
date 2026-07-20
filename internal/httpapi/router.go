@@ -9,6 +9,7 @@ type Handlers struct {
 	AgentTemplates     http.HandlerFunc
 	AgentTeamTemplates http.HandlerFunc
 	Diagnostics        http.HandlerFunc
+	RuntimeProviders   http.HandlerFunc
 	CLI2API            http.HandlerFunc
 	Projects           http.HandlerFunc
 	ProjectScoped      http.HandlerFunc
@@ -22,6 +23,7 @@ func NewMux(handlers Handlers) *http.ServeMux {
 	mux.HandleFunc("/api/agent-templates", handlers.AgentTemplates)
 	mux.HandleFunc("/api/agent-team-templates", handlers.AgentTeamTemplates)
 	mux.HandleFunc("/api/diagnostics", handlers.Diagnostics)
+	mux.HandleFunc("/api/runtime/providers", handlers.RuntimeProviders)
 	mux.HandleFunc("/api/cli2api", handlers.CLI2API)
 	mux.HandleFunc("/api/projects", handlers.Projects)
 	mux.HandleFunc("/api/projects/", handlers.ProjectScoped)

@@ -11,7 +11,3 @@ type AgentCapabilities = agentdomain.Capabilities
 func capabilitiesForAgent(agent Agent) AgentCapabilities {
 	return agentdomain.CapabilitiesFor(agent)
 }
-
-func isKarozAgent(agent Agent) bool {
-	return agentdomain.IsKaroz(agent)
-}

@@ -114,19 +114,37 @@ func (a *app) loadArtifacts() error {
 	return nil
 }
 
+// saveOrLog keeps best-effort persistence visible: saves whose errors are not
+// actionable at the call site are logged instead of silently discarded.
+func (a *app) saveOrLog(what string, err error) {
+	if err != nil {
+		log.Printf("save %s: %v", what, err)
+	}
+}
+
 func (a *app) saveArtifacts() error {
+	// Resolve project paths before taking a.mu: projectByID locks a.mu
+	// internally (applyProjectAlias), so it cannot run while a.mu is held.
 	a.mu.Lock()
-	snapshot := make(map[string][]Artifact, len(a.artifacts))
-	for projectID, items := range a.artifacts {
-		snapshot[projectID] = append([]Artifact{}, items...)
+	projectIDs := make([]string, 0, len(a.artifacts))
+	for projectID := range a.artifacts {
+		projectIDs = append(projectIDs, projectID)
 	}
 	a.mu.Unlock()
-	for projectID, items := range snapshot {
+	projectPaths := make(map[string]string, len(projectIDs))
+	for _, projectID := range projectIDs {
 		project, err := a.projectByID(projectID)
 		if err != nil {
 			return err
 		}
-		if err := persistenceadapter.NewJSONStore(filepath.Join(project.Path, ".karoz")).Save("artifacts.json", items, 0644); err != nil {
+		projectPaths[projectID] = project.Path
+	}
+	// Hold a.mu through the writes (same pattern as the other save* funcs) so
+	// concurrent saves cannot snapshot and write artifacts.json out of order.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for projectID, path := range projectPaths {
+		if err := persistenceadapter.NewJSONStore(filepath.Join(path, ".karoz")).Save("artifacts.json", a.artifacts[projectID], 0644); err != nil {
 			return err
 		}
 	}

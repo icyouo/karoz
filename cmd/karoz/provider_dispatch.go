@@ -67,7 +67,19 @@ func (a *app) invokeCLI2APIStream(ctx context.Context, req CLI2APIRequest, toolC
 	if provider == "codex-direct" || provider == "codex-oauth" || provider == "codex-api" {
 		toolCtx.Workdir = workdir
 		tools := a.residentToolSpecsForContext(ctx, toolCtx)
-		return invokeCodexDirectStream(ctx, workdir, prompt, tools, callbacks, func(call codexToolCall) (string, error) {
+		return invokeCodexDirectStream(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, func(call codexToolCall) (string, error) {
+			return a.executeResidentTool(ctx, toolCtx, call)
+		})
+	}
+	if provider == "claude-api" {
+		toolCtx.Workdir = workdir
+		tools := a.residentToolSpecsForContext(ctx, toolCtx)
+		if claudeCLIAuthenticated(ctx) {
+			return invokeClaudeCLIStream(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, func(call codexToolCall) (string, error) {
+				return a.executeResidentTool(ctx, toolCtx, call)
+			})
+		}
+		return invokeClaudeDirectStream(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, func(call codexToolCall) (string, error) {
 			return a.executeResidentTool(ctx, toolCtx, call)
 		})
 	}
@@ -84,7 +96,14 @@ func (a *app) invokeCLI2APIStream(ctx context.Context, req CLI2APIRequest, toolC
 func (a *app) resolveResidentProvider(raw string) string {
 	provider := strings.ToLower(strings.TrimSpace(raw))
 	if provider != "" && provider != "auto" {
-		return provider
+		switch normalizeResidentProvider(provider) {
+		case "codex":
+			return "codex-direct"
+		case "claude":
+			return "claude-api"
+		default:
+			return provider
+		}
 	}
 	if fileExists(expandHome(getenv("KAROZ_CODEX_AUTH_PATH", "~/.codex/auth.json"))) {
 		return "codex-direct"
@@ -96,6 +115,11 @@ func (a *app) residentProviderCapabilities(raw string) runtimedomain.ProviderCap
 	switch a.resolveResidentProvider(raw) {
 	case "codex-direct", "codex-oauth", "codex-api":
 		return runtimedomain.ProviderCapabilities{Streaming: true, Tools: true, Interrupts: true}
+	case "claude-api":
+		if descriptor, _ := residentProviderDescriptor("claude"); descriptor.Available {
+			return runtimedomain.ProviderCapabilities{Streaming: true, Tools: true, Interrupts: true}
+		}
+		return runtimedomain.ProviderCapabilities{}
 	default:
 		return runtimedomain.ProviderCapabilities{}
 	}

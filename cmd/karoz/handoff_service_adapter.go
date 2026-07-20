@@ -14,7 +14,7 @@ func (repository appHandoffRepository) Get(projectID, agentID, messageID string)
 }
 
 func (repository appHandoffRepository) Save(message AgentInboxMessage) error {
-	key := agentMessageKey(message.ProjectID, message.TargetAgentID)
+	key := projectAgentKey(message.ProjectID, message.TargetAgentID)
 	repository.app.mu.Lock()
 	items := repository.app.inbox[key]
 	found := false

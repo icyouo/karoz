@@ -134,14 +134,12 @@ func (a *app) upsertBlackboardProjection(entry AgentBlackboardEntry) {
 		items[i] = entry
 		a.blackboard[entry.ProjectID] = items
 		a.mu.Unlock()
-		if err := a.saveBlackboard(); err != nil {
-			return
-		}
+		a.saveOrLog("blackboard", a.saveBlackboard())
 		return
 	}
 	a.blackboard[entry.ProjectID] = append(items, entry)
 	a.mu.Unlock()
-	_ = a.saveBlackboard()
+	a.saveOrLog("blackboard", a.saveBlackboard())
 }
 
 func (a *app) handoffByID(projectID, messageID string) (AgentInboxMessage, bool) {

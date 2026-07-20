@@ -167,6 +167,8 @@ KAROZ_TASK_PROVIDER=auto
 KAROZ_CODEX_AUTH_PATH=$HOME/.codex/auth.json
 KAROZ_CODEX_BASE_URL=https://chatgpt.com/backend-api/codex
 KAROZ_CODEX_MODEL=gpt-5.6-luna
+ANTHROPIC_API_KEY= # optional fallback; Claude CLI OAuth is preferred
+KAROZ_ANTHROPIC_BASE_URL=https://api.anthropic.com
 KAROZ_CLI2API_BASE_URL=http://127.0.0.1:8317
 KAROZ_CLI2API_MODEL=claude
 KAROZ_CLI2API_API_KEY=
@@ -174,11 +176,16 @@ KAROZ_TRUST_PROJECT_MCP=0
 KAROZ_VERIFY_COMMAND=
 ```
 
-Resident provider (`KAROZ_AGENT_PROVIDER`):
+`KAROZ_AGENT_PROVIDER` supplies the default for existing agents. Studio persists the selected provider, model, and thinking effort per resident agent; changes take effect on the next Run without restarting Karoz. An active Run keeps its provider snapshot and must be stopped before changing the selection.
+
+Resident providers:
 
 - `auto`: use `codex-direct` when Codex OAuth credentials are available; otherwise fail explicitly because a capability-complete resident provider is unavailable.
 - `codex-direct`: read Codex CLI OAuth credentials and call the Codex upstream API directly.
 - `codex-oauth` / `codex-api`: compatibility aliases for the same streaming resident path.
+- `claude`: reuse the local Claude CLI OAuth login through a restricted stream-json/MCP bridge. `ANTHROPIC_API_KEY` is an optional fallback. Claude uses the same Karoz streaming, tool, interrupt, and Bash-approval contract as Codex.
+
+Karoz never silently falls back between Codex and Claude. `/api/runtime/providers` reports which providers and models are available on this machine.
 
 Task and diagnostics providers (`KAROZ_TASK_PROVIDER` and `/api/cli2api`):
 
@@ -186,6 +193,8 @@ Task and diagnostics providers (`KAROZ_TASK_PROVIDER` and `/api/cli2api`):
 - `claude`: call the host `claude` CLI directly.
 - `cli2api`: call the OpenAI-compatible service configured by `KAROZ_CLI2API_BASE_URL`.
 - `stub`: skip model calls for UI and task smoke testing.
+
+The browser folder-picker dialog (used when creating or importing a project) drives the native macOS file dialog through AppleScript (`osascript`), so it works on macOS only. On other platforms the request fails cleanly with an error — type the path manually instead.
 
 ## Docker
 

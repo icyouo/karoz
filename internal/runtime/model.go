@@ -48,13 +48,17 @@ func (state State) Active() bool {
 }
 
 type RunInput struct {
-	RunID     string  `json:"run_id,omitempty"`
-	ProjectID string  `json:"project_id"`
-	AgentID   string  `json:"agent_id"`
-	Trigger   Trigger `json:"trigger"`
-	TurnType  string  `json:"turn_type,omitempty"`
-	SourceID  string  `json:"source_id,omitempty"`
-	MessageID string  `json:"message_id,omitempty"`
+	RunID              string  `json:"run_id,omitempty"`
+	ProjectID          string  `json:"project_id"`
+	AgentID            string  `json:"agent_id"`
+	Trigger            Trigger `json:"trigger"`
+	TurnType           string  `json:"turn_type,omitempty"`
+	SourceID           string  `json:"source_id,omitempty"`
+	MessageID          string  `json:"message_id,omitempty"`
+	Provider           string  `json:"provider,omitempty"`
+	Model              string  `json:"model,omitempty"`
+	ThinkingEffort     string  `json:"thinking_effort,omitempty"`
+	ModelConfigVersion int64   `json:"model_config_version,omitempty"`
 }
 
 type Interrupt struct {
@@ -68,19 +72,23 @@ type Interrupt struct {
 }
 
 type Run struct {
-	ID         string      `json:"id"`
-	ProjectID  string      `json:"project_id"`
-	AgentID    string      `json:"agent_id"`
-	Trigger    Trigger     `json:"trigger"`
-	TurnType   string      `json:"turn_type,omitempty"`
-	SourceID   string      `json:"source_id,omitempty"`
-	MessageID  string      `json:"message_id,omitempty"`
-	State      State       `json:"state"`
-	Error      string      `json:"error,omitempty"`
-	StartedAt  time.Time   `json:"started_at"`
-	UpdatedAt  time.Time   `json:"updated_at"`
-	EndedAt    *time.Time  `json:"ended_at,omitempty"`
-	Interrupts []Interrupt `json:"interrupts,omitempty"`
+	ID                 string      `json:"id"`
+	ProjectID          string      `json:"project_id"`
+	AgentID            string      `json:"agent_id"`
+	Trigger            Trigger     `json:"trigger"`
+	TurnType           string      `json:"turn_type,omitempty"`
+	SourceID           string      `json:"source_id,omitempty"`
+	MessageID          string      `json:"message_id,omitempty"`
+	Provider           string      `json:"provider,omitempty"`
+	Model              string      `json:"model,omitempty"`
+	ThinkingEffort     string      `json:"thinking_effort,omitempty"`
+	ModelConfigVersion int64       `json:"model_config_version,omitempty"`
+	State              State       `json:"state"`
+	Error              string      `json:"error,omitempty"`
+	StartedAt          time.Time   `json:"started_at"`
+	UpdatedAt          time.Time   `json:"updated_at"`
+	EndedAt            *time.Time  `json:"ended_at,omitempty"`
+	Interrupts         []Interrupt `json:"interrupts,omitempty"`
 }
 
 type Event struct {

@@ -28,7 +28,7 @@ func (a *app) createMemory(projectID, agentID, layer string, args map[string]any
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	a.memories[key] = append(a.memories[key], entry)
 	a.mu.Unlock()
@@ -53,7 +53,7 @@ func (a *app) dropPendingMemory(projectID, agentID, id string) string {
 	if strings.TrimSpace(id) == "" {
 		return toolJSON(map[string]any{"error": "validation_error", "message": "id is required"})
 	}
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	now := time.Now().UTC()
 	a.mu.Lock()
 	found := false
@@ -81,7 +81,7 @@ func (a *app) searchArchive(projectID, agentID, query string, limit int) string 
 	if query == "" {
 		return toolJSON(map[string]any{"error": "validation_error", "message": "query is required"})
 	}
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	memories := append([]AgentMemoryEntry{}, a.memories[key]...)
 	archives := append([]AgentArchiveMessage{}, a.archives[key]...)
@@ -160,7 +160,7 @@ func (a *app) searchArchive(projectID, agentID, query string, limit int) string 
 }
 
 func (a *app) getArchivedMessages(projectID, agentID string, startSeq, endSeq int64, limit int) string {
-	key := agentMessageKey(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	archives := append([]AgentArchiveMessage{}, a.archives[key]...)
 	messages := append([]AgentMessage{}, a.agentMessages[key]...)

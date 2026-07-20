@@ -102,7 +102,7 @@ func residentSessionID(projectID, agentID string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-func agentMessageKey(projectID, agentID string) string {
+func projectAgentKey(projectID, agentID string) string {
 	return projectID + "/" + agentID
 }
 

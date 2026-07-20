@@ -58,7 +58,7 @@ func TestScheduledRunsRecoverQueueOrderAndInterruptedAttempt(t *testing.T) {
 	if err := after.loadScheduledRuns(); err != nil {
 		t.Fatal(err)
 	}
-	queue := after.schedulerQueue.QueueIDs(agentMessageKey("p1", "designer"))
+	queue := after.schedulerQueue.QueueIDs(projectAgentKey("p1", "designer"))
 	if len(queue) != 2 || queue[0] != queued.ID || queue[1] != running.ID {
 		t.Fatalf("recovered queue = %#v", queue)
 	}
@@ -165,7 +165,7 @@ func TestScheduledHandoffRecoveryReturnsWorkingInboxToDelivered(t *testing.T) {
 		CreatedAt: now, UpdatedAt: now, WorkingAt: &workingAt,
 	}
 	before := newSchedulerTestApp(dataDir)
-	before.inbox[agentMessageKey("p1", "designer")] = []AgentInboxMessage{inbox}
+	before.inbox[projectAgentKey("p1", "designer")] = []AgentInboxMessage{inbox}
 	if err := before.saveInbox(); err != nil {
 		t.Fatal(err)
 	}

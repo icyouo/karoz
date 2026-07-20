@@ -42,7 +42,11 @@ func (a *app) streamAgentMessage(w http.ResponseWriter, r *http.Request, project
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	writeSSE(w, "meta", map[string]any{"agent": a.agentWithRuntimeState(project, agent), "type": normalizeChatTurnType(turnType)})
+	meta := map[string]any{"agent": a.agentWithRuntimeState(project, agent), "type": normalizeChatTurnType(turnType)}
+	if run, active := a.activeAgentRun(project.ID, agent.ID); active && run.ID == runID {
+		meta["run"] = map[string]any{"id": run.ID, "provider": run.Provider, "model": run.Model, "thinking_effort": run.ThinkingEffort, "model_config_version": run.ModelConfigVersion}
+	}
+	writeSSE(w, "meta", meta)
 	flusher.Flush()
 
 	message, err := a.runResidentAgentTurn(r.Context(), project, agent, userText, turnType, &AgentStreamCallbacks{

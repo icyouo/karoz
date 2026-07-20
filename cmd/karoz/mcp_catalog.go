@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -105,11 +106,13 @@ func (a *app) discoverMCPTools(ctx context.Context, workdir string) ([]mcpTool, 
 		}
 		client, err := startMCPClient(ctx, workdir, cfg)
 		if err != nil {
+			log.Printf("mcp discovery: start server %s: %v", name, err)
 			continue
 		}
 		tools, err := client.listTools(ctx, name)
 		_ = client.close()
 		if err != nil {
+			log.Printf("mcp discovery: list tools from server %s: %v", name, err)
 			continue
 		}
 		out = append(out, tools...)

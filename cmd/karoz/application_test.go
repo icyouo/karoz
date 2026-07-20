@@ -5,6 +5,7 @@ import (
 	runtimedomain "github.com/karoz/karoz/internal/runtime"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -145,3 +146,83 @@ func TestResidentAgentChatModePersistsAndDefaultsMessageMode(t *testing.T) {
 		t.Fatalf("invalid chat mode status = %d body=%s", invalidResponse.Code, invalidResponse.Body.String())
 	}
 }
+
+func TestResidentAgentModelConfigPersistsAndRunSnapshotsIt(t *testing.T) {
+	dataDir := t.TempDir()
+	authPath := dataDir + "/auth.json"
+	if err := os.WriteFile(authPath, []byte(`{"tokens":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KAROZ_CODEX_AUTH_PATH", authPath)
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: t.TempDir()})
+	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
+	a.agents[project.ID] = []Agent{{ID: "architect", ProjectID: project.ID, Name: "Architect"}}
+	updated, err := a.updateProjectAgent(project, "architect", AgentUpdateRequest{Provider: ptrString("codex"), Model: ptrString("gpt-5.3-codex"), ThinkingEffort: ptrString("high")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, started := a.beginAgentRun(AgentRunInput{ProjectID: project.ID, AgentID: updated.ID, Trigger: RunTriggerUserDirect, TurnType: "ask"})
+	if !started || run.Provider != "codex" || run.Model != "gpt-5.3-codex" || run.ThinkingEffort != "high" || run.ModelConfigVersion != updated.ModelConfigVersion {
+		t.Fatalf("run snapshot = %+v", run)
+	}
+	if _, err := a.updateProjectAgent(project, "architect", AgentUpdateRequest{Model: ptrString("gpt-5.2")}); err == nil {
+		t.Fatal("expected active-run model update to fail")
+	}
+	a.finishAgentRun(project.ID, updated.ID, run.ID, RunStateDone, nil)
+	after := newApp(Settings{DataDir: dataDir, ProjectsRoot: t.TempDir()})
+	if err := after.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, ok := after.projectAgent(project, "architect")
+	if !ok || reloaded.Provider != "codex" || reloaded.Model != "gpt-5.3-codex" || reloaded.ThinkingEffort != "high" {
+		t.Fatalf("reloaded = %+v", reloaded)
+	}
+}
+
+func TestResidentAgentCanSwitchToClaudeAndActiveRunReturnsConflict(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
+	a.agents[project.ID] = []Agent{{ID: "reviewer", ProjectID: project.ID, Name: "Reviewer"}}
+	patch := httptest.NewRequest(http.MethodPatch, "/agents/reviewer", strings.NewReader(`{"provider":"claude","model":"claude-sonnet-4-6","thinking_effort":"high","expected_model_config_version":1}`))
+	patch.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	a.handleAgents(response, patch, project, []string{"reviewer"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("Claude switch status=%d body=%s", response.Code, response.Body.String())
+	}
+	configured, _ := a.projectAgent(project, "reviewer")
+	run, started := a.beginAgentRun(AgentRunInput{ProjectID: project.ID, AgentID: configured.ID, Trigger: RunTriggerUserDirect, TurnType: "ask"})
+	if !started || run.Provider != "claude" || run.Model != "claude-sonnet-4-6" || run.ThinkingEffort != "high" {
+		t.Fatalf("Claude run snapshot=%+v", run)
+	}
+	patch = httptest.NewRequest(http.MethodPatch, "/agents/reviewer", strings.NewReader(`{"provider":"claude","model":"claude-opus-4-8","thinking_effort":"xhigh"}`))
+	patch.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	a.handleAgents(response, patch, project, []string{"reviewer"})
+	if response.Code != http.StatusConflict {
+		t.Fatalf("active switch status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRuntimeProvidersEndpointReportsProviderAvailability(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("KAROZ_CLAUDE_CLI_AUTH", "disabled")
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	response := httptest.NewRecorder()
+	a.handleRuntimeProviders(response, httptest.NewRequest(http.MethodGet, "/api/runtime/providers", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"claude"`) || !strings.Contains(response.Body.String(), `"available":false`) {
+		t.Fatalf("providers response=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRuntimeProvidersPreferClaudeCLIOAuth(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("KAROZ_CLAUDE_CLI_AUTH", "available")
+	descriptor, ok := residentProviderDescriptor("claude")
+	if !ok || !descriptor.Available || descriptor.Transport != "claude-cli-oauth" {
+		t.Fatalf("Claude descriptor=%+v", descriptor)
+	}
+}
+
+func ptrString(value string) *string { return &value }
