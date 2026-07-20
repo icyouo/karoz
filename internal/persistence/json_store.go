@@ -54,6 +54,9 @@ func (store JSONStore) Save(name string, value any, perm os.FileMode) error {
 	return SaveJSONAtomic(store.path(name), value, perm)
 }
 
+// SaveJSONAtomic writes value as indented JSON to path via a temp file +
+// rename, fsyncing the temp file before the rename and the directory after
+// it, so a crash cannot tear the file or lose the rename.
 func SaveJSONAtomic(path string, value any, perm os.FileMode) error {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
@@ -64,14 +67,41 @@ func SaveJSONAtomic(path string, value any, perm os.FileMode) error {
 		return err
 	}
 	tmp := fmt.Sprintf("%s.tmp-%d-%d", path, os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
+	syncDir(filepath.Dir(path))
 	return nil
+}
+
+// syncDir fsyncs a directory so a rename inside it survives a crash.
+// Best-effort: not every filesystem supports directory syncs.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 func (store JSONStore) path(name string) string {
