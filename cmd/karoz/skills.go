@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	skilldomain "github.com/karoz/karoz/internal/skill"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -9,13 +10,7 @@ import (
 	"strings"
 )
 
-type Skill struct {
-	Name             string `json:"name"`
-	Description      string `json:"description"`
-	ShortDescription string `json:"short_description,omitempty"`
-	Path             string `json:"path"`
-	Scope            string `json:"scope"`
-}
+type Skill = skilldomain.Skill
 
 var skillMentionPattern = regexp.MustCompile(`(?:^|\s)([$/])([A-Za-z0-9_.:-]+)`)
 

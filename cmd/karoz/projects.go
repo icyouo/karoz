@@ -13,7 +13,7 @@ import (
 func (a *app) scanProjects() ([]Project, error) {
 	projects := make([]Project, 0)
 	seen := map[string]bool{}
-	for index, root := range a.settings.workspaceRoots() {
+	for index, root := range a.settings.WorkspaceRoots() {
 		scanned, err := scanWorkspaceProjects(root, index == 0)
 		if err != nil {
 			if index == 0 {

@@ -68,12 +68,6 @@ func normalizeWorkspaceRoots(roots []string, mainRoot string) []string {
 	return out
 }
 
-func (s Settings) workspaceRoots() []string {
-	roots := []string{filepath.Clean(expandHome(s.ProjectsRoot))}
-	roots = append(roots, normalizeWorkspaceRoots(s.ExtraProjectsRoots, s.ProjectsRoot)...)
-	return roots
-}
-
 func projectID(path string) string {
 	sum := sha1.Sum([]byte(filepath.Clean(path)))
 	return hex.EncodeToString(sum[:])[:12]

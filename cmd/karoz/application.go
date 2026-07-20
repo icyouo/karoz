@@ -44,6 +44,6 @@ func (a *app) httpHandler() http.Handler {
 		AgentTemplates: a.handleAgentTemplates, AgentTeamTemplates: a.handleAgentTeamTemplates,
 		Diagnostics: a.handleDiagnostics, CLI2API: a.handleCLI2API,
 		RuntimeProviders: a.handleRuntimeProviders,
-		Projects: a.handleProjects, ProjectScoped: a.handleProjectScoped,
+		Projects:         a.handleProjects, ProjectScoped: a.handleProjectScoped,
 	})
 }

@@ -85,3 +85,114 @@ func CapabilitiesFor(agent Agent) Capabilities {
 	}
 	return capabilities
 }
+
+type AgentTemplate struct {
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	DisplayName  string         `json:"display_name"`
+	ShortName    string         `json:"short_name"`
+	Role         string         `json:"role"`
+	SystemPrompt string         `json:"system_prompt"`
+	Emoji        string         `json:"emoji"`
+	Summary      string         `json:"summary"`
+	Config       map[string]any `json:"config"`
+	Source       string         `json:"source"`
+	Deprecated   bool           `json:"deprecated"`
+}
+
+type AgentMessage struct {
+	ID        string    `json:"id"`
+	ProjectID string    `json:"project_id"`
+	AgentID   string    `json:"agent_id"`
+	SessionID string    `json:"session_id"`
+	Seq       int64     `json:"seq"`
+	Role      string    `json:"role"`
+	Intent    string    `json:"intent"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type AgentMessagesPage struct {
+	Messages      []AgentMessage `json:"messages"`
+	HasMore       bool           `json:"has_more"`
+	NextBeforeSeq int64          `json:"next_before_seq,omitempty"`
+}
+
+type AgentArchiveMessage struct {
+	ID         string    `json:"id"`
+	ProjectID  string    `json:"project_id"`
+	AgentID    string    `json:"agent_id"`
+	SessionID  string    `json:"session_id"`
+	Seq        int64     `json:"seq"`
+	Role       string    `json:"role"`
+	Intent     string    `json:"intent"`
+	Body       string    `json:"body"`
+	CreatedAt  time.Time `json:"created_at"`
+	ArchivedAt time.Time `json:"archived_at"`
+}
+
+type AgentMemoryEntry struct {
+	ID         string         `json:"id"`
+	ProjectID  string         `json:"project_id"`
+	AgentID    string         `json:"agent_id"`
+	SessionID  string         `json:"session_id"`
+	Layer      string         `json:"layer"`
+	State      string         `json:"state"`
+	Priority   int            `json:"priority"`
+	Summary    string         `json:"summary"`
+	Detail     string         `json:"detail"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	ArchivedAt *time.Time     `json:"archived_at,omitempty"`
+}
+
+type AgentRoute struct {
+	ID          string    `json:"id"`
+	ProjectID   string    `json:"project_id"`
+	FromAgentID string    `json:"from_agent_id"`
+	ToAgentID   string    `json:"to_agent_id"`
+	Intent      string    `json:"intent"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type AgentSessionState struct {
+	SessionID           string    `json:"session_id"`
+	ProjectID           string    `json:"project_id"`
+	AgentID             string    `json:"agent_id"`
+	ShortWindowStartSeq int64     `json:"short_window_start_seq"`
+	BoundarySeq         int64     `json:"boundary_seq"`
+	LongTermVersion     int64     `json:"long_term_version"`
+	ResidentSummary     string    `json:"resident_summary"`
+	CoveredSeqStart     int64     `json:"covered_seq_start"`
+	CoveredSeqEnd       int64     `json:"covered_seq_end"`
+	LastCheckpointAt    time.Time `json:"last_checkpoint_at"`
+}
+
+type AgentTeam struct {
+	ID                  string            `json:"id"`
+	Name                string            `json:"name"`
+	Description         string            `json:"description"`
+	CoordinatorMemberID string            `json:"coordinator_member_id"`
+	Agents              []AgentTeamMember `json:"agents"`
+	Edges               []AgentTeamEdge   `json:"edges"`
+}
+
+type AgentTeamMember struct {
+	ID           string   `json:"id"`
+	Nickname     string   `json:"nickname"`
+	TemplateID   string   `json:"template_id"`
+	Role         string   `json:"role"`
+	AcceptFrom   []string `json:"accept_from"`
+	ReportTo     []string `json:"report_to"`
+	StartupOrder int      `json:"startup_order"`
+	DependsOn    []string `json:"depends_on"`
+}
+
+type AgentTeamEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Kind string `json:"kind"`
+}
