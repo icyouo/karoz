@@ -73,7 +73,9 @@
       });
       runtimeEvents.addEventListener('runtime', event => {
 		try {
-		  applyPayload(JSON.parse(event.data));
+		  const payload = JSON.parse(event.data);
+		  applyPayload(payload);
+		  if (payload && payload.event) maybeAnimateHandoff(payload.event);
 		  clearTimeout(runtimeStateRefreshTimer);
 		  runtimeStateRefreshTimer = setTimeout(() => loadResidentRuntimeState(), 120);
 		  scheduleChatRefresh();
@@ -102,6 +104,7 @@
       state.agents.forEach(agent => {
         const b = document.createElement('button');
         b.className = 'nav-item' + (state.agent && state.agent.id === agent.id ? ' active' : '');
+        b.dataset.agentId = agent.id;
         const label = agent.nickname || agent.display_name || agent.name || 'agent';
         const group = agent.group_id ? '<span class="group-tag">' + escapeHTML(agent.group_id) + (agent.group_role ? ' · ' + escapeHTML(agent.group_role) : '') + '</span>' : '';
         const working = agentWorking(agent) ? '<span class="agent-working-pulse" aria-label="Agent is working"><i></i><i></i><i></i></span>' : '';
@@ -109,6 +112,45 @@
         b.onclick = () => selectAgent(agent, { push: true });
         box.appendChild(b);
       });
+    }
+    // Handoff animation: a dot travels from the source agent's row to the
+    // target's in the sidebar, and both rows pulse. Deduped per handoff
+    // because creation fires both handoff_created and handoff_changed.
+    const recentHandoffAnimations = new Map();
+    function maybeAnimateHandoff(event) {
+      if (!event || !event.from_agent_id || !event.to_agent_id) return;
+      if (event.kind !== 'handoff_created' && event.kind !== 'handoff_changed') return;
+      const key = (event.entity_id || '') + '|' + event.from_agent_id + '|' + event.to_agent_id;
+      const now = Date.now();
+      if (recentHandoffAnimations.has(key) && now - recentHandoffAnimations.get(key) < 4000) return;
+      recentHandoffAnimations.set(key, now);
+      setTimeout(() => recentHandoffAnimations.delete(key), 8000);
+      animateHandoff(event.from_agent_id, event.to_agent_id);
+    }
+    function animateHandoff(fromAgentID, toAgentID) {
+      const list = $('agentList');
+      if (!list || state.view !== 'agent') return;
+      const fromEl = list.querySelector('[data-agent-id="' + CSS.escape(fromAgentID) + '"]');
+      const toEl = list.querySelector('[data-agent-id="' + CSS.escape(toAgentID) + '"]');
+      if (!fromEl || !toEl) return;
+      [fromEl, toEl].forEach(el => {
+        el.classList.remove('handoff-pulse');
+        void el.offsetWidth;
+        el.classList.add('handoff-pulse');
+        setTimeout(() => el.classList.remove('handoff-pulse'), 1400);
+      });
+      const fromRect = fromEl.getBoundingClientRect();
+      const toRect = toEl.getBoundingClientRect();
+      const dot = document.createElement('div');
+      dot.className = 'handoff-dot';
+      dot.style.left = (fromRect.right - 18) + 'px';
+      dot.style.top = (fromRect.top + fromRect.height / 2 - 4) + 'px';
+      document.body.appendChild(dot);
+      requestAnimationFrame(() => {
+        dot.style.transform = 'translate(' + (toRect.right - fromRect.right) + 'px, ' + ((toRect.top + toRect.height / 2) - (fromRect.top + fromRect.height / 2)) + 'px)';
+        dot.style.opacity = '0';
+      });
+      setTimeout(() => dot.remove(), 1100);
     }
     async function selectAgent(agent, opts = {}) {
       if (!state.project || !agent) return;

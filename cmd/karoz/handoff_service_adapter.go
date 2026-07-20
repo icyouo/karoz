@@ -39,6 +39,7 @@ func (events appHandoffEvents) HandoffChanged(change collaborationdomain.Handoff
 	events.app.emitRuntimeStateChanged(RuntimeEvent{
 		ID: randomID(), ProjectID: change.Handoff.ProjectID, Kind: "handoff_changed", EntityID: change.Handoff.ID,
 		From: change.From, To: change.To, Reason: change.Reason, CreatedAt: change.At,
+		FromAgentID: change.Handoff.SourceAgentID, ToAgentID: change.Handoff.TargetAgentID,
 	})
 }
 

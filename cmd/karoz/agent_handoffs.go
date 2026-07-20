@@ -168,13 +168,15 @@ func (a *app) queueInboxMessage(projectID string, msg AgentInboxMessage) error {
 		return err
 	}
 	a.emitRuntimeStateChanged(RuntimeEvent{
-		ID:        randomID(),
-		ProjectID: projectID,
-		Kind:      "handoff_created",
-		EntityID:  msg.ID,
-		To:        HandoffQueued,
-		Reason:    "handoff_created",
-		CreatedAt: time.Now().UTC(),
+		ID:          randomID(),
+		ProjectID:   projectID,
+		Kind:        "handoff_created",
+		EntityID:    msg.ID,
+		To:          HandoffQueued,
+		FromAgentID: msg.SourceAgentID,
+		ToAgentID:   msg.TargetAgentID,
+		Reason:      "handoff_created",
+		CreatedAt:   time.Now().UTC(),
 	})
 	if _, ok := a.transitionHandoff(projectID, msg.TargetAgentID, msg.ID, HandoffDelivered, ""); !ok {
 		return fmt.Errorf("deliver handoff %s", msg.ID)

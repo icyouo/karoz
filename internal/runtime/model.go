@@ -92,16 +92,20 @@ type Run struct {
 }
 
 type Event struct {
-	ID        string    `json:"id"`
-	ProjectID string    `json:"project_id"`
-	Kind      string    `json:"kind"`
-	EntityID  string    `json:"entity_id"`
-	RunID     string    `json:"run_id,omitempty"`
-	Trigger   string    `json:"trigger,omitempty"`
-	From      string    `json:"from,omitempty"`
-	To        string    `json:"to,omitempty"`
-	Reason    string    `json:"reason,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Kind      string `json:"kind"`
+	EntityID  string `json:"entity_id"`
+	RunID     string `json:"run_id,omitempty"`
+	Trigger   string `json:"trigger,omitempty"`
+	From      string `json:"from,omitempty"`
+	To        string `json:"to,omitempty"`
+	// FromAgentID/ToAgentID carry the handoff participants for handoff_*
+	// events so clients can visualize agent-to-agent handoffs.
+	FromAgentID string    `json:"from_agent_id,omitempty"`
+	ToAgentID   string    `json:"to_agent_id,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type ScheduledKind string
