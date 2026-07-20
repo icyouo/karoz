@@ -224,9 +224,12 @@
     .attachment-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .attachment-chip small { color: var(--text-tertiary); font: inherit; white-space: nowrap; }
     .attachment-chip button { width: 16px; height: 16px; flex: 0 0 16px; border: 0; color: var(--text-tertiary); padding: 0; font-size: 12px; }
-    .attach-agent-file { position: absolute; right: 72px; bottom: 0; width: 30px; height: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-secondary); }
+    .attach-agent-file { position: absolute; left: 0; bottom: 0; width: 30px; height: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-secondary); }
     .attach-agent-file.active { border-color: var(--accent-muted); color: var(--accent); }
     .chat-send { position: absolute; right: 0; bottom: 0; height: 30px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--accent-muted); background: transparent; color: var(--accent); padding: 0 13px; font-family: var(--font-mono); font-size: 11px; }
+    .model-controls { position: absolute; right: 70px; bottom: 0; display: flex; height: 30px; align-items: center; gap: 4px; }
+    .model-control { width: auto; height: 30px; border: 0; background: transparent; color: var(--text-secondary); padding: 0 22px 0 8px; font-family: var(--font-mono); font-size: 10px; }
+    .model-control:hover, .model-control:focus { background: var(--bg-elevated); color: var(--text-primary); }
     .skill-suggest { position: absolute; left: 0; top: 0; z-index: 20; display: none; width: min(760px, calc(100% - 128px)); max-height: 196px; overflow: auto; border: 1px solid var(--border); background: var(--bg-root); box-shadow: none; transform: translateY(calc(-100% - 8px)); }
     .skill-suggest.open { display: block; }
     .skill-suggest-item { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); gap: 10px; width: 100%; border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; color: var(--text-secondary); padding: 8px 10px; text-align: left; }
@@ -867,8 +870,19 @@
       font-size: 14px;
       line-height: 1.55;
     }
+    textarea.chat-composer-textarea:focus,
+    textarea.chat-composer-textarea:focus-visible {
+      border-color: transparent;
+      background: transparent;
+      outline: none;
+      box-shadow: none;
+    }
     textarea.chat-composer-textarea::placeholder { color: #647168; }
-    .attach-agent-file { right: 86px; bottom: 0; width: 36px; height: 36px; border-color: transparent; border-radius: 9px; }
+    .attach-agent-file { left: 0; right: auto; bottom: 0; width: 36px; height: 36px; border-color: transparent; border-radius: 9px; }
+    .model-controls { right: 86px; height: 36px; gap: 2px; }
+    .model-control { height: 36px; border-radius: 8px; background: rgba(4, 10, 6, .24); }
+    #agentModel { width: 124px; max-width: 124px; }
+    #agentThinkingEffort { width: 72px; max-width: 72px; }
     .chat-send {
       right: 0;
       height: 36px;
@@ -1373,6 +1387,10 @@
                   <textarea id="agentMessage" class="chat-composer-textarea" placeholder="Message Karoz..." aria-label="Message the selected agent"></textarea>
                   <input id="agentFileInput" type="file" multiple accept="image/*,.pdf,.txt,.md,.markdown,.csv,.json,.doc,.docx,.ppt,.pptx,.xls,.xlsx" hidden />
                   <button id="attachAgentFile" type="button" class="secondary icon attach-agent-file" title="Attach files" aria-label="Attach files"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" aria-hidden="true"><path d="m20.5 11.5-8.4 8.4a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 1 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.4-8.4"/></svg></button>
+                  <div class="model-controls" aria-label="Model settings">
+                    <select id="agentModel" class="model-control" aria-label="Provider and model"></select>
+                    <select id="agentThinkingEffort" class="model-control" aria-label="Thinking effort"></select>
+                  </div>
                   <button id="sendAgent" class="chat-send">Send&nbsp; ↗</button>
                 </div>
               </div>
@@ -1618,14 +1636,18 @@
   </div>
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script>
-    const state = { settings: null, projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, sidePanel: null, agentWorkingById: {}, chatMessages: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
+    const state = { settings: null, providers: [], projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, sidePanel: null, agentWorkingById: {}, chatMessages: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, chatStreaming: false, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
     let taskPollTimer = null;
     let agentPollTimer = null;
     let runtimeStateRefreshTimer = null;
     let runtimeEvents = null;
     let runtimeEventsProjectID = '';
+    let chatRefreshTimer = null;
+    let lastRouteHash = null;
+    let applyingRoute = false;
     let projectSelectionSeq = 0;
     let chatModeSaveSerial = 0;
+    let modelSettingsSaveSerial = 0;
     let pendingConfirmation = null;
     const $ = (id) => document.getElementById(id);
     function notify(message, kind = 'error') {
@@ -1702,6 +1724,39 @@
       renderExtraWorkspaces();
       renderNewProjectWorkspaceHint();
     }
+    async function loadResidentProviders() {
+      const payload = await api('/api/runtime/providers');
+      state.providers = payload && Array.isArray(payload.providers) ? payload.providers : [];
+      renderModelCatalog();
+    }
+    function selectedModelDescriptor() {
+      const value = $('agentModel').value;
+      for (const provider of state.providers || []) {
+        const model = (provider.models || []).find(item => item.id === value && item.provider === provider.id);
+        if (model) return { provider, model };
+      }
+      return null;
+    }
+    function renderModelCatalog() {
+      const select = $('agentModel');
+      if (!select) return;
+      select.innerHTML = '';
+      (state.providers || []).forEach(provider => {
+        const group = document.createElement('optgroup');
+        group.label = provider.display_name + (provider.available ? '' : ' - unavailable');
+        group.disabled = !provider.available;
+        group.title = provider.reason || '';
+        (provider.models || []).forEach(model => {
+          const option = document.createElement('option');
+          option.value = model.id;
+          option.dataset.provider = provider.id;
+          option.textContent = model.display_name || model.id;
+          group.appendChild(option);
+        });
+        select.appendChild(group);
+      });
+      restoreAgentModelSettings();
+    }
     function settingsExtraRoots() {
       return state.settings && Array.isArray(state.settings.extra_projects_roots) ? state.settings.extra_projects_roots : [];
     }
@@ -1769,17 +1824,91 @@
       $('agentView').classList.toggle('active', view === 'agent');
       $('taskView').classList.toggle('active', view === 'task');
     }
-    async function switchViewAndRefresh(view) {
+    async function switchViewAndRefresh(view, opts = {}) {
       switchView(view);
+      syncRouteHash(Boolean(opts.push));
       if (!state.project) return;
       try {
         if (view === 'agent') {
           await refreshAgentStates();
+          scheduleChatRefresh();
         } else {
           await loadTasks();
         }
       } catch (err) {
         notify('Could not refresh the ' + view + ' list: ' + err.message, 'error');
+      }
+    }
+    // Hash router: deep-linkable views + browser back/forward.
+    // Routes: #/ | #/p/<projectID> | #/p/<projectID>/agent/<agentID> |
+    //         #/p/<projectID>/tasks | #/p/<projectID>/task/<taskID>
+    function parseHashRoute() {
+      const raw = (location.hash || '').replace(/^#\/?/, '');
+      const parts = raw.split('/').filter(Boolean).map(part => decodeURIComponent(part));
+      const route = { projectID: '', view: 'agent', agentID: '', taskID: '' };
+      if (parts[0] !== 'p' || !parts[1]) return route;
+      route.projectID = parts[1];
+      if (parts[2] === 'task' && parts[3]) { route.view = 'task'; route.taskID = parts[3]; }
+      else if (parts[2] === 'tasks') { route.view = 'task'; }
+      else if (parts[2] === 'agent' && parts[3]) { route.view = 'agent'; route.agentID = parts[3]; }
+      return route;
+    }
+    function hashForState() {
+      if (!state.project) return '#/';
+      let hash = '#/p/' + encodeURIComponent(state.project.id);
+      if (state.view === 'task') hash += state.task ? '/task/' + encodeURIComponent(state.task.id) : '/tasks';
+      else if (state.agent) hash += '/agent/' + encodeURIComponent(state.agent.id);
+      return hash;
+    }
+    function syncRouteHash(push) {
+      if (applyingRoute) return;
+      const hash = hashForState();
+      if ((location.hash || '#/') === hash) return;
+      lastRouteHash = hash;
+      if (push) history.pushState(null, '', hash);
+      else history.replaceState(null, '', hash);
+    }
+    async function applyRoute() {
+      const hash = location.hash || '#/';
+      if (hash === lastRouteHash && state.project) return;
+      lastRouteHash = hash;
+      const route = parseHashRoute();
+      applyingRoute = true;
+      try {
+        if (!state.projects.length) return;
+        const project = state.projects.find(p => p.id === route.projectID) || state.projects[0];
+        if (!project) return;
+        if (!state.project || state.project.id !== project.id) await selectProject(project);
+        if (!state.project || state.project.id !== project.id) return;
+        if (route.view === 'task') {
+          if (route.taskID) {
+            try {
+              await selectTask({ id: route.taskID });
+            } catch (err) {
+              notify('Task not found: ' + err.message, 'error');
+              state.task = null;
+              switchView('task');
+              await loadTasks();
+              await renderTaskDetail();
+              syncTaskPolling();
+            }
+          } else {
+            state.task = null;
+            switchView('task');
+            await loadTasks();
+            await renderTaskDetail();
+            syncTaskPolling();
+          }
+        } else {
+          if (route.agentID) {
+            const agent = state.agents.find(item => item.id === route.agentID);
+            if (agent) await selectAgent(agent);
+          }
+          switchView('agent');
+        }
+      } finally {
+        applyingRoute = false;
+        syncRouteHash(false);
       }
     }
     async function loadAgents() {
@@ -1804,6 +1933,9 @@
       state.agent = agents.find(agent => agent.id === previousId) || state.agent || agents[0] || null;
       renderAgents();
       renderRuntimeStrip();
+      // Backstop: SSE events can be missed or dropped; while the open
+      // conversation's agent is working, keep its messages syncing.
+      if (state.agent && agentWorking(state.agent) && !state.chatStreaming && state.view === 'agent') scheduleChatRefresh();
     }
     function syncAgentPolling() {
       if (agentPollTimer) {
@@ -1850,13 +1982,14 @@
         }
       };
       runtimeEvents.addEventListener('snapshot', event => {
-        try { applyPayload(JSON.parse(event.data)); } catch {}
+        try { applyPayload(JSON.parse(event.data)); scheduleChatRefresh(); } catch {}
       });
       runtimeEvents.addEventListener('runtime', event => {
 		try {
 		  applyPayload(JSON.parse(event.data));
 		  clearTimeout(runtimeStateRefreshTimer);
 		  runtimeStateRefreshTimer = setTimeout(() => loadResidentRuntimeState(), 120);
+		  scheduleChatRefresh();
 		} catch {}
       });
       runtimeEvents.onerror = () => {
@@ -1886,11 +2019,11 @@
         const group = agent.group_id ? '<span class="group-tag">' + escapeHTML(agent.group_id) + (agent.group_role ? ' · ' + escapeHTML(agent.group_role) : '') + '</span>' : '';
         const working = agentWorking(agent) ? '<span class="agent-working-pulse" aria-label="Agent is working"><i></i><i></i><i></i></span>' : '';
         b.innerHTML = '<strong>' + escapeHTML(label) + working + '</strong><div class="muted">' + escapeHTML(agent.short_name || agent.name || 'agent') + ' · ' + escapeHTML(agent.runtime || 'resident') + ' · ' + (agent.message_count || 0) + ' msgs</div>' + group;
-        b.onclick = () => selectAgent(agent);
+        b.onclick = () => selectAgent(agent, { push: true });
         box.appendChild(b);
       });
     }
-    async function selectAgent(agent) {
+    async function selectAgent(agent, opts = {}) {
       if (!state.project || !agent) return;
       const projectID = state.project.id;
       const agentID = agent.id;
@@ -1902,6 +2035,7 @@
       await loadResidentRuntimeState();
       if (!state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       switchView('agent');
+      syncRouteHash(Boolean(opts.push));
     }
     function currentAgentID() {
       return state.agent && state.agent.id ? state.agent.id : 'karoz';
@@ -1952,6 +2086,65 @@
       state.chatType = normalizeAgentChatType(state.agent && state.agent.chat_mode);
       renderAgentChatType();
     }
+    function restoreAgentModelSettings() {
+      const modelSelect = $('agentModel');
+      const effortSelect = $('agentThinkingEffort');
+      if (!modelSelect || !effortSelect) return;
+      const model = String((state.agent && state.agent.model) || 'gpt-5.6-luna').trim();
+      if (!Array.from(modelSelect.options).some(option => option.value === model)) {
+        const option = document.createElement('option');
+        option.value = model;
+        option.textContent = model;
+        modelSelect.prepend(option);
+      }
+      modelSelect.value = model;
+      syncEffortOptionsForSelectedModel(String((state.agent && state.agent.thinking_effort) || 'medium').toLowerCase());
+      modelSelect.disabled = currentAgentWorking();
+    }
+    function syncEffortOptionsForSelectedModel(preferred = 'medium') {
+      const effortSelect = $('agentThinkingEffort');
+      const selected = selectedModelDescriptor();
+      const levels = selected && Array.isArray(selected.model.effort_levels) ? selected.model.effort_levels : [];
+      effortSelect.innerHTML = '';
+      if (!levels.length) {
+        const option = document.createElement('option'); option.value = ''; option.textContent = 'Default'; effortSelect.appendChild(option);
+        effortSelect.disabled = true;
+      } else {
+        levels.forEach(level => { const option = document.createElement('option'); option.value = level; option.textContent = level.slice(0, 1).toUpperCase() + level.slice(1); effortSelect.appendChild(option); });
+        effortSelect.disabled = currentAgentWorking();
+      }
+      const saved = String(preferred || (levels.includes('medium') ? 'medium' : levels[0] || '')).toLowerCase();
+      effortSelect.value = levels.includes(saved) ? saved : (levels.includes('medium') ? 'medium' : levels[0] || '');
+    }
+    async function saveAgentModelSettings() {
+      if (!state.project || !state.agent) return;
+      const projectID = state.project.id;
+      const agentID = state.agent.id;
+      const model = $('agentModel').value;
+      const thinkingEffort = $('agentThinkingEffort').value;
+      const selected = selectedModelDescriptor();
+      if (!selected || !selected.provider.available) return restoreAgentModelSettings();
+      const provider = selected.provider.id;
+      const serial = ++modelSettingsSaveSerial;
+      $('agentModel').disabled = true;
+      $('agentThinkingEffort').disabled = true;
+      try {
+        const updated = await api('/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID), { method: 'PATCH', body: JSON.stringify({ provider, model, thinking_effort: thinkingEffort, expected_model_config_version: state.agent.model_config_version || 1 }) });
+        if (state.project && state.project.id === projectID) {
+          const index = state.agents.findIndex(agent => agent.id === agentID);
+          if (index >= 0) state.agents[index] = updated;
+          if (state.agent && state.agent.id === agentID) state.agent = updated;
+          restoreAgentModelSettings();
+        }
+      } catch (err) {
+        restoreAgentModelSettings();
+        notify('Could not save model settings: ' + (err.message || String(err)), 'error');
+      } finally {
+        if (serial === modelSettingsSaveSerial) {
+          restoreAgentModelSettings();
+        }
+      }
+    }
     async function saveAgentChatType(value) {
       if (!state.project || !state.agent) return;
       const mode = normalizeAgentChatType(value);
@@ -1994,6 +2187,7 @@
     function updateAgentChrome() {
       const label = currentAgentLabel();
       restoreAgentChatType();
+      restoreAgentModelSettings();
       $('agentMessage').placeholder = 'Message ' + label + '...';
       $('agentStatus').textContent = label + ' resident session';
       $('agentHeaderName').textContent = label;
@@ -2017,6 +2211,7 @@
       const pulse = $('agentWorkingPulse');
       if (!pulse) return;
       pulse.hidden = !currentAgentWorking();
+      restoreAgentModelSettings();
     }
     async function loadResidentRuntimeState() {
       if (!state.project || !state.agent) return;
@@ -2483,6 +2678,48 @@
       renderChatMessages();
       $('agentOutput').scrollTop = $('agentOutput').scrollHeight;
     }
+    function scheduleChatRefresh() {
+      if (chatRefreshTimer) clearTimeout(chatRefreshTimer);
+      chatRefreshTimer = setTimeout(() => {
+        chatRefreshTimer = null;
+        void refreshActiveAgentChat();
+      }, 400);
+    }
+    // Merge-based chat sync for messages persisted outside this tab's own
+    // streaming flow (handoff runs, queued interrupts, scheduler turns).
+    // Skips while a local stream owns the DOM; preserves scroll position.
+    async function refreshActiveAgentChat() {
+      if (!state.project || !state.agent || state.view !== 'agent') return;
+      if (state.chatStreaming || state.chatLoadingHistory) return;
+      const projectID = state.project.id;
+      const agentID = currentAgentID();
+      const page = await api('/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID) + '/messages?limit=80').catch(() => null);
+      if (!page || !state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
+      if (state.chatStreaming || state.chatLoadingHistory) return;
+      const latest = Array.isArray(page.messages) ? page.messages : (Array.isArray(page) ? page : []);
+      const wasEmpty = !(state.chatMessages || []).length;
+      const byKey = new Map();
+      (state.chatMessages || []).forEach(m => byKey.set(m.id || String(m.seq), m));
+      let changed = false;
+      latest.forEach(m => {
+        const key = m.id || String(m.seq);
+        const existing = byKey.get(key);
+        if (!existing || (existing.body || '') !== (m.body || '') || (existing.intent || '') !== (m.intent || '')) {
+          byKey.set(key, m);
+          changed = true;
+        }
+      });
+      if (!changed) return;
+      state.chatMessages = Array.from(byKey.values()).sort((a, b) => (a.seq || 0) - (b.seq || 0));
+      if (wasEmpty) {
+        state.chatHasMore = !!page.has_more;
+        state.chatNextBeforeSeq = page.next_before_seq || state.chatNextBeforeSeq;
+      }
+      const box = $('agentOutput');
+      const stickToBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+      renderChatMessages();
+      if (stickToBottom) box.scrollTop = box.scrollHeight;
+    }
     async function loadEarlierAgentMessages() {
       if (!state.project || !state.agent || !state.chatHasMore || state.chatLoadingHistory) return;
       const projectID = state.project.id;
@@ -2551,7 +2788,7 @@
     async function loadProjects() {
       state.projects = await api('/api/projects');
       renderProjects();
-      if (!state.project && state.projects[0]) await selectProject(state.projects[0]);
+      if (!state.project && state.projects[0] && !parseHashRoute().projectID) await selectProject(state.projects[0]);
     }
     function renderProjects() {
       const box = $('projects'); box.innerHTML = '';
@@ -2560,11 +2797,11 @@
         b.className = 'project' + (state.project && state.project.id === p.id ? ' active' : '');
         const initial = (p.name || '?').trim().slice(0, 1).toUpperCase();
         b.innerHTML = '<span class="initial">' + initial + '</span><span class="project-text"><strong>' + escapeHTML(p.name) + '</strong><div class="muted">' + escapeHTML((p.workspace_type || 'main') + ' · ' + p.default_branch) + '</div></span>';
-        b.onclick = () => selectProject(p);
+        b.onclick = () => selectProject(p, { push: true });
         box.appendChild(b);
       });
     }
-    async function selectProject(p) {
+    async function selectProject(p, opts = {}) {
       if (!p) return;
       if (state.project && state.project.id === p.id && state.agent) {
         switchView(state.view);
@@ -2603,6 +2840,7 @@
       syncAgentPolling();
       syncRuntimeEvents();
       switchView(state.view);
+      syncRouteHash(Boolean(opts.push));
     }
     function projectWorkspaceLabel(project) {
       const kind = project && project.workspace_type ? project.workspace_type : 'main';
@@ -2628,14 +2866,15 @@
         b.className = 'nav-item' + (state.task && state.task.id === t.id ? ' active' : '');
         const statusClass = String(t.status || 'pending').replace(/[^a-zA-Z0-9_-]/g, '_');
         b.innerHTML = '<strong>' + escapeHTML(t.title || 'Untitled task') + '</strong><div class="nav-meta"><span>' + escapeHTML(taskCategoryLabel(t.type) + ' · ' + taskTypeLabel(t.type)) + '</span><span class="status-pill ' + statusClass + '">' + escapeHTML(t.status || 'pending') + '</span></div>';
-        b.onclick = () => selectTask(t);
+        b.onclick = () => selectTask(t, { push: true });
         box.appendChild(b);
       });
     }
-    async function selectTask(t) {
+    async function selectTask(t, opts = {}) {
       state.task = await api('/api/projects/' + state.project.id + '/tasks/' + t.id);
       await loadTasks();
       switchView('task');
+      syncRouteHash(Boolean(opts.push));
       await renderTaskDetail();
       syncTaskPolling();
     }
@@ -3171,8 +3410,8 @@
         document.querySelectorAll('.modal-backdrop.open').forEach(modal => closeModal(modal.id));
       }
     });
-    $('agentTab').onclick = () => { void switchViewAndRefresh('agent'); };
-    $('taskTab').onclick = () => { void switchViewAndRefresh('task'); };
+    $('agentTab').onclick = () => { void switchViewAndRefresh('agent', { push: true }); };
+    $('taskTab').onclick = () => { void switchViewAndRefresh('task', { push: true }); };
     $('addRoleTab').onclick = () => setAddAgentMode('role');
     $('addTeamTab').onclick = () => setAddAgentMode('team');
     function setAddAgentMode(mode) {
@@ -3297,6 +3536,7 @@
         return;
       }
       setLocalAgentWorking(activeAgentId, true);
+      state.chatStreaming = true;
       if (state.agent) {
         state.agent.state = 'working';
         state.agent.status_message = 'working';
@@ -3384,7 +3624,9 @@
         setBubbleContent(assistantBubble, 'Request failed: ' + err.message, false);
         $('agentStatus').textContent = currentAgentLabel() + ' request failed: ' + err.message;
       } finally {
+        state.chatStreaming = false;
         setLocalAgentWorking(activeAgentId, false);
+        await refreshActiveAgentChat();
         await refreshAgentStates();
         renderRuntimeStrip();
         $('sendAgent').disabled = false;
@@ -3545,6 +3787,8 @@
       setTimeout(closeSkillSuggest, 120);
     });
     $('attachAgentFile').onclick = () => $('agentFileInput').click();
+    $('agentModel').onchange = () => { syncEffortOptionsForSelectedModel('medium'); saveAgentModelSettings(); };
+    $('agentThinkingEffort').onchange = saveAgentModelSettings;
     $('agentFileInput').onchange = () => {
       addAgentAttachments($('agentFileInput').files || []);
       $('agentFileInput').value = '';
@@ -3700,7 +3944,9 @@
       renderRoutes();
       notify('Communication scope saved.', 'success');
     };
-    (async function init(){ await loadSettings(); await loadProjects(); })().catch(err => notify(err.message, 'error'));
+    window.addEventListener('popstate', () => { void applyRoute(); });
+    window.addEventListener('hashchange', () => { void applyRoute(); });
+    (async function init(){ await Promise.all([loadSettings(), loadResidentProviders()]); await loadProjects(); await applyRoute(); })().catch(err => notify(err.message, 'error'));
   </script>
 </body>
 </html>
