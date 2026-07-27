@@ -16,14 +16,39 @@
       if (empty) empty.remove();
       const item = document.createElement('div');
       const isResult = role === 'tool_result';
+      item.dataset.toolRole = isResult ? 'result' : 'call';
       item.className = 'tool-group ' + (isResult ? (success ? 'success' : 'failed') : '');
       const summary = toolSummary(role, tool, content, success);
       item.innerHTML = '<button type="button" class="tool-toggle"><div class="tool-head"><span class="tool-chevron">▸</span><strong>' + escapeHTML(formatToolName(tool)) + '</strong><span>' + escapeHTML(isResult ? 'result' : 'call') + (callID ? ' · ' + escapeHTML(callID) : '') + '</span><span class="tool-summary">' + escapeHTML(summary) + '</span></div></button><div class="tool-body"></div>';
       item.querySelector('.tool-body').textContent = compactToolContent(content);
       item.querySelector('.tool-toggle').onclick = () => item.classList.toggle('expanded');
-      $('agentOutput').appendChild(item);
-      $('agentOutput').scrollTop = $('agentOutput').scrollHeight;
+      const output = $('agentOutput');
+      const previous = output.lastElementChild;
+      if (previous && previous.classList.contains('tool-batch')) {
+        previous.querySelector('.tool-batch-items').appendChild(item);
+        updateToolBatchSummary(previous);
+      } else if (previous && previous.classList.contains('tool-group')) {
+        const batch = document.createElement('details');
+        batch.className = 'tool-batch';
+        batch.innerHTML = '<summary class="tool-batch-head"><span class="tool-batch-chevron">▸</span><strong class="tool-batch-count"></strong><span class="tool-batch-summary">Expand to inspect details</span></summary><div class="tool-batch-items"></div>';
+        const items = batch.querySelector('.tool-batch-items');
+        output.replaceChild(batch, previous);
+        items.append(previous, item);
+        updateToolBatchSummary(batch);
+      } else {
+        output.appendChild(item);
+      }
+      output.scrollTop = output.scrollHeight;
       return item;
+    }
+    function updateToolBatchSummary(batch) {
+      const items = batch.querySelectorAll('.tool-group');
+      const calls = batch.querySelectorAll('.tool-group[data-tool-role="call"]').length;
+      const results = items.length - calls;
+      const parts = [];
+      if (calls) parts.push(calls + ' tool ' + (calls === 1 ? 'call' : 'calls'));
+      if (results) parts.push(results + ' ' + (results === 1 ? 'result' : 'results'));
+      batch.querySelector('.tool-batch-count').textContent = parts.join(' · ') || items.length + ' tool updates';
     }
     function parseChoiceRequestResult(content) {
       try {

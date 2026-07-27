@@ -175,10 +175,11 @@ type CLI2APIResponse struct {
 }
 
 type ResidentModelDescriptor struct {
-	Provider     string   `json:"provider"`
-	ID           string   `json:"id"`
-	DisplayName  string   `json:"display_name"`
-	EffortLevels []string `json:"effort_levels"`
+	Provider      string   `json:"provider"`
+	ID            string   `json:"id"`
+	DisplayName   string   `json:"display_name"`
+	EffortLevels  []string `json:"effort_levels"`
+	ContextWindow int64    `json:"context_window"`
 }
 
 type ResidentProviderDescriptor struct {

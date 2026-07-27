@@ -229,6 +229,7 @@
       modelSelect.value = model;
       syncEffortOptionsForSelectedModel(String((state.agent && state.agent.thinking_effort) || 'medium').toLowerCase());
       modelSelect.disabled = currentAgentWorking();
+      renderContextTokenUsage();
     }
     function syncEffortOptionsForSelectedModel(preferred = 'medium') {
       const effortSelect = $('agentThinkingEffort');
@@ -319,6 +320,7 @@
       restoreAgentModelSettings();
       $('agentMessage').placeholder = 'Message ' + label + '...';
       $('agentStatus').textContent = label + ' resident session';
+      renderContextTokenUsage();
       $('agentHeaderName').textContent = label;
       renderAgentWorkingState();
       if (state.project) $('projectMeta').textContent = projectWorkspaceLabel(state.project) + ' · branch ' + state.project.default_branch + ' · agent ' + label;

@@ -63,7 +63,10 @@
             <div class="chat-composer">
               <div class="chat-composer-box">
                 <div class="chat-composer-top">
-                  <span id="agentStatus" class="chat-composer-label">resident session</span>
+                  <div class="chat-composer-status">
+                    <span id="agentStatus" class="chat-composer-label">resident session</span>
+                    <span id="contextTokenUsage" class="context-token-usage" title="Estimated active chat context / model context window">0 / —</span>
+                  </div>
                   <div class="chat-mode-tabs" role="tablist" aria-label="Chat mode">
                     <button class="chat-mode active" role="tab" aria-selected="true" data-chat-type="ask">Ask</button>
                     <button class="chat-mode" role="tab" aria-selected="false" data-chat-type="plan">Plan</button>
@@ -193,6 +196,7 @@
         <div class="form-actions">
           <button id="saveSettings">Save Settings</button>
         </div>
+        <div id="workspaceSettingsDockerNotice" class="workspace-settings-notice" role="note" hidden>Workspace settings are unavailable when Karoz is running in Docker. Docker workspace mounts are configured at startup and cannot be changed from this page.</div>
       </div>
     </div>
   </div>
@@ -284,23 +288,27 @@
             <button id="saveAgentConfig">Save Agent</button>
             <button id="deleteAgent" class="danger">Delete Agent</button>
           </div>
-          <div class="panel" style="margin: 0;">
-            <h3>Communication Scope</h3>
-            <div class="route-row">
-              <select id="routeFrom"></select>
-              <select id="routeTo"></select>
-              <select id="routeIntent">
-                <option value="request">request</option>
-                <option value="handoff">handoff</option>
-                <option value="question">question</option>
-                <option value="status">status</option>
-                <option value="note">note</option>
-                <option value="result">result</option>
-              </select>
-              <button id="addRoute" class="icon" title="Add route">+</button>
+          <div class="panel communication-scope">
+            <div class="communication-scope-head">
+              <span class="scope-kicker">Team routing</span>
+              <h3>Communication scope</h3>
+              <p>Allow only the agent-to-agent routes this resident should use.</p>
+            </div>
+            <div class="route-builder">
+              <label class="route-field"><span>From</span><select id="routeFrom"></select></label>
+              <label class="route-field"><span>To</span><select id="routeTo"></select></label>
+              <label class="route-field"><span>Intent</span><select id="routeIntent">
+                  <option value="request">request</option>
+                  <option value="handoff">handoff</option>
+                  <option value="question">question</option>
+                  <option value="status">status</option>
+                  <option value="note">note</option>
+                  <option value="result">result</option>
+              </select></label>
+              <button id="addRoute" class="secondary add-route-button" title="Add route"><span aria-hidden="true">+</span>Add route</button>
             </div>
             <div id="routeList" class="route-list stack custom-scrollbar"></div>
-            <button id="saveAgentRoutes">Save Routes</button>
+            <div class="route-actions"><button id="saveAgentRoutes">Save routes</button></div>
           </div>
         </div>
       </div>
@@ -324,6 +332,7 @@
     </div>
   </div>
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <script src="/static/js/context-tokens.js"></script>
   <script src="/static/js/core.js"></script>
   <script src="/static/js/router.js"></script>
   <script src="/static/js/agents.js"></script>

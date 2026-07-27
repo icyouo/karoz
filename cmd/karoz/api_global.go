@@ -10,6 +10,18 @@ import (
 	"strings"
 )
 
+type SettingsResponse struct {
+	Settings
+	WorkspaceSettingsLocked bool `json:"workspace_settings_locked"`
+}
+
+func (a *app) settingsResponse() SettingsResponse {
+	return SettingsResponse{
+		Settings:                a.settings,
+		WorkspaceSettingsLocked: strings.EqualFold(strings.TrimSpace(os.Getenv("KAROZ_WORKSPACE_SETTINGS_LOCKED")), "1") || strings.EqualFold(strings.TrimSpace(os.Getenv("KAROZ_WORKSPACE_SETTINGS_LOCKED")), "true"),
+	}
+}
+
 func (a *app) handleCLI2API(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -62,8 +74,12 @@ func strconvQuoteAppleScript(value string) string {
 func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, a.settings)
+		writeJSON(w, a.settingsResponse())
 	case http.MethodPut:
+		if a.settingsResponse().WorkspaceSettingsLocked {
+			writeError(w, http.StatusForbidden, errors.New("workspace settings are unavailable when Karoz is running in Docker"))
+			return
+		}
 		var req SettingsUpdateRequest
 		if err := readJSON(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, err)
@@ -96,7 +112,7 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, fmt.Errorf("save settings: %w", err))
 			return
 		}
-		writeJSON(w, a.settings)
+		writeJSON(w, a.settingsResponse())
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}

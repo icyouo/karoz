@@ -1,4 +1,4 @@
-    const state = { settings: null, providers: [], projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, sidePanel: null, agentWorkingById: {}, chatMessages: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, chatStreaming: false, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
+    const state = { settings: null, providers: [], projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, sidePanel: null, agentWorkingById: {}, chatMessages: [], currentContextTurn: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, chatStreaming: false, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
     let taskPollTimer = null;
     let agentPollTimer = null;
     let runtimeStateRefreshTimer = null;
@@ -84,7 +84,22 @@
       state.settings = settings;
       $('projectsRoot').value = settings.projects_root;
       renderExtraWorkspaces();
+      syncWorkspaceSettingsLock();
       renderNewProjectWorkspaceHint();
+    }
+    function workspaceSettingsLocked() {
+      return Boolean(state.settings && state.settings.workspace_settings_locked);
+    }
+    function syncWorkspaceSettingsLock() {
+      const locked = workspaceSettingsLocked();
+      ['projectsRoot', 'chooseProjectsRoot', 'extraWorkspaceInput', 'chooseExtraWorkspace', 'addExtraWorkspace', 'saveSettings'].forEach(id => {
+        const el = $(id);
+        if (el) el.disabled = locked;
+      });
+      const notice = $('workspaceSettingsDockerNotice');
+      if (notice) notice.hidden = !locked;
+      const list = $('extraWorkspaceList');
+      if (list) list.querySelectorAll('button').forEach(button => { button.disabled = locked; });
     }
     async function loadResidentProviders() {
       const payload = await api('/api/runtime/providers');
@@ -98,6 +113,37 @@
         if (model) return { provider, model };
       }
       return null;
+    }
+    function estimatedContextTokens() {
+      return KarozContextTokens.estimateContextTokens(state.chatMessages, state.currentContextTurn, ($('agentMessage') && $('agentMessage').value) || '');
+    }
+    function beginCurrentContextTurn(message) {
+      state.currentContextTurn = KarozContextTokens.beginCurrentTurn(message);
+      renderContextTokenUsage();
+    }
+    function updateCurrentContextAssistant(body) {
+      state.currentContextTurn = KarozContextTokens.updateAssistantTurn(state.currentContextTurn, body);
+      renderContextTokenUsage();
+    }
+    function appendCurrentContextEvent(role, intent, body) {
+      state.currentContextTurn = KarozContextTokens.appendTurnEvent(state.currentContextTurn, role, intent, body);
+      renderContextTokenUsage();
+    }
+    function clearCurrentContextTurn() {
+      state.currentContextTurn = [];
+      renderContextTokenUsage();
+    }
+    function formatTokenCount(tokens) {
+      if (tokens >= 1_000_000) return (tokens / 1_000_000).toFixed(tokens % 1_000_000 ? 1 : 0).replace(/\.0$/, '') + 'M';
+      if (tokens >= 1_000) return Math.max(1, Math.round(tokens / 1_000)) + 'K';
+      return String(tokens);
+    }
+    function renderContextTokenUsage() {
+      const usage = $('contextTokenUsage');
+      if (!usage) return;
+      const selected = selectedModelDescriptor();
+      const contextWindow = selected && Number(selected.model.context_window);
+      usage.textContent = formatTokenCount(estimatedContextTokens()) + ' / ' + (contextWindow > 0 ? formatTokenCount(contextWindow) : '—');
     }
     function renderModelCatalog() {
       const select = $('agentModel');
@@ -118,6 +164,7 @@
         select.appendChild(group);
       });
       restoreAgentModelSettings();
+      renderContextTokenUsage();
     }
     function settingsExtraRoots() {
       return state.settings && Array.isArray(state.settings.extra_projects_roots) ? state.settings.extra_projects_roots : [];
@@ -139,9 +186,11 @@
         row.className = 'workspace-root-row';
         row.innerHTML = '<code title="' + escapeHTML(root) + '">' + escapeHTML(root) + '</code><button type="button" class="secondary icon" title="Remove workspace">×</button>';
         row.querySelector('button').onclick = () => {
+          if (workspaceSettingsLocked()) return;
           state.settings.extra_projects_roots.splice(index, 1);
           renderExtraWorkspaces();
         };
+        row.querySelector('button').disabled = workspaceSettingsLocked();
         box.appendChild(row);
       });
     }

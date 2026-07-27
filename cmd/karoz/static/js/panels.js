@@ -528,6 +528,7 @@
     function renderChatMessages() {
       const messages = state.chatMessages || [];
       const box = $('agentOutput'); box.innerHTML = '';
+      renderContextTokenUsage();
       if (state.chatHasMore) {
         const loadMore = document.createElement('button');
         loadMore.type = 'button';

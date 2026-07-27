@@ -6,8 +6,11 @@
       if (!message && attachments.length === 0) return fieldError('agentMessage', 'Enter a message or attach a file.');
       const activeAgentId = currentAgentID();
       const wasWorking = currentAgentWorking();
+      const contextMessage = messagePreviewWithAttachments(message, attachments);
       $('sendAgent').disabled = true;
-      appendAgentMessage('you', messagePreviewWithAttachments(message, attachments));
+      appendAgentMessage('you', contextMessage);
+      if (wasWorking) appendCurrentContextEvent('user', 'interrupt', contextMessage);
+      else beginCurrentContextTurn(contextMessage);
       if (!directChoice) {
         $('agentMessage').value = '';
         clearAgentAttachments();
@@ -33,6 +36,8 @@
           appendAgentMessage(currentAgentID(), 'Queue failed: ' + err.message);
           $('agentStatus').textContent = currentAgentLabel() + ' queue failed: ' + err.message;
         } finally {
+          await refreshActiveAgentChat();
+          if (!state.chatStreaming) clearCurrentContextTurn();
           await refreshAgentStates();
           $('sendAgent').disabled = false;
           $('agentMessage').focus();
@@ -62,6 +67,7 @@
           },
           onDelta(delta) {
             assistantText += delta;
+            updateCurrentContextAssistant(assistantText);
             setBubbleContent(assistantBubble, assistantText, true);
             $('agentOutput').scrollTop = $('agentOutput').scrollHeight;
           },
@@ -70,6 +76,7 @@
               state.agent = payload.agent;
             }
             assistantText = payload.message || assistantText;
+            updateCurrentContextAssistant(assistantText);
             if (renderedChoice) {
               assistantItem.remove();
             } else {
@@ -82,13 +89,16 @@
           },
           onCancelled(payload) {
             assistantText = (payload && payload.message) || 'Agent run cancelled.';
+            updateCurrentContextAssistant(assistantText);
             setBubbleContent(assistantBubble, assistantText, false);
             $('agentStatus').textContent = currentAgentLabel() + ' · cancelled';
           },
           onToolStart(payload) {
+            appendCurrentContextEvent('tool_call', payload.tool || 'tool', payload.arguments);
             if (payload.tool !== 'request_choice') appendToolMessage('tool_call', payload.tool, payload.call_id, payload.arguments, true);
           },
           onToolResult(payload) {
+            appendCurrentContextEvent('tool_result', payload.tool || 'tool', payload.result);
             if (appendChoiceRequestFromResult(payload.result, true)) {
               renderedChoice = true;
               return;
@@ -126,11 +136,13 @@
         state.agentAttachments = attachments;
         renderAgentAttachments();
         setBubbleContent(assistantBubble, 'Request failed: ' + err.message, false);
+        updateCurrentContextAssistant('Request failed: ' + err.message);
         $('agentStatus').textContent = currentAgentLabel() + ' request failed: ' + err.message;
       } finally {
         state.chatStreaming = false;
         setLocalAgentWorking(activeAgentId, false);
         await refreshActiveAgentChat();
+        clearCurrentContextTurn();
         await refreshAgentStates();
         renderRuntimeStrip();
         $('sendAgent').disabled = false;
@@ -286,12 +298,13 @@
     }
     $('agentMessage').addEventListener('input', () => {
       updateSkillSuggest();
+      renderContextTokenUsage();
     });
     $('agentMessage').addEventListener('blur', () => {
       setTimeout(closeSkillSuggest, 120);
     });
     $('attachAgentFile').onclick = () => $('agentFileInput').click();
-    $('agentModel').onchange = () => { syncEffortOptionsForSelectedModel('medium'); saveAgentModelSettings(); };
+    $('agentModel').onchange = () => { syncEffortOptionsForSelectedModel('medium'); renderContextTokenUsage(); saveAgentModelSettings(); };
     $('agentThinkingEffort').onchange = saveAgentModelSettings;
     $('agentFileInput').onchange = () => {
       addAgentAttachments($('agentFileInput').files || []);

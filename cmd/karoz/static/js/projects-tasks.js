@@ -30,6 +30,7 @@
       state.archive = [];
       state.workspaceFiles = [];
       state.chatMessages = [];
+      state.currentContextTurn = [];
       state.chatHasMore = false;
       state.chatNextBeforeSeq = 0;
       state.preview = null;
