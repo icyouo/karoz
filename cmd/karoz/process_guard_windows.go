@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -142,6 +143,9 @@ func (boundary *windowsProcessBoundary) Close() error {
 	defer boundary.mu.Unlock()
 	_ = boundary.handshake.Close()
 	if boundary.job == 0 {
+		// Before a successful AfterStart handshake the guard cannot dispatch
+		// the child. Closing the handshake therefore proves there is no tree.
+		boundary.contained = true
 		return nil
 	}
 	err := syscall.CloseHandle(boundary.job)
@@ -150,6 +154,15 @@ func (boundary *windowsProcessBoundary) Close() error {
 		boundary.job = 0
 	}
 	return err
+}
+
+func (boundary *windowsProcessBoundary) ProveContained(time.Duration) error {
+	boundary.mu.Lock()
+	defer boundary.mu.Unlock()
+	if !boundary.contained {
+		return errors.New("process job containment is not proven")
+	}
+	return nil
 }
 
 func windowsCallError(operation string, err error) error {

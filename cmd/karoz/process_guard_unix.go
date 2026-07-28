@@ -4,11 +4,13 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const backgroundProcessSupported = true
@@ -71,6 +73,26 @@ func (boundary *unixProcessBoundary) Close() error {
 		boundary.closeErr = boundary.write.Close()
 	})
 	return boundary.closeErr
+}
+
+func (boundary *unixProcessBoundary) ProveContained(limit time.Duration) error {
+	if boundary.pgid <= 0 {
+		return errors.New("invalid process group id")
+	}
+	deadline := time.Now().Add(limit)
+	for {
+		err := syscall.Kill(-boundary.pgid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if err != nil && !errors.Is(err, syscall.EPERM) {
+			return fmt.Errorf("process group containment check failed: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return errors.New("process group still exists")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 func runBackgroundProcessGuard(args []string) int {

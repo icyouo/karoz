@@ -755,11 +755,66 @@ type injectedProcessBoundary struct {
 	afterErr  error
 	signalErr error
 	closeErr  error
+	proofErr  error
 	closed    bool
+}
+
+type recoveringProcessBoundary struct {
+	delegate    processBoundary
+	mu          sync.Mutex
+	failSignals int
+	failProofs  int
+	signals     []os.Signal
+}
+
+func (boundary *recoveringProcessBoundary) AfterStart(cmd *exec.Cmd) error {
+	return boundary.delegate.AfterStart(cmd)
+}
+
+func (boundary *recoveringProcessBoundary) Signal(signal os.Signal) error {
+	boundary.mu.Lock()
+	boundary.signals = append(boundary.signals, signal)
+	if boundary.failSignals > 0 {
+		boundary.failSignals--
+		boundary.mu.Unlock()
+		return errors.New("injected group signal failure")
+	}
+	boundary.mu.Unlock()
+	return boundary.delegate.Signal(signal)
+}
+
+func (boundary *recoveringProcessBoundary) Close() error {
+	return boundary.delegate.Close()
+}
+
+func (boundary *recoveringProcessBoundary) ProveContained(limit time.Duration) error {
+	boundary.mu.Lock()
+	if boundary.failProofs > 0 {
+		boundary.failProofs--
+		boundary.mu.Unlock()
+		return errors.New("injected containment proof failure")
+	}
+	boundary.mu.Unlock()
+	return boundary.delegate.ProveContained(limit)
+}
+
+func (boundary *recoveringProcessBoundary) signalCounts() (term, kill int) {
+	boundary.mu.Lock()
+	defer boundary.mu.Unlock()
+	for _, signal := range boundary.signals {
+		switch signal {
+		case syscall.SIGTERM:
+			term++
+		case os.Kill:
+			kill++
+		}
+	}
+	return term, kill
 }
 
 func (boundary *injectedProcessBoundary) AfterStart(cmd *exec.Cmd) error {
 	if boundary.afterErr != nil {
+		_ = boundary.delegate.AfterStart(cmd)
 		return boundary.afterErr
 	}
 	return boundary.delegate.AfterStart(cmd)
@@ -776,6 +831,13 @@ func (boundary *injectedProcessBoundary) Close() error {
 	boundary.closed = true
 	delegateErr := boundary.delegate.Close()
 	return errors.Join(delegateErr, boundary.closeErr)
+}
+
+func (boundary *injectedProcessBoundary) ProveContained(limit time.Duration) error {
+	if boundary.proofErr != nil {
+		return boundary.proofErr
+	}
+	return boundary.delegate.ProveContained(limit)
 }
 
 func TestProcessSupervisorAfterStartFailureClosesAndKillsGuard(t *testing.T) {
@@ -858,7 +920,7 @@ func TestProcessSupervisorRollbackCleanupFailuresRetainOwnership(t *testing.T) {
 	}{
 		{name: "collector-signal", point: processFailCollectorArm, mode: "signal"},
 		{name: "collector-close", point: processFailCollectorArm, mode: "close"},
-		{name: "waiter-kill", point: processFailWaiterArm, mode: "kill"},
+		{name: "waiter-proof", point: processFailWaiterArm, mode: "proof"},
 		{name: "waiter-wait", point: processFailWaiterArm, mode: "wait"},
 		{name: "registration-close", point: processFailRegistration, mode: "close"},
 		{name: "registration-wait", point: processFailRegistration, mode: "wait"},
@@ -880,17 +942,17 @@ func TestProcessSupervisorRollbackCleanupFailuresRetainOwnership(t *testing.T) {
 						return nil, err
 					}
 					injected := &injectedProcessBoundary{delegate: delegate}
-					if test.mode == "signal" || test.mode == "kill" {
+					if test.mode == "signal" || test.mode == "proof" {
 						injected.signalErr = errors.New("signal failed")
 					}
 					if test.mode == "signal" || test.mode == "close" {
 						injected.closeErr = errors.New("close failed")
 					}
+					if test.mode == "proof" {
+						injected.proofErr = errors.New("containment not proven")
+					}
 					return injected, nil
 				},
-			}
-			if test.mode == "kill" {
-				config.ProcessKill = func(*os.Process) error { return errors.New("direct kill failed") }
 			}
 			if test.mode == "wait" {
 				config.ProcessWait = func(cmd *exec.Cmd) error {
@@ -911,6 +973,335 @@ func TestProcessSupervisorRollbackCleanupFailuresRetainOwnership(t *testing.T) {
 			}
 			if record := store.get(request.ID); record.State.Terminal() {
 				t.Fatalf("cleanup failure terminalized record: %+v", record)
+			}
+		})
+	}
+}
+
+func TestProcessSupervisorRetriesFaultedHandleCleanupOnShutdown(t *testing.T) {
+	dir := t.TempDir()
+	shellPath := filepath.Join(dir, "shell.pid")
+	childPath := filepath.Join(dir, "child.pid")
+	var boundary *recoveringProcessBoundary
+	store := newMemoryProcessStore()
+	reservations := newMemoryReservationBoundary()
+	supervisor := testSupervisor(t, store, reservations, &synchronizedBuffer{}, processSupervisorConfig{
+		BoundaryFactory: func(cmd *exec.Cmd) (processBoundary, error) {
+			delegate, err := newBackgroundProcessBoundary(cmd)
+			if err != nil {
+				return nil, err
+			}
+			boundary = &recoveringProcessBoundary{
+				delegate: delegate, failSignals: 3, failProofs: 1,
+			}
+			return boundary, nil
+		},
+		Fail: func(point processFailpoint) error {
+			if point != processFailRegistration {
+				return nil
+			}
+			waitForParseablePID(t, shellPath)
+			waitForParseablePID(t, childPath)
+			return errors.New("registration failed")
+		},
+	})
+	command := fmt.Sprintf(
+		"echo $$ > %q; sleep 30 & echo $! > %q; wait",
+		shellPath, childPath,
+	)
+	request := startRequest("recover-cleanup", command, dir)
+	if _, err := supervisor.Start(context.Background(), request); err == nil {
+		t.Fatal("registration rollback unexpectedly succeeded")
+	}
+	supervisor.mu.Lock()
+	ownership := supervisor.faulted[request.ID]
+	supervisor.mu.Unlock()
+	if ownership == nil || ownership.handle == nil {
+		t.Fatal("unresolved cleanup did not retain its process handle")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := supervisor.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown did not recover faulted cleanup: %v", err)
+	}
+	waitProcessGone(t, readPID(t, shellPath))
+	waitProcessGone(t, readPID(t, childPath))
+	if !reservations.aborted[request.ID] {
+		t.Fatal("recovered rollback did not release its reservation")
+	}
+}
+
+func TestProcessSupervisorUnixWatchdogFallbackContainsTrees(t *testing.T) {
+	cases := []struct {
+		name        string
+		failSignals int
+		start       func(*testing.T, *processSupervisor, processStartRequest) error
+	}{
+		{
+			name:        "rollback",
+			failSignals: 3,
+			start: func(t *testing.T, supervisor *processSupervisor, request processStartRequest) error {
+				supervisor.config.Fail = func(point processFailpoint) error {
+					if point == processFailRegistration {
+						waitForParseablePID(t, filepath.Join(request.Workdir, "shell.pid"))
+						waitForParseablePID(t, filepath.Join(request.Workdir, "child.pid"))
+						return errors.New("registration failed")
+					}
+					return nil
+				}
+				_, err := supervisor.Start(context.Background(), request)
+				return err
+			},
+		},
+		{
+			name:        "stop",
+			failSignals: 4,
+			start: func(t *testing.T, supervisor *processSupervisor, request processStartRequest) error {
+				if _, err := supervisor.Start(context.Background(), request); err != nil {
+					return err
+				}
+				waitForParseablePID(t, filepath.Join(request.Workdir, "child.pid"))
+				return supervisor.Stop(request.ID)
+			},
+		},
+		{
+			name:        "lifetime",
+			failSignals: 3,
+			start: func(t *testing.T, supervisor *processSupervisor, request processStartRequest) error {
+				request.Lifetime = 300 * time.Millisecond
+				_, err := supervisor.Start(context.Background(), request)
+				if err != nil {
+					return err
+				}
+				waitTerminalWithSupervisor(t, supervisor, supervisor.store.(*memoryProcessStore), request.ID)
+				return nil
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			shellPath := filepath.Join(dir, "shell.pid")
+			childPath := filepath.Join(dir, "child.pid")
+			var boundary *recoveringProcessBoundary
+			store := newMemoryProcessStore()
+			supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+				BoundaryFactory: func(cmd *exec.Cmd) (processBoundary, error) {
+					delegate, err := newBackgroundProcessBoundary(cmd)
+					if err != nil {
+						return nil, err
+					}
+					boundary = &recoveringProcessBoundary{delegate: delegate, failSignals: test.failSignals}
+					return boundary, nil
+				},
+			})
+			command := fmt.Sprintf(
+				"echo $$ > %q; sleep 30 & echo $! > %q; wait",
+				shellPath, childPath,
+			)
+			request := startRequest("watchdog-"+test.name, command, dir)
+			err := test.start(t, supervisor, request)
+			if test.name == "rollback" {
+				if err == nil || !strings.Contains(err.Error(), "registration failed") {
+					t.Fatalf("rollback result = %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			waitForParseablePID(t, shellPath)
+			waitForParseablePID(t, childPath)
+			waitProcessGone(t, readPID(t, shellPath))
+			waitProcessGone(t, readPID(t, childPath))
+			if boundary == nil {
+				t.Fatal("boundary was not created")
+			}
+		})
+	}
+}
+
+func TestProcessSupervisorGuardExitContainmentCanBeRetried(t *testing.T) {
+	dir := t.TempDir()
+	shellPath := filepath.Join(dir, "shell.pid")
+	childPath := filepath.Join(dir, "child.pid")
+	var boundary *recoveringProcessBoundary
+	store := newMemoryProcessStore()
+	supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+		BoundaryFactory: func(cmd *exec.Cmd) (processBoundary, error) {
+			delegate, err := newBackgroundProcessBoundary(cmd)
+			if err != nil {
+				return nil, err
+			}
+			boundary = &recoveringProcessBoundary{delegate: delegate, failSignals: 3}
+			return boundary, nil
+		},
+	})
+	command := fmt.Sprintf(
+		"echo $$ > %q; sleep 30 & echo $! > %q; wait",
+		shellPath, childPath,
+	)
+	record, err := supervisor.Start(context.Background(), startRequest("guard-exit-retry", command, dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForParseablePID(t, shellPath)
+	waitForParseablePID(t, childPath)
+	if err := syscall.Kill(record.GuardPID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitForRecoveryFault(t, supervisor)
+	if got := store.get(record.ID); got.State.Terminal() {
+		t.Fatalf("unproven containment was terminalized: %+v", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := supervisor.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown retry did not recover guard exit: %v", err)
+	}
+	waitProcessGone(t, readPID(t, shellPath))
+	waitProcessGone(t, readPID(t, childPath))
+	if got := store.get(record.ID); !got.State.Terminal() {
+		t.Fatalf("recovered guard exit was not terminalized: %+v", got)
+	}
+	if boundary == nil {
+		t.Fatal("boundary was not created")
+	}
+}
+
+func TestProcessSupervisorLogWriteFailureUsesVerifiedContainment(t *testing.T) {
+	for _, failProofs := range []int{0, 1} {
+		name := "fallback"
+		if failProofs > 0 {
+			name = "unresolved-then-retry"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			shellPath := filepath.Join(dir, "shell.pid")
+			childPath := filepath.Join(dir, "child.pid")
+			var boundary *recoveringProcessBoundary
+			store := newMemoryProcessStore()
+			supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), failingLogWriter{}, processSupervisorConfig{
+				BoundaryFactory: func(cmd *exec.Cmd) (processBoundary, error) {
+					delegate, err := newBackgroundProcessBoundary(cmd)
+					if err != nil {
+						return nil, err
+					}
+					boundary = &recoveringProcessBoundary{
+						delegate: delegate, failSignals: 3, failProofs: failProofs,
+					}
+					return boundary, nil
+				},
+			})
+			command := fmt.Sprintf(
+				"echo $$ > %q; sleep 30 & echo $! > %q; sleep 0.05; printf x; wait",
+				shellPath, childPath,
+			)
+			request := startRequest("log-containment-"+name, command, dir)
+			if _, err := supervisor.Start(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			waitForParseablePID(t, shellPath)
+			waitForParseablePID(t, childPath)
+			if failProofs == 0 {
+				record := waitTerminalWithSupervisor(t, supervisor, store, request.ID)
+				if record.State != processdomain.StateFailed || !strings.Contains(record.Error, "log write failed") {
+					t.Fatalf("log failure record = %+v", record)
+				}
+			} else {
+				waitForRecoveryFault(t, supervisor)
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				if err := supervisor.Shutdown(ctx); err != nil {
+					t.Fatalf("log containment recovery = %v", err)
+				}
+			}
+			waitProcessGone(t, readPID(t, shellPath))
+			waitProcessGone(t, readPID(t, childPath))
+			if boundary == nil {
+				t.Fatal("boundary was not created")
+			}
+		})
+	}
+}
+
+func TestProcessSupervisorConcurrentShutdownHonorsCallerContext(t *testing.T) {
+	releaseWait := make(chan struct{})
+	enteredWait := make(chan struct{})
+	var waitOnce sync.Once
+	supervisor := testSupervisor(t, newMemoryProcessStore(), newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+		ProcessWait: func(cmd *exec.Cmd) error {
+			err := cmd.Wait()
+			waitOnce.Do(func() { close(enteredWait) })
+			<-releaseWait
+			return err
+		},
+		StopGrace: 20 * time.Millisecond,
+	})
+	if _, err := supervisor.Start(context.Background(), startRequest("shutdown-join", "sleep 30", t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		firstDone <- supervisor.Shutdown(ctx)
+	}()
+	<-enteredWait
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	err := supervisor.Shutdown(ctx)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second shutdown = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("second shutdown ignored its deadline: %s", elapsed)
+	}
+	close(releaseWait)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first shutdown = %v", err)
+	}
+}
+
+func TestProcessSupervisorStopAndLifetimeEscalateSignals(t *testing.T) {
+	for _, mode := range []string{"stop", "lifetime"} {
+		t.Run(mode, func(t *testing.T) {
+			var boundary *recoveringProcessBoundary
+			store := newMemoryProcessStore()
+			supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+				BoundaryFactory: func(cmd *exec.Cmd) (processBoundary, error) {
+					delegate, err := newBackgroundProcessBoundary(cmd)
+					if err != nil {
+						return nil, err
+					}
+					boundary = &recoveringProcessBoundary{delegate: delegate}
+					return boundary, nil
+				},
+				StopGrace: 20 * time.Millisecond,
+			})
+			request := startRequest(
+				"signal-"+mode,
+				"trap '' TERM; while :; do sleep 1; done",
+				t.TempDir(),
+			)
+			if mode == "lifetime" {
+				request.Lifetime = 50 * time.Millisecond
+			}
+			if _, err := supervisor.Start(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "stop" {
+				if err := supervisor.Stop(request.ID); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				waitTerminalWithSupervisor(t, supervisor, store, request.ID)
+			}
+			term, kill := boundary.signalCounts()
+			if mode == "stop" && term == 0 {
+				t.Fatal("Stop did not attempt graceful termination")
+			}
+			if kill == 0 {
+				t.Fatalf("%s did not escalate to hard containment (term=%d kill=%d)", mode, term, kill)
 			}
 		})
 	}
@@ -1194,6 +1585,11 @@ func readPID(t *testing.T, path string) int {
 	}
 	t.Fatalf("file %s did not contain a complete positive PID", path)
 	return 0
+}
+
+func waitForParseablePID(t *testing.T, path string) {
+	t.Helper()
+	_ = readPID(t, path)
 }
 
 func TestUnixProcessBoundaryRejectsNonPositivePGID(t *testing.T) {
