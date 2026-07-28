@@ -12,7 +12,18 @@ import (
 
 const backgroundProcessSupported = true
 
-func prepareBackgroundGuardProcess(cmd *exec.Cmd) {
+type unixProcessBoundary struct {
+	read  *os.File
+	write *os.File
+	pgid  int
+}
+
+func newBackgroundProcessBoundary(cmd *exec.Cmd) (processBoundary, error) {
+	read, write, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.ExtraFiles = []*os.File{read}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -24,18 +35,29 @@ func prepareBackgroundGuardProcess(cmd *exec.Cmd) {
 		}
 		return err
 	}
+	return &unixProcessBoundary{read: read, write: write}, nil
 }
 
-func signalBackgroundProcessGroup(pgid int, signal os.Signal) error {
+func (boundary *unixProcessBoundary) AfterStart(cmd *exec.Cmd) error {
+	boundary.pgid = cmd.Process.Pid
+	return boundary.read.Close()
+}
+
+func (boundary *unixProcessBoundary) Signal(signal os.Signal) error {
 	value, ok := signal.(syscall.Signal)
 	if !ok {
 		return errors.New("unsupported process signal")
 	}
-	err := syscall.Kill(-pgid, value)
+	err := syscall.Kill(-boundary.pgid, value)
 	if errors.Is(err, syscall.ESRCH) {
 		return nil
 	}
 	return err
+}
+
+func (boundary *unixProcessBoundary) Close() error {
+	_ = boundary.read.Close()
+	return boundary.write.Close()
 }
 
 func runBackgroundProcessGuard(args []string) int {

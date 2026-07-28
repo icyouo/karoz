@@ -14,6 +14,11 @@ import (
 	processdomain "github.com/karoz/karoz/internal/process"
 )
 
+const (
+	defaultProcessLifetime = time.Hour
+	maxProcessLifetime     = 24 * time.Hour
+)
+
 type processKernelStore interface {
 	CreateStarting(processdomain.Process) error
 	MarkRunning(processdomain.Process) error
@@ -23,6 +28,12 @@ type processKernelStore interface {
 type processReservationBoundary interface {
 	Reserve(processdomain.Process) error
 	Abort(processdomain.Process) error
+}
+
+type processBoundary interface {
+	AfterStart(*exec.Cmd) error
+	Signal(os.Signal) error
+	Close() error
 }
 
 type processLogOpener func(processdomain.Process) (io.WriteCloser, error)
@@ -43,6 +54,9 @@ type processSupervisorConfig struct {
 	TailLines       int
 	ExitDrain       time.Duration
 	StopGrace       time.Duration
+	DefaultLifetime time.Duration
+	MaxLifetime     time.Duration
+	TerminalRetry   time.Duration
 	Fail            func(processFailpoint) error
 	GuardExecutable string
 	GuardArgsPrefix []string
@@ -54,6 +68,12 @@ type processStartRequest struct {
 	Lifetime                      time.Duration
 }
 
+type processRecoveryFault struct {
+	ProcessID string
+	Stage     string
+	Error     string
+}
+
 type processSupervisor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -63,16 +83,20 @@ type processSupervisor struct {
 	openLog      processLogOpener
 	config       processSupervisorConfig
 
+	startMu sync.Mutex
 	mu      sync.Mutex
 	closed  bool
 	handles map[string]*supervisedProcess
+
+	recoveryMu sync.Mutex
+	recovery   []processRecoveryFault
 }
 
 type supervisedProcess struct {
 	supervisor *processSupervisor
 	record     processdomain.Process
 	cmd        *exec.Cmd
-	watchdog   *os.File
+	boundary   processBoundary
 	stdout     io.ReadCloser
 	stderr     io.ReadCloser
 	log        io.WriteCloser
@@ -87,9 +111,9 @@ type supervisedProcess struct {
 	stderrDone   chan struct{}
 
 	collectMu sync.Mutex
+	early     []byte
 	stateMu   sync.Mutex
 	cause     processTerminalCause
-	terminal  sync.Once
 }
 
 type processTerminalCause struct {
@@ -122,6 +146,18 @@ func newProcessSupervisor(
 	if config.StopGrace <= 0 {
 		config.StopGrace = 500 * time.Millisecond
 	}
+	if config.DefaultLifetime <= 0 {
+		config.DefaultLifetime = defaultProcessLifetime
+	}
+	if config.MaxLifetime <= 0 {
+		config.MaxLifetime = maxProcessLifetime
+	}
+	if config.DefaultLifetime > config.MaxLifetime {
+		return nil, errors.New("default process lifetime exceeds maximum")
+	}
+	if config.TerminalRetry <= 0 {
+		config.TerminalRetry = 10 * time.Millisecond
+	}
 	ctx, cancel := context.WithCancel(serverCtx)
 	return &processSupervisor{
 		ctx: ctx, cancel: cancel, store: store, reservations: reservations,
@@ -132,38 +168,43 @@ func newProcessSupervisor(
 // Start deliberately ignores creatorCtx. A request, Run, turn, or SSE
 // subscriber may record provenance but has no cancellation authority.
 func (supervisor *processSupervisor) Start(_ context.Context, request processStartRequest) (processdomain.Process, error) {
-	if request.ID == "" || request.ProjectID == "" || request.AgentID == "" ||
-		request.Command == "" || request.Workdir == "" {
-		return processdomain.Process{}, errors.New("invalid background process request")
+	lifetime, err := supervisor.validateStartRequest(request)
+	if err != nil {
+		return processdomain.Process{}, err
 	}
-	select {
-	case <-supervisor.ctx.Done():
-		return processdomain.Process{}, errors.New("process supervisor is shutting down")
-	default:
-	}
-	now := time.Now().UTC()
-	record := processdomain.Process{
-		ID: request.ID, ProjectID: request.ProjectID, AgentID: request.AgentID,
-		RunID: request.RunID, Command: request.Command, Workdir: request.Workdir,
-		Description: request.Description, State: processdomain.StateStarting,
-		LifetimeMS: request.Lifetime.Milliseconds(), StartedAt: now, UpdatedAt: now,
-	}
+
+	// Shutdown takes the same lock before closing admission. A spawned process is
+	// therefore either fully registered and signalable, or fully rolled back.
+	supervisor.startMu.Lock()
+	defer supervisor.startMu.Unlock()
+
 	supervisor.mu.Lock()
 	if supervisor.closed {
 		supervisor.mu.Unlock()
 		return processdomain.Process{}, errors.New("process supervisor is closed")
 	}
-	if _, exists := supervisor.handles[record.ID]; exists {
+	if _, exists := supervisor.handles[request.ID]; exists {
 		supervisor.mu.Unlock()
 		return processdomain.Process{}, errors.New("process already exists")
 	}
 	supervisor.mu.Unlock()
 
+	now := time.Now().UTC()
+	record := processdomain.Process{
+		ID: request.ID, ProjectID: request.ProjectID, AgentID: request.AgentID,
+		RunID: request.RunID, Command: request.Command, Workdir: request.Workdir,
+		Description: request.Description, State: processdomain.StateStarting,
+		LifetimeMS: lifetime.Milliseconds(), StartedAt: now, UpdatedAt: now,
+	}
 	if err := supervisor.reservations.Reserve(record); err != nil {
 		return processdomain.Process{}, err
 	}
 	if err := supervisor.store.CreateStarting(record); err != nil {
-		_ = supervisor.reservations.Abort(record)
+		abortErr := supervisor.reservations.Abort(record)
+		if abortErr != nil {
+			supervisor.recordRecovery(record.ID, "abort_after_create_failure", abortErr)
+			return processdomain.Process{}, errors.Join(err, abortErr)
+		}
 		return processdomain.Process{}, err
 	}
 	if err := supervisor.fail(processFailLogOpen); err != nil {
@@ -182,37 +223,46 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 		_ = logWriter.Close()
 		return supervisor.failBeforeSpawn(record, err)
 	}
-	supervisor.mu.Lock()
-	supervisor.handles[record.ID] = handle
-	supervisor.mu.Unlock()
-
+	supervisor.armCollectors(handle)
 	if err := supervisor.fail(processFailCollectorArm); err != nil {
 		return supervisor.rollbackSpawn(handle, err, false)
 	}
-	supervisor.armCollectors(handle)
 	if err := supervisor.fail(processFailWaiterArm); err != nil {
 		return supervisor.rollbackSpawn(handle, err, false)
 	}
 	supervisor.armWaiter(handle)
-
 	if err := supervisor.fail(processFailRegistration); err != nil {
 		return supervisor.rollbackSpawn(handle, err, true)
 	}
+
+	handle.collectMu.Lock()
+	handle.stateMu.Lock()
 	handle.record.State = processdomain.StateRunning
 	handle.record.PID = handle.cmd.Process.Pid
 	handle.record.GuardPID = handle.cmd.Process.Pid
 	handle.record.PGID = handle.cmd.Process.Pid
 	handle.record.UpdatedAt = time.Now().UTC()
-	if err := supervisor.store.MarkRunning(handle.record); err != nil {
+	running := handle.record
+	handle.stateMu.Unlock()
+	if err := supervisor.store.MarkRunning(running); err != nil {
+		handle.collectMu.Unlock()
 		return supervisor.rollbackSpawn(handle, err, true)
 	}
+	if err := writeAll(handle.log, handle.early); err != nil {
+		handle.collectMu.Unlock()
+		return supervisor.rollbackSpawn(handle, fmt.Errorf("process log write failed: %w", err), true)
+	}
+	handle.early = nil
 	handle.stateMu.Lock()
 	handle.registered = true
 	handle.stateMu.Unlock()
+	supervisor.mu.Lock()
+	supervisor.handles[record.ID] = handle
+	supervisor.mu.Unlock()
+	handle.collectMu.Unlock()
 	close(handle.gate)
-	if request.Lifetime > 0 {
-		go supervisor.enforceLifetime(handle, request.Lifetime)
-	}
+
+	go supervisor.enforceLifetime(handle, lifetime)
 	select {
 	case <-handle.exitObserved:
 		<-handle.terminalDone
@@ -220,6 +270,24 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 	default:
 		return handle.snapshot(), nil
 	}
+}
+
+func (supervisor *processSupervisor) validateStartRequest(request processStartRequest) (time.Duration, error) {
+	if request.ID == "" || request.ProjectID == "" || request.AgentID == "" ||
+		request.Command == "" || request.Workdir == "" {
+		return 0, errors.New("invalid background process request")
+	}
+	if request.Lifetime < 0 {
+		return 0, errors.New("process lifetime must not be negative")
+	}
+	lifetime := request.Lifetime
+	if lifetime == 0 {
+		lifetime = supervisor.config.DefaultLifetime
+	}
+	if lifetime > supervisor.config.MaxLifetime {
+		return 0, errors.New("process lifetime exceeds maximum")
+	}
+	return lifetime, nil
 }
 
 func (supervisor *processSupervisor) fail(point processFailpoint) error {
@@ -234,8 +302,11 @@ func (supervisor *processSupervisor) failBeforeSpawn(record processdomain.Proces
 	record.Error = cause.Error()
 	record.UpdatedAt = time.Now().UTC()
 	record.EndedAt = timePointer(record.UpdatedAt)
-	_ = supervisor.store.MarkTerminal(record)
-	_ = supervisor.reservations.Abort(record)
+	supervisor.persistTerminal(record, "pre_spawn_terminal")
+	if err := supervisor.reservations.Abort(record); err != nil {
+		supervisor.recordRecovery(record.ID, "pre_spawn_abort", err)
+		return record, errors.Join(cause, err)
+	}
 	return record, cause
 }
 
@@ -251,39 +322,41 @@ func (supervisor *processSupervisor) launch(record processdomain.Process, logWri
 			return nil, err
 		}
 	}
-	watchdogRead, watchdogWrite, err := os.Pipe()
-	if err != nil {
-		return nil, err
-	}
 	args := append([]string(nil), supervisor.config.GuardArgsPrefix...)
 	args = append(args, "process-guard", "--", "bash", "-lc", record.Command)
 	cmd := exec.CommandContext(supervisor.ctx, executable, args...)
 	cmd.Dir = record.Workdir
-	cmd.ExtraFiles = []*os.File{watchdogRead}
-	prepareBackgroundGuardProcess(cmd)
+	boundary, err := newBackgroundProcessBoundary(cmd)
+	if err != nil {
+		return nil, err
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		watchdogRead.Close()
-		watchdogWrite.Close()
+		_ = boundary.Close()
 		return nil, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		watchdogRead.Close()
-		watchdogWrite.Close()
-		stdout.Close()
+		_ = boundary.Close()
+		_ = stdout.Close()
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		watchdogRead.Close()
-		watchdogWrite.Close()
-		stdout.Close()
-		stderr.Close()
+		_ = boundary.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
 		return nil, err
 	}
-	_ = watchdogRead.Close()
+	if err := boundary.AfterStart(cmd); err != nil {
+		_ = boundary.Signal(os.Kill)
+		_ = cmd.Wait()
+		_ = boundary.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return nil, err
+	}
 	return &supervisedProcess{
-		supervisor: supervisor, record: record, cmd: cmd, watchdog: watchdogWrite,
+		supervisor: supervisor, record: record, cmd: cmd, boundary: boundary,
 		stdout: stdout, stderr: stderr, log: logWriter,
 		buffer: processdomain.NewOutputBuffer(supervisor.config.TailLines, supervisor.config.LogBytes),
 		gate:   make(chan struct{}), exitObserved: make(chan struct{}),
@@ -309,37 +382,47 @@ func (supervisor *processSupervisor) collect(
 ) {
 	defer close(done)
 	close(armed)
-	<-handle.gate
-	handle.stateMu.Lock()
-	registered := handle.registered
-	handle.stateMu.Unlock()
-	if !registered {
-		return
-	}
 	chunk := make([]byte, 4096)
 	for {
-		count, err := reader.Read(chunk)
+		count, readErr := reader.Read(chunk)
 		if count > 0 {
 			handle.collectMu.Lock()
 			_, accepted := handle.buffer.AppendStream(stream, string(chunk[:count]))
+			handle.stateMu.Lock()
+			registered := handle.registered
+			handle.stateMu.Unlock()
 			if accepted > 0 {
-				written, writeErr := handle.log.Write(chunk[:accepted])
-				if writeErr == nil && int64(written) != accepted {
-					writeErr = io.ErrShortWrite
-				}
-				if writeErr != nil {
-					handle.collectMu.Unlock()
-					handle.setCause(processdomain.StateFailed, "process log write failed: "+writeErr.Error())
-					_ = signalBackgroundProcessGroup(handle.pgid(), syscall.SIGKILL)
-					return
+				if registered {
+					if err := writeAll(handle.log, chunk[:accepted]); err != nil {
+						handle.collectMu.Unlock()
+						handle.setCause(processdomain.StateFailed, "process log write failed: "+err.Error())
+						_ = handle.boundary.Signal(os.Kill)
+						return
+					}
+				} else {
+					handle.early = append(handle.early, chunk[:accepted]...)
 				}
 			}
 			handle.collectMu.Unlock()
 		}
-		if err != nil {
+		if readErr != nil {
 			return
 		}
 	}
+}
+
+func writeAll(writer io.Writer, value []byte) error {
+	for len(value) > 0 {
+		count, err := writer.Write(value)
+		if err != nil {
+			return err
+		}
+		if count <= 0 {
+			return io.ErrShortWrite
+		}
+		value = value[count:]
+	}
+	return nil
 }
 
 func (supervisor *processSupervisor) armWaiter(handle *supervisedProcess) {
@@ -349,6 +432,10 @@ func (supervisor *processSupervisor) armWaiter(handle *supervisedProcess) {
 		close(armed)
 		waitErr := handle.cmd.Wait()
 		close(handle.exitObserved)
+		// The guard may die before its command tree. Contain the residual group
+		// before draining pipes or committing the terminal record.
+		_ = handle.boundary.Signal(os.Kill)
+		supervisor.waitForCollectors(handle)
 		<-handle.gate
 		handle.stateMu.Lock()
 		registered := handle.registered
@@ -356,14 +443,12 @@ func (supervisor *processSupervisor) armWaiter(handle *supervisedProcess) {
 		if !registered {
 			return
 		}
-		supervisor.waitForCollectors(handle)
 		handle.collectMu.Lock()
-		_ = handle.buffer.FlushAllSequenced()
+		_, _ = handle.buffer.FlushStream("stdout")
+		_, _ = handle.buffer.FlushStream("stderr")
 		_ = handle.log.Close()
 		handle.collectMu.Unlock()
-		if handle.watchdog != nil {
-			_ = handle.watchdog.Close()
-		}
+		_ = handle.boundary.Close()
 		supervisor.finish(handle, waitErr)
 	}()
 	<-armed
@@ -388,39 +473,37 @@ func (supervisor *processSupervisor) waitForCollectors(handle *supervisedProcess
 }
 
 func (supervisor *processSupervisor) finish(handle *supervisedProcess, waitErr error) {
-	handle.terminal.Do(func() {
-		defer close(handle.terminalDone)
-		record := handle.snapshot()
-		handle.stateMu.Lock()
-		cause := handle.cause
-		handle.stateMu.Unlock()
-		exitCode := 0
-		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else if waitErr != nil {
-			exitCode = -1
-		}
-		if cause.state != "" {
-			record.State, record.Error = cause.state, cause.err
-		} else if waitErr == nil {
-			record.State = processdomain.StateSucceeded
-		} else {
-			record.State = processdomain.StateFailed
-			record.Error = waitErr.Error()
-		}
-		record.ExitCode = exitCode
-		record.UpdatedAt = time.Now().UTC()
-		record.EndedAt = timePointer(record.UpdatedAt)
-		record.LogBytes, record.LogLines, record.LogTruncated = handle.buffer.Stats()
-		_ = supervisor.store.MarkTerminal(record)
-		handle.stateMu.Lock()
-		handle.record = record
-		handle.stateMu.Unlock()
-		supervisor.mu.Lock()
-		delete(supervisor.handles, record.ID)
-		supervisor.mu.Unlock()
-	})
+	record := handle.snapshot()
+	handle.stateMu.Lock()
+	cause := handle.cause
+	handle.stateMu.Unlock()
+	exitCode := 0
+	var exitErr *exec.ExitError
+	if errors.As(waitErr, &exitErr) {
+		exitCode = exitErr.ExitCode()
+	} else if waitErr != nil {
+		exitCode = -1
+	}
+	if cause.state != "" {
+		record.State, record.Error = cause.state, cause.err
+	} else if waitErr == nil {
+		record.State = processdomain.StateSucceeded
+	} else {
+		record.State = processdomain.StateFailed
+		record.Error = waitErr.Error()
+	}
+	record.ExitCode = exitCode
+	record.UpdatedAt = time.Now().UTC()
+	record.EndedAt = timePointer(record.UpdatedAt)
+	record.LogBytes, record.LogLines, record.LogTruncated = handle.buffer.Stats()
+	supervisor.persistTerminal(record, "live_terminal")
+	handle.stateMu.Lock()
+	handle.record = record
+	handle.stateMu.Unlock()
+	supervisor.mu.Lock()
+	delete(supervisor.handles, record.ID)
+	supervisor.mu.Unlock()
+	close(handle.terminalDone)
 }
 
 func (supervisor *processSupervisor) rollbackSpawn(handle *supervisedProcess, cause error, waiterArmed bool) (processdomain.Process, error) {
@@ -433,29 +516,61 @@ func (supervisor *processSupervisor) rollbackSpawn(handle *supervisedProcess, ca
 	default:
 		close(handle.gate)
 	}
-	_ = signalBackgroundProcessGroup(handle.cmd.Process.Pid, syscall.SIGKILL)
-	if handle.watchdog != nil {
-		_ = handle.watchdog.Close()
-	}
+	_ = handle.boundary.Signal(os.Kill)
 	if waiterArmed {
 		<-handle.waitDone
 	} else {
 		_ = handle.cmd.Wait()
+		supervisor.waitForCollectors(handle)
 	}
 	_ = handle.stdout.Close()
 	_ = handle.stderr.Close()
+	_ = handle.boundary.Close()
+	handle.collectMu.Lock()
+	handle.early = nil
 	_ = handle.log.Close()
+	handle.collectMu.Unlock()
 	record := handle.snapshot()
 	record.State = processdomain.StateFailed
 	record.Error = cause.Error()
 	record.UpdatedAt = time.Now().UTC()
 	record.EndedAt = timePointer(record.UpdatedAt)
-	_ = supervisor.store.MarkTerminal(record)
-	_ = supervisor.reservations.Abort(record)
-	supervisor.mu.Lock()
-	delete(supervisor.handles, record.ID)
-	supervisor.mu.Unlock()
+	supervisor.persistTerminal(record, "rollback_terminal")
+	if err := supervisor.reservations.Abort(record); err != nil {
+		supervisor.recordRecovery(record.ID, "rollback_abort", err)
+		return record, errors.Join(cause, err)
+	}
 	return record, cause
+}
+
+func (supervisor *processSupervisor) persistTerminal(record processdomain.Process, stage string) {
+	for {
+		if err := supervisor.store.MarkTerminal(record); err == nil {
+			return
+		} else {
+			supervisor.recordRecovery(record.ID, stage, err)
+		}
+		// Do not claim terminal completion or release the handle while the
+		// durable terminal/outbox transaction remains unavailable. Shutdown
+		// deliberately waits for this retry loop before canceling supervisorCtx.
+		time.Sleep(supervisor.config.TerminalRetry)
+	}
+}
+
+func (supervisor *processSupervisor) recordRecovery(id, stage string, err error) {
+	supervisor.recoveryMu.Lock()
+	supervisor.recovery = append(supervisor.recovery, processRecoveryFault{
+		ProcessID: id, Stage: stage, Error: err.Error(),
+	})
+	supervisor.recoveryMu.Unlock()
+}
+
+func (supervisor *processSupervisor) RecoveryFaults() []processRecoveryFault {
+	supervisor.recoveryMu.Lock()
+	defer supervisor.recoveryMu.Unlock()
+	result := make([]processRecoveryFault, len(supervisor.recovery))
+	copy(result, supervisor.recovery)
+	return result
 }
 
 func (supervisor *processSupervisor) Stop(id string) error {
@@ -472,7 +587,7 @@ func (supervisor *processSupervisor) Stop(id string) error {
 	default:
 	}
 	handle.setCause(processdomain.StateKilled, "process stopped")
-	if err := signalBackgroundProcessGroup(handle.pgid(), syscall.SIGTERM); err != nil {
+	if err := handle.boundary.Signal(syscall.SIGTERM); err != nil {
 		return err
 	}
 	timer := time.NewTimer(supervisor.config.StopGrace)
@@ -481,7 +596,7 @@ func (supervisor *processSupervisor) Stop(id string) error {
 	case <-handle.terminalDone:
 		return nil
 	case <-timer.C:
-		_ = signalBackgroundProcessGroup(handle.pgid(), syscall.SIGKILL)
+		_ = handle.boundary.Signal(os.Kill)
 		<-handle.terminalDone
 		return nil
 	}
@@ -497,14 +612,16 @@ func (supervisor *processSupervisor) enforceLifetime(handle *supervisedProcess, 
 		return
 	case <-timer.C:
 		handle.setCause(processdomain.StateFailed, "lifetime exceeded")
-		_ = signalBackgroundProcessGroup(handle.pgid(), syscall.SIGKILL)
+		_ = handle.boundary.Signal(os.Kill)
 	}
 }
 
 func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
+	supervisor.startMu.Lock()
 	supervisor.mu.Lock()
 	if supervisor.closed {
 		supervisor.mu.Unlock()
+		supervisor.startMu.Unlock()
 		return nil
 	}
 	supervisor.closed = true
@@ -513,6 +630,8 @@ func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
 		handles = append(handles, handle)
 	}
 	supervisor.mu.Unlock()
+	supervisor.startMu.Unlock()
+
 	for _, handle := range handles {
 		select {
 		case <-handle.exitObserved:
@@ -520,7 +639,7 @@ func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
 		default:
 		}
 		handle.setCause(processdomain.StateInterrupted, "server shutting down")
-		_ = signalBackgroundProcessGroup(handle.pgid(), syscall.SIGTERM)
+		_ = handle.boundary.Signal(syscall.SIGTERM)
 	}
 	for _, handle := range handles {
 		grace := time.NewTimer(supervisor.config.StopGrace)
@@ -530,7 +649,7 @@ func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
 				<-grace.C
 			}
 		case <-grace.C:
-			_ = signalBackgroundProcessGroup(handle.pgid(), syscall.SIGKILL)
+			_ = handle.boundary.Signal(os.Kill)
 			select {
 			case <-handle.terminalDone:
 			case <-ctx.Done():
@@ -541,7 +660,7 @@ func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
 			if !grace.Stop() {
 				<-grace.C
 			}
-			_ = signalBackgroundProcessGroup(handle.pgid(), syscall.SIGKILL)
+			_ = handle.boundary.Signal(os.Kill)
 			supervisor.cancel()
 			return ctx.Err()
 		}
@@ -562,12 +681,6 @@ func (handle *supervisedProcess) snapshot() processdomain.Process {
 	handle.stateMu.Lock()
 	defer handle.stateMu.Unlock()
 	return handle.record
-}
-
-func (handle *supervisedProcess) pgid() int {
-	handle.stateMu.Lock()
-	defer handle.stateMu.Unlock()
-	return handle.record.PGID
 }
 
 func timePointer(value time.Time) *time.Time {

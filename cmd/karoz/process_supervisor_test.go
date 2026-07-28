@@ -36,16 +36,20 @@ func TestBackgroundProcessGuardHelper(t *testing.T) {
 }
 
 type memoryProcessStore struct {
-	mu          sync.Mutex
-	records     map[string]processdomain.Process
-	transitions map[string]int
-	failRunning bool
+	mu               sync.Mutex
+	records          map[string]processdomain.Process
+	transitions      map[string]int
+	terminalAttempts map[string]int
+	terminalFailures map[string]int
+	failRunning      bool
 }
 
 func newMemoryProcessStore() *memoryProcessStore {
 	return &memoryProcessStore{
-		records:     make(map[string]processdomain.Process),
-		transitions: make(map[string]int),
+		records:          make(map[string]processdomain.Process),
+		transitions:      make(map[string]int),
+		terminalAttempts: make(map[string]int),
+		terminalFailures: make(map[string]int),
 	}
 }
 
@@ -69,6 +73,11 @@ func (store *memoryProcessStore) MarkRunning(item processdomain.Process) error {
 func (store *memoryProcessStore) MarkTerminal(item processdomain.Process) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	store.terminalAttempts[item.ID]++
+	if store.terminalFailures[item.ID] > 0 {
+		store.terminalFailures[item.ID]--
+		return errors.New("terminal save failed")
+	}
 	if current, ok := store.records[item.ID]; ok && current.State.Terminal() {
 		return nil
 	}
@@ -84,9 +93,10 @@ func (store *memoryProcessStore) get(id string) processdomain.Process {
 }
 
 type memoryReservationBoundary struct {
-	mu       sync.Mutex
-	reserved map[string]bool
-	aborted  map[string]bool
+	mu        sync.Mutex
+	reserved  map[string]bool
+	aborted   map[string]bool
+	failAbort bool
 }
 
 func newMemoryReservationBoundary() *memoryReservationBoundary {
@@ -105,6 +115,9 @@ func (boundary *memoryReservationBoundary) Reserve(item processdomain.Process) e
 func (boundary *memoryReservationBoundary) Abort(item processdomain.Process) error {
 	boundary.mu.Lock()
 	defer boundary.mu.Unlock()
+	if boundary.failAbort {
+		return errors.New("reservation abort failed")
+	}
 	boundary.aborted[item.ID] = true
 	return nil
 }
@@ -284,8 +297,9 @@ func TestProcessSupervisorSpawnFailpointsRollback(t *testing.T) {
 		store := newMemoryProcessStore()
 		store.failRunning = true
 		reservations := newMemoryReservationBoundary()
-		supervisor := testSupervisor(t, store, reservations, &synchronizedBuffer{}, processSupervisorConfig{})
-		_, err := supervisor.Start(context.Background(), startRequest("registration-save", "sleep 30", t.TempDir()))
+		log := &synchronizedBuffer{}
+		supervisor := testSupervisor(t, store, reservations, log, processSupervisorConfig{})
+		_, err := supervisor.Start(context.Background(), startRequest("registration-save", "printf 'uncommitted\\n'", t.TempDir()))
 		if err == nil {
 			t.Fatal("registration save failure did not roll back")
 		}
@@ -293,7 +307,128 @@ func TestProcessSupervisorSpawnFailpointsRollback(t *testing.T) {
 		if record.State != processdomain.StateFailed || !reservations.aborted["registration-save"] {
 			t.Fatalf("registration rollback = %+v, %+v", record, reservations.aborted)
 		}
+		if got := log.String(); got != "" {
+			t.Fatalf("registration rollback published output: %q", got)
+		}
 	})
+}
+
+func TestProcessSupervisorDelayedRegistrationRetainsEarlyOutput(t *testing.T) {
+	for _, command := range []string{"true", "printf 'early\\n'"} {
+		t.Run(command, func(t *testing.T) {
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			store := newMemoryProcessStore()
+			log := &synchronizedBuffer{}
+			supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), log, processSupervisorConfig{
+				Fail: func(point processFailpoint) error {
+					if point == processFailRegistration {
+						close(entered)
+						<-release
+					}
+					return nil
+				},
+			})
+			done := make(chan error, 1)
+			workdir := t.TempDir()
+			go func() {
+				_, err := supervisor.Start(context.Background(), startRequest("delayed", command, workdir))
+				done <- err
+			}()
+			<-entered
+			time.Sleep(50 * time.Millisecond)
+			close(release)
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			record := waitTerminal(t, store, "delayed")
+			if record.State != processdomain.StateSucceeded {
+				t.Fatalf("delayed process = %+v", record)
+			}
+			want := ""
+			if command != "true" {
+				want = "early\n"
+			}
+			if got := log.String(); got != want {
+				t.Fatalf("early log = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestProcessSupervisorPostSpawnFailuresDiscardEarlyOutput(t *testing.T) {
+	for _, point := range []processFailpoint{
+		processFailCollectorArm, processFailWaiterArm, processFailRegistration,
+	} {
+		for _, command := range []string{"true", "printf 'uncommitted\\n'"} {
+			t.Run(string(point)+"/"+strings.Fields(command)[0], func(t *testing.T) {
+				store := newMemoryProcessStore()
+				log := &synchronizedBuffer{}
+				supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), log, processSupervisorConfig{
+					Fail: func(candidate processFailpoint) error {
+						if candidate == point {
+							time.Sleep(50 * time.Millisecond)
+							return errors.New("post-spawn failure")
+						}
+						return nil
+					},
+				})
+				_, err := supervisor.Start(context.Background(), startRequest(string(point), command, t.TempDir()))
+				if err == nil {
+					t.Fatal("expected rollback")
+				}
+				if got := log.String(); got != "" {
+					t.Fatalf("rollback published early output: %q", got)
+				}
+			})
+		}
+	}
+}
+
+func TestProcessSupervisorRegistrationIsNotSignalableAndSerializesShutdown(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	store := newMemoryProcessStore()
+	supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+		Fail: func(point processFailpoint) error {
+			if point == processFailRegistration {
+				close(entered)
+				<-release
+			}
+			return nil
+		},
+	})
+	startDone := make(chan error, 1)
+	workdir := t.TempDir()
+	go func() {
+		_, err := supervisor.Start(context.Background(), startRequest("blocked-registration", "sleep 30", workdir))
+		startDone <- err
+	}()
+	<-entered
+	if err := supervisor.Stop("blocked-registration"); err == nil {
+		t.Fatal("unregistered process was signalable")
+	}
+	shutdownDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		shutdownDone <- supervisor.Shutdown(ctx)
+	}()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown crossed in-flight registration: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-startDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-shutdownDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := waitTerminal(t, store, "blocked-registration"); got.State != processdomain.StateInterrupted {
+		t.Fatalf("shutdown record = %+v", got)
+	}
 }
 
 type failingLogWriter struct{}
@@ -325,6 +460,150 @@ func TestProcessSupervisorLogFailureAndTerminalArbitration(t *testing.T) {
 	}
 	if store.transitions["lifetime"] != 1 {
 		t.Fatalf("terminal transition count = %d", store.transitions["lifetime"])
+	}
+}
+
+func TestProcessSupervisorLifetimeDefaultsAndCeiling(t *testing.T) {
+	store := newMemoryProcessStore()
+	reservations := newMemoryReservationBoundary()
+	supervisor := testSupervisor(t, store, reservations, &synchronizedBuffer{}, processSupervisorConfig{
+		DefaultLifetime: 50 * time.Millisecond,
+		MaxLifetime:     100 * time.Millisecond,
+	})
+	record, err := supervisor.Start(context.Background(), startRequest("default-lifetime", "sleep 30", t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.LifetimeMS != 50 {
+		t.Fatalf("effective lifetime = %d", record.LifetimeMS)
+	}
+	if got := waitTerminal(t, store, record.ID); got.Error != "lifetime exceeded" {
+		t.Fatalf("default lifetime result = %+v", got)
+	}
+	for _, lifetime := range []time.Duration{-time.Second, 101 * time.Millisecond} {
+		request := startRequest(fmt.Sprintf("invalid-%d", lifetime), "true", t.TempDir())
+		request.Lifetime = lifetime
+		if _, err := supervisor.Start(context.Background(), request); err == nil {
+			t.Fatalf("accepted lifetime %s", lifetime)
+		}
+	}
+}
+
+func TestProcessSupervisorTerminalPersistenceRetriesAllPaths(t *testing.T) {
+	type pathCase struct {
+		name    string
+		command string
+		run     func(*testing.T, *processSupervisor, processStartRequest) error
+	}
+	cases := []pathCase{
+		{
+			name: "pre-spawn",
+			run: func(_ *testing.T, supervisor *processSupervisor, request processStartRequest) error {
+				supervisor.config.Fail = func(point processFailpoint) error {
+					if point == processFailLogOpen {
+						return errors.New("pre-spawn failed")
+					}
+					return nil
+				}
+				_, err := supervisor.Start(context.Background(), request)
+				return err
+			},
+		},
+		{
+			name:    "natural-exit",
+			command: "true",
+			run: func(_ *testing.T, supervisor *processSupervisor, request processStartRequest) error {
+				_, err := supervisor.Start(context.Background(), request)
+				return err
+			},
+		},
+		{
+			name:    "rollback",
+			command: "sleep 30",
+			run: func(_ *testing.T, supervisor *processSupervisor, request processStartRequest) error {
+				supervisor.config.Fail = func(point processFailpoint) error {
+					if point == processFailRegistration {
+						return errors.New("registration failed")
+					}
+					return nil
+				}
+				_, err := supervisor.Start(context.Background(), request)
+				return err
+			},
+		},
+		{
+			name:    "stop",
+			command: "sleep 30",
+			run: func(t *testing.T, supervisor *processSupervisor, request processStartRequest) error {
+				if _, err := supervisor.Start(context.Background(), request); err != nil {
+					return err
+				}
+				return supervisor.Stop(request.ID)
+			},
+		},
+		{
+			name:    "shutdown",
+			command: "sleep 30",
+			run: func(t *testing.T, supervisor *processSupervisor, request processStartRequest) error {
+				if _, err := supervisor.Start(context.Background(), request); err != nil {
+					return err
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				return supervisor.Shutdown(ctx)
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			store := newMemoryProcessStore()
+			store.terminalFailures[test.name] = 1
+			supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+				TerminalRetry: time.Millisecond,
+			})
+			command := test.command
+			if command == "" {
+				command = "true"
+			}
+			request := startRequest(test.name, command, t.TempDir())
+			err := test.run(t, supervisor, request)
+			if test.name == "pre-spawn" || test.name == "rollback" {
+				if err == nil {
+					t.Fatal("expected initiating failure")
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			record := waitTerminal(t, store, test.name)
+			if !record.State.Terminal() || store.terminalAttempts[test.name] < 2 {
+				t.Fatalf("terminal retry record=%+v attempts=%d", record, store.terminalAttempts[test.name])
+			}
+			if len(supervisor.RecoveryFaults()) == 0 {
+				t.Fatal("terminal failure was not surfaced")
+			}
+		})
+	}
+}
+
+func TestProcessSupervisorAbortFailureIsRecoverableEvidence(t *testing.T) {
+	store := newMemoryProcessStore()
+	reservations := newMemoryReservationBoundary()
+	reservations.failAbort = true
+	supervisor := testSupervisor(t, store, reservations, &synchronizedBuffer{}, processSupervisorConfig{
+		Fail: func(point processFailpoint) error {
+			if point == processFailLogOpen {
+				return errors.New("log open failed")
+			}
+			return nil
+		},
+	})
+	if _, err := supervisor.Start(context.Background(), startRequest("abort-fault", "true", t.TempDir())); err == nil ||
+		!strings.Contains(err.Error(), "reservation abort failed") {
+		t.Fatalf("abort failure = %v", err)
+	}
+	faults := supervisor.RecoveryFaults()
+	if len(faults) != 1 || faults[0].Stage != "pre_spawn_abort" {
+		t.Fatalf("recovery faults = %#v", faults)
 	}
 }
 
@@ -406,6 +685,45 @@ func TestProcessWatchdogKillsDescendantsAfterParentSIGKILL(t *testing.T) {
 	_, _ = cmd.Process.Wait()
 	waitProcessGone(t, childPID)
 	waitProcessGone(t, grandchildPID)
+}
+
+func TestProcessSupervisorKillsResidualGroupAfterGuardExit(t *testing.T) {
+	t.Run("guard-killed", func(t *testing.T) {
+		dir := t.TempDir()
+		store := newMemoryProcessStore()
+		supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{})
+		path := filepath.Join(dir, "shell.pid")
+		record, err := supervisor.Start(context.Background(), startRequest("guard-killed", fmt.Sprintf("echo $$ > %q; sleep 30", path), dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitForFile(t, path)
+		shellPID := readPID(t, path)
+		if err := syscall.Kill(record.GuardPID, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		if got := waitTerminal(t, store, record.ID); got.State != processdomain.StateFailed {
+			t.Fatalf("guard kill result = %+v", got)
+		}
+		waitProcessGone(t, shellPID)
+	})
+
+	t.Run("background-descendant", func(t *testing.T) {
+		dir := t.TempDir()
+		store := newMemoryProcessStore()
+		supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{})
+		path := filepath.Join(dir, "descendant.pid")
+		command := fmt.Sprintf("sleep 30 & echo $! > %q; exit 0", path)
+		if _, err := supervisor.Start(context.Background(), startRequest("background-descendant", command, dir)); err != nil {
+			t.Fatal(err)
+		}
+		waitForFile(t, path)
+		descendantPID := readPID(t, path)
+		if got := waitTerminal(t, store, "background-descendant"); got.State != processdomain.StateSucceeded {
+			t.Fatalf("background descendant result = %+v", got)
+		}
+		waitProcessGone(t, descendantPID)
+	})
 }
 
 func waitForFile(t *testing.T, path string) {
