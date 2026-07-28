@@ -111,6 +111,40 @@ func TestSourceGapForgedKeyFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSourceGapEnableRequiresExactRecoveryState(t *testing.T) {
+	now := time.Now()
+	if CanEnableAfterSourceGaps(Monitor{
+		State: StateDisabled, ErrorCode: "source_gap",
+	}, map[string]uint64{}) == nil {
+		t.Fatal("empty source gap set enabled")
+	}
+	item, err := ApplySourceGap(Monitor{State: StateActive}, SourceGapStatus{
+		AuthorityID: "task-store", SourceKind: "task_changed",
+		GapVersion: 1, FirstVersion: 1, LastVersion: 1, LostCount: 1,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = AcknowledgeSourceGap(item, "task-store", "task_changed", 1, 2, "operator", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	barriers := map[string]uint64{SourceGapKey("task-store", "task_changed"): 2}
+	wrongState := item
+	wrongState.State = StateError
+	if CanEnableAfterSourceGaps(wrongState, barriers) == nil {
+		t.Fatal("error-state monitor enabled through source-gap transition")
+	}
+	wrongError := item
+	wrongError.ErrorCode = "probe_error"
+	if CanEnableAfterSourceGaps(wrongError, barriers) == nil {
+		t.Fatal("non-source-gap error enabled through source-gap transition")
+	}
+	if _, err := EnableAfterSourceGaps(item, barriers, now); err != nil {
+		t.Fatalf("valid source-gap recovery rejected: %v", err)
+	}
+}
+
 func TestSourceGapSameKeyMergeAndStaleVersion(t *testing.T) {
 	now := time.Now()
 	item, err := ApplySourceGap(Monitor{State: StateActive}, SourceGapStatus{

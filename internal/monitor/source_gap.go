@@ -97,6 +97,12 @@ func CanEnableAfterSourceGaps(item Monitor, validatedBarriers map[string]uint64)
 	if err := ValidateSourceGaps(item.SourceGaps); err != nil {
 		return err
 	}
+	if len(item.SourceGaps) == 0 {
+		return errors.New("source gap set is empty")
+	}
+	if item.State != StateDisabled || item.ErrorCode != "source_gap" {
+		return errors.New("monitor is not disabled for source gap")
+	}
 	for key, gap := range item.SourceGaps {
 		if gap.AcknowledgedGapVersion != gap.GapVersion || gap.AcknowledgedGapVersion == 0 {
 			return fmt.Errorf("source gap %s is unacknowledged", key)

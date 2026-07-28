@@ -58,6 +58,8 @@ func ValidateMonitor(item Monitor) error {
 	if len(item.PendingFires) > MaxPendingFires {
 		return errors.New("pending fire capacity exceeded")
 	}
+	pendingIDs := make(map[string]bool, len(item.PendingFires))
+	pendingDedupKeys := make(map[string]bool, len(item.PendingFires))
 	for _, pending := range item.PendingFires {
 		if err := ValidatePendingFire(pending); err != nil {
 			return err
@@ -65,6 +67,11 @@ func ValidateMonitor(item Monitor) error {
 		if pending.MonitorID != item.ID {
 			return errors.New("pending fire monitor mismatch")
 		}
+		if pendingIDs[pending.ID] || pendingDedupKeys[pending.DedupKey] {
+			return errors.New("duplicate pending fire identity")
+		}
+		pendingIDs[pending.ID] = true
+		pendingDedupKeys[pending.DedupKey] = true
 	}
 	if err := ValidateSourceGaps(item.SourceGaps); err != nil {
 		return err
@@ -117,6 +124,12 @@ type ProbeAuthorizationCheck struct {
 }
 
 func ProbeAuthorized(item Monitor, receipt ProbeApprovalReceipt, check ProbeAuthorizationCheck) error {
+	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.ProjectID) == "" ||
+		strings.TrimSpace(item.AgentID) == "" ||
+		strings.TrimSpace(receipt.ID) == "" || strings.TrimSpace(receipt.ProjectID) == "" ||
+		strings.TrimSpace(receipt.AgentID) == "" || strings.TrimSpace(receipt.MonitorID) == "" {
+		return ErrApprovalSubjectMismatch
+	}
 	if item.Trigger.Kind != TriggerScriptProbe {
 		return errors.New("monitor is not a script probe")
 	}
@@ -131,6 +144,9 @@ func ProbeAuthorized(item Monitor, receipt ProbeApprovalReceipt, check ProbeAuth
 	if receipt.ClaimedMutationID == "" || receipt.ClaimedMutationID != check.MutationID ||
 		receipt.ClaimedAt == nil {
 		return ErrApprovalSubjectMismatch
+	}
+	if receipt.ExpiresAt.IsZero() || !receipt.ClaimedAt.Before(receipt.ExpiresAt) {
+		return ErrApprovalExpired
 	}
 	if receipt.RevokedAt != nil {
 		return ErrApprovalRevoked

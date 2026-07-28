@@ -85,6 +85,7 @@ func TestProbeAuthorizedExactClaimedReceipt(t *testing.T) {
 		NormalizedSource: source, SourceSHA256: digest,
 		IntervalMS: item.Trigger.IntervalMS, TimeoutMS: item.Trigger.TimeoutMS,
 		ApprovedBy: "local_operator:test", ApprovedAt: now,
+		ExpiresAt:         now.Add(10 * time.Minute),
 		ClaimedMutationID: "mutation-1", ClaimedAt: timePointer(now),
 	}
 	check := ProbeAuthorizationCheck{
@@ -127,6 +128,16 @@ func TestProbeAuthorizedExactClaimedReceipt(t *testing.T) {
 		{"mode", func(_ *Monitor, _ *ProbeApprovalReceipt, check *ProbeAuthorizationCheck) { check.ModePerm = 0o644 }},
 		{"runtime-owned", func(_ *Monitor, _ *ProbeApprovalReceipt, check *ProbeAuthorizationCheck) { check.RuntimeOwned = false }},
 		{"identity", func(_ *Monitor, _ *ProbeApprovalReceipt, check *ProbeAuthorizationCheck) { check.SnapshotInode++ }},
+		{"empty-subjects", func(item *Monitor, receipt *ProbeApprovalReceipt, _ *ProbeAuthorizationCheck) {
+			item.ID, item.ProjectID, item.AgentID = "", "", ""
+			receipt.MonitorID, receipt.ProjectID, receipt.AgentID = "", "", ""
+		}},
+		{"zero-expiry", func(_ *Monitor, receipt *ProbeApprovalReceipt, _ *ProbeAuthorizationCheck) {
+			receipt.ExpiresAt = time.Time{}
+		}},
+		{"claim-at-expiry", func(_ *Monitor, receipt *ProbeApprovalReceipt, _ *ProbeAuthorizationCheck) {
+			receipt.ClaimedAt = timePointer(receipt.ExpiresAt)
+		}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -140,5 +151,26 @@ func TestProbeAuthorizedExactClaimedReceipt(t *testing.T) {
 				t.Fatal("authorization mismatch accepted")
 			}
 		})
+	}
+}
+
+func TestValidateMonitorRejectsDuplicatePendingFireIdentity(t *testing.T) {
+	item := validMonitorFixture()
+	item.Sequence = 1
+	event := Event{
+		ID: "task/task-1/1", ProjectID: item.ProjectID,
+		AuthorityID: "task-store", AuthorityGeneration: 1,
+		Kind: "task_changed", EntityID: "task-1", Origin: Origin{Kind: "runtime"},
+	}
+	pending, err := FreezePendingFire(
+		item, event, "task changed",
+		[]byte(`{"event":1}`), []byte(`{"action":1}`), time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.PendingFires = []PendingFire{pending, pending}
+	if ValidateMonitor(item) == nil {
+		t.Fatal("persisted duplicate pending fire set validated")
 	}
 }
