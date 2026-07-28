@@ -22,6 +22,7 @@ type app struct {
 	processRuntime                     *processRuntimePersistence
 	processSupervisor                  *processSupervisor
 	processPersistenceFail             func(processPersistenceFailpoint) error
+	projectRegistrationMu              sync.Mutex
 	taskRunMu                          sync.Mutex
 	taskRunCancels                     map[string]taskRun
 	taskIntegrationLocksMu             sync.Mutex

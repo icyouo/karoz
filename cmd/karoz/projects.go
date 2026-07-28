@@ -181,23 +181,27 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 	}
 	project := projectFromPath(projectPath, projectPath, "extra")
 	project.Name = name
-	if err := initializeProjectKaroz(project.Path); err != nil {
-		return Project{}, err
-	}
-	a.mu.Lock()
-	if a.projectAliases == nil {
-		a.projectAliases = map[string]string{}
-	}
-	a.projectAliases[project.ID] = name
-	a.settings.ExtraProjectsRoots = normalizeWorkspaceRoots(append(a.settings.ExtraProjectsRoots, projectPath), a.settings.ProjectsRoot)
-	a.mu.Unlock()
-	if err := a.saveProjectAliases(); err != nil {
-		return Project{}, err
-	}
-	if err := a.saveSettings(); err != nil {
-		return Project{}, err
-	}
-	if err := a.registerProcessRuntimeProject(project); err != nil {
+	a.projectRegistrationMu.Lock()
+	defer a.projectRegistrationMu.Unlock()
+	if err := a.registerProcessRuntimeProjectPrepared(project, func() error {
+		if err := initializeProjectKaroz(project.Path); err != nil {
+			return err
+		}
+		a.mu.Lock()
+		if a.projectAliases == nil {
+			a.projectAliases = map[string]string{}
+		}
+		a.projectAliases[project.ID] = name
+		a.settings.ExtraProjectsRoots = normalizeWorkspaceRoots(
+			append(a.settings.ExtraProjectsRoots, projectPath),
+			a.settings.ProjectsRoot,
+		)
+		a.mu.Unlock()
+		if err := a.saveProjectAliases(); err != nil {
+			return err
+		}
+		return a.saveSettings()
+	}); err != nil {
 		return Project{}, fmt.Errorf("register imported project runtime: %w", err)
 	}
 	return project, nil

@@ -988,19 +988,20 @@ func TestImportProjectRejectsCanonicalPathAliasWithoutRuntimeWrites(t *testing.T
 	if err := a.bootstrap(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := a.shutdownProcessRuntime(ctx); err != nil {
-			t.Errorf("shutdown process runtime: %v", err)
-		}
-	})
+	if err := a.saveSettings(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.saveProjectAliases(); err != nil {
+		t.Fatal(err)
+	}
 
 	existingRuntime := a.processRuntime.projectRuntime(existing.ID)
 	if existingRuntime == nil {
 		t.Fatal("existing project runtime was not registered")
 	}
 	safetyPaths := []string{
+		filepath.Join(dataDir, "settings.json"),
+		filepath.Join(dataDir, "project-aliases.json"),
 		filepath.Join(dataDir, "project-runtime", "index.json"),
 		filepath.Join(dataDir, "processes.json"),
 		filepath.Join(
@@ -1021,19 +1022,49 @@ func TestImportProjectRejectsCanonicalPathAliasWithoutRuntimeWrites(t *testing.T
 		before[path] = body
 	}
 
-	aliasRoot := t.TempDir()
-	aliasPath := filepath.Join(aliasRoot, "alias")
-	if err := os.Symlink(existingPath, aliasPath); err != nil {
-		t.Fatal(err)
+	makeAlias := func(name string) (string, Project) {
+		t.Helper()
+		aliasPath := filepath.Join(t.TempDir(), name)
+		if err := os.Symlink(existingPath, aliasPath); err != nil {
+			t.Fatal(err)
+		}
+		return aliasPath, projectFromPath(aliasPath, aliasPath, "extra")
 	}
-	aliasProject := projectFromPath(aliasPath, aliasPath, "extra")
-	if aliasProject.ID == existing.ID {
-		t.Fatal("alias fixture unexpectedly produced the primary project ID")
+	aliasProjects := make([]Project, 0, 4)
+	for index, name := range []string{"sequential-a", "sequential-b"} {
+		aliasPath, aliasProject := makeAlias(name)
+		aliasProjects = append(aliasProjects, aliasProject)
+		request := ProjectCreateRequest{Path: aliasPath, Name: name}
+		var importErr error
+		if index == 0 {
+			request.Mode = "import"
+			_, importErr = a.createProject(request)
+		} else {
+			_, importErr = a.importProject(request)
+		}
+		if importErr == nil {
+			t.Fatalf("canonical path alias import %s succeeded", name)
+		}
 	}
-	if _, err := a.importProject(ProjectCreateRequest{
-		Path: aliasPath, Name: "canonical-alias",
-	}); err == nil {
-		t.Fatal("canonical path alias import succeeded")
+
+	concurrentResults := make(chan error, 2)
+	var concurrentImports sync.WaitGroup
+	for _, name := range []string{"concurrent-a", "concurrent-b"} {
+		aliasPath, aliasProject := makeAlias(name)
+		aliasProjects = append(aliasProjects, aliasProject)
+		concurrentImports.Add(1)
+		go func(path, alias string) {
+			defer concurrentImports.Done()
+			_, importErr := a.importProject(ProjectCreateRequest{Path: path, Name: alias})
+			concurrentResults <- importErr
+		}(aliasPath, name)
+	}
+	concurrentImports.Wait()
+	close(concurrentResults)
+	for importErr := range concurrentResults {
+		if importErr == nil {
+			t.Fatal("concurrent canonical path alias import succeeded")
+		}
 	}
 
 	for _, path := range safetyPaths {
@@ -1045,12 +1076,52 @@ func TestImportProjectRejectsCanonicalPathAliasWithoutRuntimeWrites(t *testing.T
 			t.Errorf("failed alias registration changed runtime safety state %s", path)
 		}
 	}
-	aliasKey := monitordomain.SafeProjectKey(aliasProject.ID)
-	if _, err := os.Stat(filepath.Join(dataDir, "project-runtime", aliasKey)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("failed alias registration created runtime partition: %v", err)
+	for _, aliasProject := range aliasProjects {
+		if aliasProject.ID == existing.ID {
+			t.Fatal("alias fixture unexpectedly produced the primary project ID")
+		}
+		aliasKey := monitordomain.SafeProjectKey(aliasProject.ID)
+		if _, err := os.Stat(filepath.Join(dataDir, "project-runtime", aliasKey)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("failed alias registration created runtime partition: %v", err)
+		}
+		if a.processRuntime.projectRuntime(aliasProject.ID) != nil {
+			t.Fatal("failed alias registration became runtime-visible")
+		}
 	}
-	if a.processRuntime.projectRuntime(aliasProject.ID) != nil {
-		t.Fatal("failed alias registration became runtime-visible")
+	if a.processRuntime.projectRuntime(existing.ID) != existingRuntime {
+		t.Fatal("failed imports replaced the existing live project runtime")
+	}
+	if _, err := os.Stat(filepath.Join(existingPath, ".karoz", "ignore-initialized")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected import mutated the project workspace: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := a.shutdownProcessRuntime(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	restarted := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := restarted.loadSettings(); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.bootstrap(); err != nil {
+		t.Fatalf("clean restart after rejected aliases: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := restarted.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown restarted process runtime: %v", err)
+		}
+	})
+	if restarted.processRuntime.projectRuntime(existing.ID) == nil {
+		t.Fatal("restart lost the existing project runtime")
+	}
+	for _, aliasProject := range aliasProjects {
+		if restarted.processRuntime.projectRuntime(aliasProject.ID) != nil {
+			t.Fatal("restart adopted a rejected canonical alias")
+		}
 	}
 }
 

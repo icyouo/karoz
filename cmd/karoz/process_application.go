@@ -79,3 +79,13 @@ func (a *app) registerProcessRuntimeProject(project Project) error {
 	}
 	return a.processRuntime.RegisterProject(project)
 }
+
+func (a *app) registerProcessRuntimeProjectPrepared(
+	project Project,
+	prepare func() error,
+) error {
+	if a.processRuntime == nil {
+		return prepare()
+	}
+	return a.processRuntime.RegisterProjectPrepared(project, prepare)
+}
