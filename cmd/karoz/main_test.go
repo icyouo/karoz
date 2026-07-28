@@ -624,8 +624,8 @@ func TestStreamCodexResponseUsesCompletedTextWithoutDeltas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(streamed.ToolCalls) != 0 {
-		t.Fatalf("tool calls = %d", len(streamed.ToolCalls))
+	if calls := codexToolCallsFromCompletedItems(streamed.CompletedItems); len(calls) != 0 {
+		t.Fatalf("tool calls = %d", len(calls))
 	}
 	if out.String() != "最终回复" {
 		t.Fatalf("streamed text = %q", out.String())

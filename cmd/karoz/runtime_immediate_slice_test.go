@@ -39,6 +39,32 @@ func TestCJKLexicalMemoryBehaviorTable(t *testing.T) {
 	}
 }
 
+func TestLexicalTermsPreserveNonCJKUnicodeLettersAndNumbers(t *testing.T) {
+	query := newMemoryLexicalQuery("café déjà Москва مرحبا ۱۲۳")
+	want := []string{"café", "déjà", "москва", "مرحبا", "۱۲۳"}
+	if len(query.asciiTerms) != len(want) {
+		t.Fatalf("Unicode terms = %#v, want %#v", query.asciiTerms, want)
+	}
+	for i := range want {
+		if query.asciiTerms[i] != want[i] {
+			t.Fatalf("Unicode term[%d] = %q, want %q", i, query.asciiTerms[i], want[i])
+		}
+	}
+	for _, tt := range []struct {
+		query string
+		text  string
+	}{
+		{"café déjà", "Le choix du café est déjà enregistré."},
+		{"Москва проект", "Решение для проекта Москва сохранено."},
+		{"مرحبا مشروع", "تم حفظ قرار مشروع مرحبا."},
+		{"نسخة ۱۲۳", "النسخة المعتمدة هي ۱۲۳."},
+	} {
+		if score := memoryMatchScore(newMemoryLexicalQuery(tt.query), tt.text); score == 0 {
+			t.Fatalf("non-CJK Unicode query %q did not match %q", tt.query, tt.text)
+		}
+	}
+}
+
 func TestCJKLexicalQuerySharedByRelevantMemoryAndArchive(t *testing.T) {
 	a, project, agent := newMemoryGateTestApp(t)
 	now := time.Now().UTC()
@@ -87,9 +113,10 @@ func TestCodexReasoningReplayIsOpaqueOrderedAndTurnLocal(t *testing.T) {
 func TestCodexCompletedOutputItemsPreserveSSEOrder(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"one\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"opaque+/=密文\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"future_1\",\"type\":\"future_output\",\"unknown_field\":{\"keep\":true}}}\n\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"repo_read\",\"arguments\":\"{}\"}}\n\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_2\",\"type\":\"reasoning\",\"encrypted_content\":\"two\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_2\",\"type\":\"function_call\",\"call_id\":\"call_2\",\"name\":\"repo_search\",\"arguments\":\"{}\"}}\n\n"))
 	}))
 	defer server.Close()
 	request, err := http.NewRequest(http.MethodPost, server.URL, nil)
@@ -100,11 +127,15 @@ func TestCodexCompletedOutputItemsPreserveSSEOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.CompletedItems) != 3 || result.CompletedItems[0]["id"] != "rs_1" || result.CompletedItems[1]["id"] != "fc_1" || result.CompletedItems[2]["id"] != "rs_2" {
+	if len(result.CompletedItems) != 4 || result.CompletedItems[0]["id"] != "rs_1" || result.CompletedItems[1]["id"] != "future_1" || result.CompletedItems[2]["id"] != "fc_1" || result.CompletedItems[3]["id"] != "fc_2" {
 		t.Fatalf("completed item order = %#v", result.CompletedItems)
 	}
-	if len(result.ToolCalls) != 1 || result.ToolCalls[0].CallID != "call_1" {
-		t.Fatalf("derived tool calls = %#v", result.ToolCalls)
+	if result.CompletedItems[0]["encrypted_content"] != "opaque+/=密文" {
+		t.Fatalf("encrypted_content identity changed: %#v", result.CompletedItems[0])
+	}
+	calls := codexToolCallsFromCompletedItems(result.CompletedItems)
+	if len(calls) != 2 || calls[0].CallID != "call_1" || calls[1].CallID != "call_2" {
+		t.Fatalf("derived tool calls = %#v", calls)
 	}
 }
 
@@ -145,8 +176,8 @@ func TestCompactCodexFinalInputKeepsReasoningCallOutputAtomicAtBoundary(t *testi
 func TestProviderWiresUseNativeToolPairsAndTextFallback(t *testing.T) {
 	success := true
 	items := []AgentTranscriptItem{
-		{Role: "assistant", Kind: "tool_call", ToolCallID: "call_1", ToolName: "repo_read", ToolArguments: `{"path":"go.mod"}`},
-		{Role: "tool", Kind: "tool_result", ToolCallID: "call_1", ToolResult: "module example", ToolSuccess: &success},
+		{SessionID: "s", RunID: "r", Seq: 1, Role: "assistant", Kind: "tool_call", ToolCallID: "call_1", ToolName: "repo_read", ToolArguments: `{"path":"go.mod"}`},
+		{SessionID: "s", RunID: "r", Seq: 2, Role: "tool", Kind: "tool_result", ToolCallID: "call_1", ToolResult: "module example", ToolSuccess: &success},
 		{Role: "tool", Kind: "tool_result", ToolResult: "legacy result"},
 	}
 	codex := codexTranscriptInput(items)
@@ -170,13 +201,16 @@ func TestProviderWiresUseNativeToolPairsAndTextFallback(t *testing.T) {
 func TestNativeTranscriptPairingRejectsCollisionsAndSupportsMultiCallGrouping(t *testing.T) {
 	success := true
 	items := []AgentTranscriptItem{
-		{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "a", ToolName: "repo_read", ToolArguments: `{}`},
-		{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "b", ToolName: "repo_search", ToolArguments: `{}`},
-		{SessionID: "s", RunID: "r", Kind: "tool_result", ToolCallID: "a", ToolResult: "A", ToolSuccess: &success},
-		{SessionID: "s", RunID: "r", Kind: "tool_result", ToolCallID: "b", ToolResult: "B", ToolSuccess: &success},
+		{SessionID: "s", RunID: "r", Seq: 0, Role: "user", Kind: "message", Body: "before"},
+		{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "a", ToolName: "repo_read", ToolArguments: `{}`},
+		{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "a", ToolResult: "A", ToolSuccess: &success},
+		{SessionID: "s", RunID: "r", Seq: 2, Role: "assistant", Kind: "message", Body: "between"},
+		{SessionID: "s", RunID: "r", Seq: 3, Kind: "tool_call", ToolCallID: "b", ToolName: "repo_search", ToolArguments: `{}`},
+		{SessionID: "s", RunID: "r", Seq: 4, Kind: "tool_result", ToolCallID: "b", ToolResult: "B", ToolSuccess: &success},
+		{SessionID: "s", RunID: "r", Seq: 5, Role: "assistant", Kind: "message", Body: "after"},
 	}
 	native := codexTranscriptInput(items)
-	wantTypes := []string{"function_call", "function_call", "function_call_output", "function_call_output"}
+	wantTypes := []string{"message", "function_call", "function_call_output", "message", "function_call", "function_call_output", "message"}
 	for i, want := range wantTypes {
 		if native[i]["type"] != want {
 			t.Fatalf("multi-call chronology[%d] = %#v, want %s", i, native, want)
@@ -185,17 +219,22 @@ func TestNativeTranscriptPairingRejectsCollisionsAndSupportsMultiCallGrouping(t 
 
 	fallbackCases := map[string][]AgentTranscriptItem{
 		"duplicate id": {
-			{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "x", ToolName: "one"},
-			{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "x", ToolName: "two"},
-			{SessionID: "s", RunID: "r", Kind: "tool_result", ToolCallID: "x", ToolResult: "result"},
+			{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "x", ToolName: "one"},
+			{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "x", ToolResult: "first"},
+			{SessionID: "s", RunID: "r", Seq: 3, Kind: "tool_call", ToolCallID: "x", ToolName: "two"},
+			{SessionID: "s", RunID: "r", Seq: 4, Kind: "tool_result", ToolCallID: "x", ToolResult: "second"},
 		},
 		"cross run collision": {
-			{SessionID: "s", RunID: "r1", Kind: "tool_call", ToolCallID: "x", ToolName: "one"},
-			{SessionID: "s", RunID: "r2", Kind: "tool_result", ToolCallID: "x", ToolResult: "result"},
+			{SessionID: "s", RunID: "r1", Seq: 1, Kind: "tool_call", ToolCallID: "x", ToolName: "one"},
+			{SessionID: "s", RunID: "r2", Seq: 2, Kind: "tool_result", ToolCallID: "x", ToolResult: "result"},
+		},
+		"cross session collision": {
+			{SessionID: "s1", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "x", ToolName: "one"},
+			{SessionID: "s2", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "x", ToolResult: "result"},
 		},
 		"orphan call and result": {
-			{SessionID: "s", RunID: "r", Kind: "tool_result", ToolCallID: "before", ToolResult: "result"},
-			{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "after", ToolName: "one"},
+			{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_result", ToolCallID: "before", ToolResult: "result"},
+			{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_call", ToolCallID: "after", ToolName: "one"},
 		},
 	}
 	for name, transcript := range fallbackCases {
@@ -212,8 +251,8 @@ func TestNativeTranscriptPairingRejectsCollisionsAndSupportsMultiCallGrouping(t 
 func TestNativeTranscriptPayloadUsesContextBounds(t *testing.T) {
 	success := true
 	items := []AgentTranscriptItem{
-		{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "large", ToolName: "repo_read", ToolArguments: strings.Repeat("a", 9000)},
-		{SessionID: "s", RunID: "r", Kind: "tool_result", ToolCallID: "large", ToolResult: strings.Repeat("b", 9000), ToolSuccess: &success},
+		{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "large", ToolName: "repo_read", ToolArguments: strings.Repeat("a", 9000)},
+		{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "large", ToolResult: strings.Repeat("b", 9000), ToolSuccess: &success},
 	}
 	input := codexTranscriptInput(items)
 	if arguments := input[0]["arguments"].(string); len(arguments) > 1400 || !json.Valid([]byte(arguments)) {
@@ -228,8 +267,8 @@ func TestProviderTranscriptBoundsToolPairsAtomically(t *testing.T) {
 	success := true
 	items := make([]AgentTranscriptItem, 0, residentTranscriptPromptMaxItems+2)
 	items = append(items,
-		AgentTranscriptItem{Role: "assistant", Kind: "tool_call", ToolCallID: "edge-call", ToolName: "repo_read", ToolArguments: `{}`},
-		AgentTranscriptItem{Role: "tool", Kind: "tool_result", ToolCallID: "edge-call", ToolResult: "edge-result", ToolSuccess: &success},
+		AgentTranscriptItem{SessionID: "s", RunID: "r", Seq: 1, Role: "assistant", Kind: "tool_call", ToolCallID: "edge-call", ToolName: "repo_read", ToolArguments: `{}`},
+		AgentTranscriptItem{SessionID: "s", RunID: "r", Seq: 2, Role: "tool", Kind: "tool_result", ToolCallID: "edge-call", ToolResult: "edge-result", ToolSuccess: &success},
 	)
 	for i := 0; i < residentTranscriptPromptMaxItems-1; i++ {
 		items = append(items, AgentTranscriptItem{Role: "assistant", Kind: "message", Body: "newer"})

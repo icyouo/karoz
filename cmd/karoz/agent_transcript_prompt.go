@@ -142,32 +142,30 @@ func boundedProviderTranscript(items []AgentTranscriptItem, currentRunID, userTe
 			}
 		}
 	}
-	selected := make([]bool, len(filtered))
+	units := projectResidentHistoryUnits(filtered)
+	selected := make([]bool, len(units))
 	used := 0
 	itemCount := 0
-	for i := len(filtered) - 1; i >= 0; i-- {
-		cost := utf8.RuneCountInString(contextCounterRecord(contextMessageFromTranscript(filtered[i])))
-		if itemCount > 0 && (used+cost > residentTranscriptPromptMaxChars || itemCount+1 > residentTranscriptPromptMaxItems) {
+	for i := len(units) - 1; i >= 0; i-- {
+		cost := 0
+		for _, item := range units[i].Items {
+			cost += utf8.RuneCountInString(contextCounterRecord(contextMessageFromTranscript(item)))
+		}
+		unitItems := len(units[i].Items)
+		if itemCount > 0 && (used+cost > residentTranscriptPromptMaxChars || itemCount+unitItems > residentTranscriptPromptMaxItems) {
 			break
 		}
 		selected[i] = true
 		used += cost
-		itemCount++
+		itemCount += unitItems
 		if itemCount >= residentTranscriptPromptMaxItems {
 			break
 		}
 	}
-	pairs := nativeTranscriptPairIndexes(filtered)
-	for callIndex, resultIndex := range pairs.calls {
-		if selected[callIndex] != selected[resultIndex] {
-			selected[callIndex] = false
-			selected[resultIndex] = false
-		}
-	}
 	out := make([]AgentTranscriptItem, 0, itemCount)
-	for i, item := range filtered {
+	for i, unit := range units {
 		if selected[i] {
-			out = append(out, item)
+			out = append(out, unit.Items...)
 		}
 	}
 	return out
