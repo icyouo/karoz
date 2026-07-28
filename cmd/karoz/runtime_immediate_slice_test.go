@@ -297,41 +297,75 @@ func TestNativeTranscriptPairingRejectsCollisionsAndSupportsMultiCallGrouping(t 
 }
 
 func TestMalformedNativeArgumentsFallbackForCodexAndClaude(t *testing.T) {
-	items := []AgentTranscriptItem{
-		{SessionID: "s", RunID: "r", Seq: 1, Role: "assistant", Kind: "tool_call", ToolCallID: "bad", ToolName: "repo_read", ToolArguments: `["not","an","object"]`},
-		{SessionID: "s", RunID: "r", Seq: 2, Role: "tool", Kind: "tool_result", ToolCallID: "bad", ToolResult: "result"},
-	}
-	for _, item := range codexTranscriptInput(items) {
-		if item["type"] != "message" {
-			t.Fatalf("Codex malformed arguments became native: %#v", item)
-		}
-	}
-	for _, message := range claudeTranscriptMessages(items) {
-		for _, content := range message["content"].([]map[string]any) {
-			if content["type"] == "tool_use" || content["type"] == "tool_result" {
-				t.Fatalf("Claude malformed arguments became native: %#v", message)
+	for name, arguments := range map[string]string{
+		"empty":     "",
+		"scalar":    `"not-an-object"`,
+		"array":     `["not","an","object"]`,
+		"malformed": `{"broken":`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			items := []AgentTranscriptItem{
+				{SessionID: "s", RunID: "r", Seq: 1, Role: "assistant", Kind: "tool_call", ToolCallID: "bad", ToolName: "repo_read", ToolArguments: arguments},
+				{SessionID: "s", RunID: "r", Seq: 2, Role: "tool", Kind: "tool_result", ToolCallID: "bad", ToolResult: "result"},
 			}
-		}
+			for _, item := range codexTranscriptInput(items) {
+				if item["type"] != "message" {
+					t.Fatalf("Codex malformed arguments became native: %#v", item)
+				}
+			}
+			for _, message := range claudeTranscriptMessages(items) {
+				for _, content := range message["content"].([]map[string]any) {
+					if content["type"] == "tool_use" || content["type"] == "tool_result" {
+						t.Fatalf("Claude malformed arguments became native: %#v", message)
+					}
+				}
+			}
+		})
 	}
 }
 
 func TestOversizedNativeArgumentsDegradeAtomicallyForBothProviders(t *testing.T) {
 	success := true
+	oversizedArguments := `{"data":"` + strings.Repeat("a", 9000) + `"}`
+	oversizedResult := strings.Repeat("b", 9000)
 	items := []AgentTranscriptItem{
-		{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "large", ToolName: "repo_read", ToolArguments: `{"data":"` + strings.Repeat("a", 9000) + `"}`},
-		{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "large", ToolResult: strings.Repeat("b", 9000), ToolSuccess: &success},
+		{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "large", ToolName: "repo_read", ToolArguments: oversizedArguments},
+		{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "large", ToolResult: oversizedResult, ToolSuccess: &success},
 	}
-	for _, input := range codexTranscriptInput(items) {
+	codex := codexTranscriptInput(items)
+	for _, input := range codex {
 		if input["type"] != "message" {
 			t.Fatalf("oversized Codex arguments remained native: %#v", input)
 		}
 	}
-	for _, message := range claudeTranscriptMessages(items) {
+	claude := claudeTranscriptMessages(items)
+	for _, message := range claude {
 		for _, content := range message["content"].([]map[string]any) {
 			if content["type"] == "tool_use" || content["type"] == "tool_result" {
 				t.Fatalf("oversized Claude arguments remained native: %#v", message)
 			}
 		}
+	}
+	for provider, payload := range map[string]any{"codex": codex, "claude": claude} {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(raw) >= len(oversizedArguments)+len(oversizedResult) ||
+			bytes.Contains(raw, []byte(strings.Repeat("a", 2000))) ||
+			bytes.Contains(raw, []byte(strings.Repeat("b", 5000))) {
+			t.Fatalf("%s fallback payload remained unbounded: bytes=%d", provider, len(raw))
+		}
+	}
+	withCurrent := append(append([]AgentTranscriptItem{}, items...), AgentTranscriptItem{
+		ID: "current", SessionID: "s", RunID: "current-run", Seq: 3, Role: "user", Kind: "message", Body: "current",
+	})
+	history, err := boundedProviderTranscript(withCurrent, "current-run", "current", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := estimateModelBoundTranscriptTokens(history); got >= estimateResidentContextTextTokens(oversizedArguments+oversizedResult) {
+		t.Fatalf("context meter counted unbounded native payload: bounded=%d raw=%d", got, estimateResidentContextTextTokens(oversizedArguments+oversizedResult))
 	}
 }
 
