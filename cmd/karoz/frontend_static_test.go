@@ -121,10 +121,77 @@ func TestContextTokenFrontendTracksTheCurrentStreamTurn(t *testing.T) {
 		"updateCurrentContextAssistant(assistantText)",
 		"appendCurrentContextEvent('tool_call'",
 		"appendCurrentContextEvent('tool_result'",
+		"rehydrateCurrentContextAssistant(replay.text)",
 		"await refreshActiveAgentChat();\n        clearCurrentContextTurn();",
 	} {
 		if !strings.Contains(string(stream), fragment) {
 			t.Fatalf("stream context accounting missing %q", fragment)
+		}
+	}
+
+	contextTokens, err := staticFS.ReadFile("static/js/context-tokens.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contextTokens), "function rehydrateAssistantTurn(body)") {
+		t.Fatal("replay token accounting must replace the transient assistant turn")
+	}
+}
+
+func TestFrontendReconnectsAnActiveRunFromItsSequenceCursor(t *testing.T) {
+	for path, fragments := range map[string][]string{
+		"static/js/core.js": {
+			"activeRunID: ''",
+			"activeRunAgentID: ''",
+			"lastRunSeq: 0",
+			"activeRunReplay: null",
+			"let agentRunSyncInFlight = false",
+			"let agentRunSyncQueued = false",
+		},
+		"static/js/chat-stream.js": {
+			"KarozRunReplay.accept(state, envelope)",
+			"event === 'reset'",
+			"function appendActiveRunReplayDelta(delta)",
+			"function renderActiveRunReplay()",
+			"function appendActiveRunReplayToolStart(payload)",
+			"function appendActiveRunReplayToolResult(payload)",
+			"messageSeq: payload.message_seq",
+			"KarozRunReplay.transientToolEvents(replay, state.chatMessages)",
+			"run-replay-message",
+		},
+		"static/js/run-replay.js": {
+			"state.lastRunSeq = Math.max(0, Number(floor || 0));",
+			"seq <= Number(state.lastRunSeq || 0)",
+			"transientToolEvents(replay, messages)",
+		},
+		"static/js/agents.js": {
+			"async function syncActiveRunEvents()",
+			"function requestActiveRunSync()",
+			"while (agentRunSyncQueued)",
+			"await loadResidentRuntimeState();\n      requestActiveRunSync();",
+			"/runs/' + encodeURIComponent(run.id) + '/events?after='",
+			"dispatchAgentSSE('event: ' + event.type",
+			"onDelta: appendActiveRunReplayDelta",
+			"onToolStart: appendActiveRunReplayToolStart",
+			"onToolResult: appendActiveRunReplayToolResult",
+			"await refreshActiveAgentChat(); clearActiveRunReplay(run.id);",
+			"requestActiveRunSync();",
+			"if (state.agent && !state.chatStreaming && state.view === 'agent') requestActiveRunSync();",
+			"runtimeEvents.addEventListener('snapshot'",
+			"requestActiveRunSync();\n          scheduleChatRefresh();",
+		},
+		"static/js/panels.js": {
+			"renderChatMessages();\n      renderActiveRunReplay();",
+		},
+	} {
+		source, err := staticFS.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fragment := range fragments {
+			if !strings.Contains(string(source), fragment) {
+				t.Fatalf("%s missing active-run reconnect contract %q", path, fragment)
+			}
 		}
 	}
 }

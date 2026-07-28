@@ -34,3 +34,16 @@ test('tool events increase the current turn context and final refresh replaces t
   const refreshedHistory = tokens.compactMessages(history, turn);
   assert.equal(tokens.estimateContextTokens(history, turn, ''), tokens.estimateContextTokens(refreshedHistory, [], ''));
 });
+
+test('large history uses the same bounded transcript window as the model context', () => {
+  const history = Array.from({ length: 80 }, (_, index) => ({
+    role: 'assistant', intent: 'result', body: `message-${index} ${'content '.repeat(220)}`,
+  }));
+  const compact = tokens.compactMessages(history, []);
+  assert.ok(compact.length <= 50);
+  const compactChars = compact
+    .map(message => [message.role, message.intent, message.body].filter(Boolean).join('\n'))
+    .join('\n').length;
+  assert.ok(compactChars <= 24100);
+  assert.ok(tokens.estimateContextTokens(history, [], '') <= 6200);
+});

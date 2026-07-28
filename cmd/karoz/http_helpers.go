@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
+	"mime"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -20,6 +23,76 @@ func readJSON(r *http.Request, v any) error {
 		return nil
 	}
 	return json.Unmarshal(body, v)
+}
+
+// withLocalStudioMutationGuard is deliberately a small local-browser defense,
+// not an authentication scheme. Karoz is a single-user loopback Studio: a
+// cross-site page must not be able to drive state-changing local APIs, while a
+// same-machine CLI remains usable with ordinary JSON requests.
+func withLocalStudioMutationGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isStateChangingMethod(r.Method) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+			writeError(w, http.StatusForbidden, errors.New("cross-site state-changing requests are not allowed"))
+			return
+		}
+		if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && !requestOriginMatchesRequest(origin, r) {
+			writeError(w, http.StatusForbidden, errors.New("request Origin does not match this local Studio"))
+			return
+		}
+		if requestHasBody(r) && !allowsMutationContentType(r) {
+			writeError(w, http.StatusUnsupportedMediaType, errors.New("state-changing JSON requests require Content-Type application/json"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isStateChangingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func requestHasBody(r *http.Request) bool {
+	return r != nil && r.Body != nil && r.ContentLength != 0
+}
+
+func allowsMutationContentType(r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(mediaType, "application/json") {
+		return true
+	}
+	return strings.EqualFold(mediaType, "multipart/form-data") && isAgentMessageUploadRoute(r)
+}
+
+func isAgentMessageUploadRoute(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	return len(parts) == 6 && parts[0] == "api" && parts[1] == "projects" && parts[3] == "agents" && parts[5] == "messages" && parts[2] != "" && parts[4] != ""
+}
+
+func requestOriginMatchesRequest(rawOrigin string, r *http.Request) bool {
+	origin, err := url.Parse(rawOrigin)
+	if err != nil || origin.Scheme == "" || origin.Host == "" || origin.User != nil {
+		return false
+	}
+	expectedScheme := "http"
+	if r != nil && r.TLS != nil {
+		expectedScheme = "https"
+	}
+	return strings.EqualFold(origin.Scheme, expectedScheme) && r != nil && strings.EqualFold(strings.TrimSpace(origin.Host), strings.TrimSpace(r.Host))
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

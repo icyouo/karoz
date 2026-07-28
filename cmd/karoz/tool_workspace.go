@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	artifactdomain "github.com/karoz/karoz/internal/artifact"
 	"os"
 	"path/filepath"
@@ -242,20 +243,17 @@ func (a *app) deleteAgentFromResidentTool(project Project, actor Agent, args map
 
 func (a *app) updateTaskStatusFromResidentTool(projectID, agentID string, args map[string]any) string {
 	taskID := toolStringArg(args, "task_id", 128)
-	status := toolStringArg(args, "status", 64)
+	status := normalizeResidentTaskStatus(toolStringArg(args, "status", 64))
 	if taskID == "" || status == "" {
 		return toolJSON(map[string]any{"error": "validation_error", "message": "task_id and status are required"})
 	}
-	task, ok := a.findTask(projectID, taskID)
-	if !ok {
-		return toolJSON(map[string]any{"error": "not_found", "message": "task not found"})
+	task, err := a.transitionTaskStatusFromResidentTool(projectID, taskID, status, toolStringArg(args, "result", 12000))
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return toolJSON(map[string]any{"error": "not_found", "message": err.Error()})
+		}
+		return toolJSON(map[string]any{"error": "invalid_task_transition", "message": err.Error()})
 	}
-	task.Status = status
-	if result := toolStringArg(args, "result", 12000); result != "" {
-		task.Result = result
-	}
-	task.UpdatedAt = time.Now().UTC()
-	a.updateTask(projectID, task)
 	if err := a.saveTasks(); err != nil {
 		return toolJSON(map[string]any{"error": "save_failed", "message": err.Error()})
 	}
@@ -275,4 +273,62 @@ func (a *app) updateTaskStatusFromResidentTool(projectID, agentID string, args m
 		})
 	}
 	return toolJSON(map[string]any{"task": task, "task_id": task.ID, "status": task.Status})
+}
+
+// Resident task updates are deliberately narrower than the executor lifecycle.
+// A resident can close a task it created (or correct a previous terminal
+// outcome), but it cannot impersonate the executor by entering running,
+// verifying, merging, or cancellation states. Those states carry process and
+// Git ownership invariants enforced elsewhere in the runtime.
+func normalizeResidentTaskStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "canceled" {
+		return "cancelled"
+	}
+	return status
+}
+
+func residentTaskStatusTransitionAllowed(from, to string) bool {
+	from = normalizeResidentTaskStatus(from)
+	to = normalizeResidentTaskStatus(to)
+	if from == to {
+		return from == "pending" || from == "done" || from == "failed" || from == "deploy_failed"
+	}
+	switch from {
+	case "", "pending", "failed", "deploy_failed":
+		switch to {
+		case "done", "failed", "deploy_failed":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+// transitionTaskStatusFromResidentTool performs the read/validate/write under
+// one mutex. In particular, an executor cannot move a task into an owned
+// lifecycle state between a resident's stale read and its update.
+func (a *app) transitionTaskStatusFromResidentTool(projectID, taskID, status, result string) (Task, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	list := a.tasks[projectID]
+	for i := range list {
+		if list[i].ID != taskID {
+			continue
+		}
+		from := normalizeResidentTaskStatus(list[i].Status)
+		if !residentTaskStatusTransitionAllowed(from, status) {
+			return Task{}, fmt.Errorf("task status transition %q -> %q is not allowed for resident tools", from, status)
+		}
+		list[i].Status = status
+		if result = strings.TrimSpace(result); result != "" {
+			list[i].Result = result
+		}
+		list[i].UpdatedAt = time.Now().UTC()
+		a.tasks[projectID] = list
+		return list[i], nil
+	}
+	return Task{}, fmt.Errorf("task not found")
 }

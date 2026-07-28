@@ -1,9 +1,13 @@
-    const state = { settings: null, providers: [], projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, sidePanel: null, agentWorkingById: {}, chatMessages: [], currentContextTurn: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, chatStreaming: false, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
+    const state = { settings: null, providers: [], projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, sidePanel: null, agentWorkingById: {}, chatMessages: [], modelContext: [], currentContextTurn: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, chatStreaming: false, activeRunID: '', activeRunAgentID: '', lastRunSeq: 0, activeRunReplay: null, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
     let taskPollTimer = null;
     let agentPollTimer = null;
     let runtimeStateRefreshTimer = null;
     let runtimeEvents = null;
     let runtimeEventsProjectID = '';
+    let agentRunEvents = null;
+    let agentRunEventsKey = '';
+    let agentRunSyncInFlight = false;
+    let agentRunSyncQueued = false;
     let chatRefreshTimer = null;
     let lastRouteHash = null;
     let applyingRoute = false;
@@ -114,8 +118,13 @@
       }
       return null;
     }
+    function modelContextHistory() {
+      // This is a server-projected resident window, rather than display
+      // history. Loading archived cards must never inflate active context.
+      return (state.modelContext || []).slice().sort((left, right) => (left.seq || 0) - (right.seq || 0));
+    }
     function estimatedContextTokens() {
-      return KarozContextTokens.estimateContextTokens(state.chatMessages, state.currentContextTurn, ($('agentMessage') && $('agentMessage').value) || '');
+      return KarozContextTokens.estimateContextTokens(modelContextHistory(), state.currentContextTurn, ($('agentMessage') && $('agentMessage').value) || '');
     }
     function beginCurrentContextTurn(message) {
       state.currentContextTurn = KarozContextTokens.beginCurrentTurn(message);
@@ -123,6 +132,10 @@
     }
     function updateCurrentContextAssistant(body) {
       state.currentContextTurn = KarozContextTokens.updateAssistantTurn(state.currentContextTurn, body);
+      renderContextTokenUsage();
+    }
+    function rehydrateCurrentContextAssistant(body) {
+      state.currentContextTurn = KarozContextTokens.rehydrateAssistantTurn(body);
       renderContextTokenUsage();
     }
     function appendCurrentContextEvent(role, intent, body) {

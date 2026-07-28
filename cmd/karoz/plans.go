@@ -674,7 +674,7 @@ func (a *app) schedulePlanEvent(projectID, ownerAgentID, planID, stepID, event, 
 		AgentRunInput{ProjectID: projectID, AgentID: ownerAgentID, Trigger: RunTriggerPlanEvent, TurnType: "plan", SourceID: planID},
 		fmt.Sprintf("plan_event/%s/%s/%s/%s/v%d", projectID, planID, event, firstNonEmpty(taskID, stepID, "root"), planVersion),
 		PlanEventRunPayload{PlanID: planID, PlanVersion: planVersion, StepID: stepID, Event: event, TaskID: taskID},
-		3*time.Minute,
+		scheduledRunExecutionTimeout("plan"),
 	)
 	if err == nil {
 		a.scheduleAgentRun(job)
@@ -703,12 +703,14 @@ func (a *app) executePlanEventScheduledRun(ctx context.Context, job ScheduledRun
 	}
 	planJSON, _ := json.Marshal(plan)
 	prompt := fmt.Sprintf("[plan event] event=%s plan_id=%s plan_version=%d step_id=%s task_id=%s\n\nCurrent WorkPlan:\n%s\n\nYou own this active WorkPlan. Continue advancing its todo list. Inspect task/review/group-result evidence, then call advance_plan with one concrete action. Task completion alone never completes a step. You may accept it, delegate review, request rework, block it, dispatch a local task, delegate cross-group work through the group inbox, or complete the plan when every required step is accepted. Do not only summarize.", payload.Event, plan.ID, payload.PlanVersion, payload.StepID, payload.TaskID, string(planJSON))
-	out, err := a.runResidentAgentTurn(ctx, project, owner, prompt, "plan", nil)
+	out, err := a.runScheduledResidentAgentTurn(ctx, job, project, owner, prompt, firstNonEmpty(job.TurnType, "plan"))
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(out) != "" {
-		a.appendAgentMessageForRun(project.ID, owner.ID, job.ID, "assistant", "plan_result", out)
+		if err := a.commitScheduledRunResult(project, owner, job.ID, "plan_result", out); err != nil {
+			return err
+		}
 	}
 	return nil
 }

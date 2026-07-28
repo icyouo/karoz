@@ -53,14 +53,43 @@ func (a *app) agentMessagesPageForDisplay(projectID, agentID string, beforeSeq i
 		hasMore = true
 		messages = messages[len(messages)-limit:]
 	}
-	page := AgentMessagesPage{Messages: messages, HasMore: hasMore}
+	page := AgentMessagesPage{Messages: messages, HasMore: hasMore, ModelContext: a.modelContextForCounter(projectID, agentID)}
 	if hasMore && len(messages) > 0 {
 		page.NextBeforeSeq = messages[0].Seq
 	}
 	if page.Messages == nil {
 		page.Messages = []AgentMessage{}
 	}
+	if page.ModelContext == nil {
+		page.ModelContext = []AgentContextMessage{}
+	}
 	return page
+}
+
+// agentTranscriptDeltaForModel centralizes the session boundary used by the
+// resident prompt and local context meter. Seq zero remains eligible for
+// legacy records that predate durable sequencing.
+func (a *app) agentTranscriptDeltaForModel(projectID, agentID string) []AgentTranscriptItem {
+	state := a.agentSessionState(projectID, agentID)
+	transcript := a.agentTranscriptForModel(projectID, agentID)
+	delta := make([]AgentTranscriptItem, 0, len(transcript))
+	for _, item := range transcript {
+		if item.Seq >= state.ShortWindowStartSeq || item.Seq == 0 {
+			delta = append(delta, item)
+		}
+	}
+	return delta
+}
+
+// modelContextForCounter returns a bounded, normalized server projection of
+// the actual resident transcript window. It includes hidden scheduled inputs
+// only in that projection; regular chat messages remain the visible API.
+func (a *app) modelContextForCounter(projectID, agentID string) []AgentContextMessage {
+	items := compactTranscriptForContextCounter(a.agentTranscriptDeltaForModel(projectID, agentID))
+	if items == nil {
+		return []AgentContextMessage{}
+	}
+	return items
 }
 
 func (a *app) appendAgentMessage(projectID, agentID, role, intent, body string) AgentMessage {
@@ -72,20 +101,48 @@ func (a *app) appendAgentMessage(projectID, agentID, role, intent, body string) 
 }
 
 func (a *app) appendAgentMessageForRun(projectID, agentID, runID, role, intent, body string) (AgentMessage, bool) {
+	return a.appendAgentMessageForRunWithTranscript(projectID, agentID, runID, role, intent, body, agentTranscriptAppendMetadata{RunID: runID})
+}
+
+func (a *app) appendAgentMessageForRunWithTranscript(projectID, agentID, runID, role, intent, body string, metadata agentTranscriptAppendMetadata) (AgentMessage, bool) {
 	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	run, ok := a.agentRuns[key]
-	if !ok || !run.State.Active() || strings.TrimSpace(runID) == "" || run.ID != runID {
+	if !ok || !run.State.Active() || strings.TrimSpace(runID) == "" || run.ID != runID || a.agentRunCancelling[key] == runID {
 		a.mu.Unlock()
 		return AgentMessage{}, false
 	}
-	msg := a.appendAgentMessageLocked(projectID, agentID, role, intent, body)
+	metadata.RunID = runID
+	msg := a.appendAgentMessageLockedWithTranscript(projectID, agentID, role, intent, body, metadata)
 	a.mu.Unlock()
 	a.persistAppendedAgentMessage(projectID, agentID)
 	return msg, true
 }
 
+// latestMatchingAgentMessage returns the durable record just written by a
+// streaming callback. Run-scoped tool callbacks persist before publishing
+// their ledger event, so including this identity lets reconnecting browsers
+// reconcile a replay event with an already-loaded history card.
+func (a *app) latestMatchingAgentMessage(projectID, agentID, role, intent, body string) (AgentMessage, bool) {
+	key := projectAgentKey(projectID, agentID)
+	wantBody := strings.TrimSpace(body)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	items := a.agentMessages[key]
+	for index := len(items) - 1; index >= 0; index-- {
+		item := items[index]
+		if item.Role == role && item.Intent == intent && item.Body == wantBody {
+			return item, true
+		}
+	}
+	return AgentMessage{}, false
+}
+
 func (a *app) appendAgentMessageLocked(projectID, agentID, role, intent, body string) AgentMessage {
+	return a.appendAgentMessageLockedWithTranscript(projectID, agentID, role, intent, body, agentTranscriptAppendMetadata{})
+}
+
+func (a *app) appendAgentMessageLockedWithTranscript(projectID, agentID, role, intent, body string, metadata agentTranscriptAppendMetadata) AgentMessage {
 	if a.agentMessages == nil {
 		a.agentMessages = map[string][]AgentMessage{}
 	}
@@ -96,19 +153,23 @@ func (a *app) appendAgentMessageLocked(projectID, agentID, role, intent, body st
 		ProjectID: projectID,
 		AgentID:   agentID,
 		SessionID: session.SessionID,
-		Seq:       int64(len(a.agentMessages[key])) + 1,
+		Seq:       a.nextAgentTranscriptSequenceLocked(projectID, agentID),
 		Role:      role,
 		Intent:    firstNonEmpty(intent, "note"),
 		Body:      strings.TrimSpace(body),
 		CreatedAt: time.Now().UTC(),
 	}
 	a.agentMessages[key] = append(a.agentMessages[key], msg)
+	a.appendTranscriptForAgentMessageLocked(msg, metadata)
 	return msg
 }
 
 func (a *app) persistAppendedAgentMessage(projectID, agentID string) {
 	if err := a.saveAgentMessages(); err != nil {
 		log.Printf("save agent messages: %v", err)
+	}
+	if err := a.saveAgentTranscripts(); err != nil {
+		log.Printf("save agent transcripts: %v", err)
 	}
 	a.maybeCheckpointAgentSession(projectID, agentID, false)
 }
@@ -355,9 +416,9 @@ func promptAgentMessageBody(msg AgentMessage) string {
 	case "tool_call":
 		return limitString(body, 1400)
 	case "assistant":
-		return limitString(body, 5000)
+		return limitString(body, residentTranscriptMessageMaxChars)
 	case "user":
-		return limitString(body, 5000)
+		return limitString(body, residentTranscriptMessageMaxChars)
 	default:
 		return limitString(body, 2400)
 	}

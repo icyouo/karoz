@@ -39,7 +39,13 @@ func invokeCodexDirect(ctx context.Context, workdir, prompt string) (CLI2APIResp
 }
 
 func invokeCodexDirectStream(ctx context.Context, workdir, prompt, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
-	return invokeResidentToolLoop(ctx, newCodexStreamWire(workdir, prompt, model, thinkingEffort), tools, callbacks, executeTool)
+	return invokeCodexDirectStreamWithBudget(ctx, workdir, prompt, model, thinkingEffort, tools, callbacks, residentTurnBudgetFor("ask"), func(_ context.Context, call codexToolCall) (string, error) {
+		return executeTool(call)
+	})
+}
+
+func invokeCodexDirectStreamWithBudget(ctx context.Context, workdir, prompt, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, executeTool residentToolExecutor) error {
+	return invokeResidentToolLoop(ctx, newCodexStreamWire(workdir, prompt, model, thinkingEffort), tools, callbacks, budget, executeTool)
 }
 
 // codexStreamWire adapts the Codex responses SSE protocol to the shared
@@ -104,7 +110,7 @@ func (w *codexStreamWire) finalize(parentCtx, finalCtx context.Context, callback
 			return parentCtx.Err()
 		}
 		if callbacks.OnDelta != nil {
-			callbacks.OnDelta("本轮工具检索已达到运行预算，最终总结请求未能及时完成。已停止继续检索，现有操作结果均已保留；请重试最后一条消息，Agent 将优先使用项目 Task 与 WorkPlan 状态直接回答。")
+			callbacks.OnDelta("The tool budget was reached and the concise final summary did not finish in time. Tool results have been preserved; retry the latest message to continue from the current project state.")
 		}
 		return nil
 	}

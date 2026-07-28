@@ -45,6 +45,10 @@
         return;
       }
       setLocalAgentWorking(activeAgentId, true);
+      state.activeRunID = '';
+      state.activeRunAgentID = activeAgentId;
+      state.lastRunSeq = 0;
+      clearActiveRunReplay();
       state.chatStreaming = true;
       if (state.agent) {
         state.agent.state = 'working';
@@ -194,7 +198,17 @@
         if (line.startsWith('data:')) data.push(line.slice(5).trim());
       });
       if (!data.length) return;
-      const payload = JSON.parse(data.join('\n'));
+      let payload = JSON.parse(data.join('\n'));
+      if (payload && payload.run_id && Object.prototype.hasOwnProperty.call(payload, 'data')) {
+        const envelope = payload;
+        if (!KarozRunReplay.accept(state, envelope)) return;
+        const dataPayload = envelope.data;
+        payload = dataPayload && typeof dataPayload === 'object' && !Array.isArray(dataPayload)
+          ? { ...dataPayload }
+          : { value: dataPayload };
+        payload._runID = envelope.run_id;
+        payload._runSeq = Number(envelope.seq || 0);
+      }
       if (event === 'meta') handlers.onMeta?.(payload);
       if (event === 'delta') handlers.onDelta?.(payload.delta || payload.content || '');
       if (event === 'tool_start') handlers.onToolStart?.(payload);
@@ -203,9 +217,106 @@
       if (event === 'queued') handlers.onQueued?.(payload);
       if (event === 'interrupt') handlers.onInterrupt?.(payload);
       if (event === 'log') handlers.onLog?.(payload);
+      if (event === 'reset') {
+        KarozRunReplay.reset(state, payload.floor);
+        handlers.onReset?.(payload);
+        refreshActiveAgentChat();
+      }
       if (event === 'done') handlers.onDone?.(payload);
       if (event === 'error') handlers.onError?.(payload.message || 'stream failed');
       if (event === 'cancelled') handlers.onCancelled?.(payload);
+    }
+    // Provider deltas are intentionally not persisted until the final result.
+    // Keep one ephemeral, run-keyed assistant bubble so reconnect/replay after
+    // a browser refresh remains visible. Tool events carry the sequence of
+    // their already-persisted message, letting this renderer bridge a history
+    // fetch race without duplicating durable cards.
+    function ensureActiveRunReplay() {
+      if (!state.activeRunID) return null;
+      if (!state.activeRunReplay || state.activeRunReplay.runID !== state.activeRunID) {
+        state.activeRunReplay = { runID: state.activeRunID, agentID: currentAgentID(), text: '', toolEvents: [] };
+      }
+      return state.activeRunReplay;
+    }
+    function appendActiveRunReplayDelta(delta) {
+      if (!delta) return;
+      const replay = ensureActiveRunReplay();
+      if (!replay) return;
+      replay.text += String(delta);
+      rehydrateCurrentContextAssistant(replay.text);
+      renderActiveRunReplay();
+    }
+    function removeActiveRunReplayElements() {
+      const output = $('agentOutput');
+      if (!output) return;
+      output.querySelectorAll('.run-replay-message, .run-replay-event').forEach(item => item.remove());
+      output.querySelectorAll('.tool-batch').forEach(batch => {
+        if (!batch.querySelector('.tool-group')) {
+          batch.remove();
+        } else {
+          updateToolBatchSummary(batch);
+        }
+      });
+    }
+    function renderActiveRunReplay() {
+      const output = $('agentOutput');
+      if (!output) return;
+      removeActiveRunReplayElements();
+      const replay = state.activeRunReplay;
+      if (!replay || replay.agentID !== currentAgentID()) return;
+      KarozRunReplay.transientToolEvents(replay, state.chatMessages).forEach(event => {
+        const payload = event.payload || {};
+        if (event.kind === 'tool_start') {
+          if (payload.tool === 'request_choice') return;
+          const item = appendToolMessage('tool_call', payload.tool, payload.call_id, payload.arguments, true);
+          item.classList.add('run-replay-event');
+          item.dataset.runId = replay.runID;
+          return;
+        }
+        if (event.kind === 'tool_result') {
+          const choice = parseChoiceRequestResult(payload.result);
+          if (choice) {
+            const item = appendChoiceRequest(choice, true);
+            item.classList.add('run-replay-event');
+            item.dataset.runId = replay.runID;
+            return;
+          }
+          const item = appendToolMessage('tool_result', payload.tool, payload.call_id, payload.result, payload.success);
+          item.classList.add('run-replay-event');
+          item.dataset.runId = replay.runID;
+        }
+      });
+      if (!replay.text) return;
+      const item = appendAgentMessage(currentAgentID(), replay.text);
+      item.classList.add('run-replay-message');
+      item.dataset.runId = replay.runID;
+    }
+    function clearActiveRunReplay(runID = '') {
+      if (runID && state.activeRunReplay && state.activeRunReplay.runID !== runID) return;
+      state.activeRunReplay = null;
+      removeActiveRunReplayElements();
+    }
+    function appendActiveRunReplayToolStart(payload) {
+      const replay = ensureActiveRunReplay();
+      if (!replay) return;
+      if (KarozRunReplay.addToolEvent(replay, {
+        kind: 'tool_start', seq: payload._runSeq, callID: payload.call_id,
+        messageSeq: payload.message_seq, payload,
+      })) {
+        renderActiveRunReplay();
+        scheduleChatRefresh();
+      }
+    }
+    function appendActiveRunReplayToolResult(payload) {
+      const replay = ensureActiveRunReplay();
+      if (!replay) return;
+      if (KarozRunReplay.addToolEvent(replay, {
+        kind: 'tool_result', seq: payload._runSeq, callID: payload.call_id,
+        messageSeq: payload.message_seq, payload,
+      })) {
+        renderActiveRunReplay();
+        scheduleChatRefresh();
+      }
     }
     function currentSkillTrigger(input) {
       const cursor = input.selectionStart || 0;

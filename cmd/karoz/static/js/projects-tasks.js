@@ -30,7 +30,12 @@
       state.archive = [];
       state.workspaceFiles = [];
       state.chatMessages = [];
+      state.modelContext = [];
       state.currentContextTurn = [];
+	  state.activeRunID = '';
+	  state.activeRunAgentID = '';
+	  state.lastRunSeq = 0;
+	  state.activeRunReplay = null;
       state.chatHasMore = false;
       state.chatNextBeforeSeq = 0;
       state.preview = null;
@@ -79,7 +84,7 @@
         const b = document.createElement('button');
         b.className = 'nav-item' + (state.task && state.task.id === t.id ? ' active' : '');
         const statusClass = String(t.status || 'pending').replace(/[^a-zA-Z0-9_-]/g, '_');
-        b.innerHTML = '<strong>' + escapeHTML(t.title || 'Untitled task') + '</strong><div class="nav-meta"><span>' + escapeHTML(taskCategoryLabel(t.type) + ' · ' + taskTypeLabel(t.type)) + '</span><span class="status-pill ' + statusClass + '">' + escapeHTML(t.status || 'pending') + '</span></div>';
+        b.innerHTML = '<strong>' + escapeHTML(t.title || 'Untitled task') + '</strong><div class="nav-meta"><span>' + escapeHTML(taskCategoryLabel(t.type) + ' · ' + taskTypeLabel(t.type)) + '</span><span class="status-pill ' + statusClass + '">' + escapeHTML(taskStatusLabel(t.status)) + '</span></div>';
         b.onclick = () => selectTask(t, { push: true });
         box.appendChild(b);
       });
@@ -101,17 +106,28 @@
       $('taskTitleText').textContent = task.title || 'Untitled task';
       $('taskMetaText').textContent = taskCategoryLabel(task.type) + ' · ' + taskTypeLabel(task.type) + ' · ' + compactDate(task.created_at);
       $('taskStatusText').className = 'status-pill ' + statusClass;
-      $('taskStatusText').textContent = task.status || 'pending';
+      $('taskStatusText').textContent = taskStatusLabel(task.status);
       $('taskGoalText').textContent = task.goal || task.description || '-';
-      $('taskResultText').textContent = task.failure_summary || task.result || '-';
-      $('runTask').disabled = ['running', 'verifying', 'deploying', 'merging'].includes(task.status || '');
+      $('taskResultText').textContent = task.status === 'waiting_merge'
+        ? 'Merge blocked: ' + (task.merge_blocked_reason || 'unknown reason') + (task.merge_blocked_detail ? ': ' + task.merge_blocked_detail : '')
+        : (task.failure_summary || task.result || '-');
+      const waitingMerge = task.status === 'waiting_merge';
+	  const cancellable = ['running', 'verifying', 'deploying'].includes(task.status || '');
+      $('runTask').disabled = waitingMerge || ['running', 'verifying', 'deploying', 'merging'].includes(task.status || '');
+      $('runTask').hidden = waitingMerge;
+	  $('cancelTask').hidden = !cancellable;
+	  $('retryTaskMerge').hidden = !waitingMerge;
+	  $('cleanupTask').hidden = !['done', 'waiting_merge', 'failed', 'cancelled', 'canceled'].includes(task.status || '') || task.worktree_state !== 'clean';
       renderTaskFields(task);
       await loadTaskLog();
       syncTaskPolling();
     }
     function isLiveTask(task) {
       const status = String(task && task.status || '').toLowerCase();
-      return ['running', 'verifying', 'deploying', 'merging'].includes(status);
+	  return ['running', 'verifying', 'deploying', 'cancelling', 'merging'].includes(status);
+    }
+    function taskStatusLabel(status) {
+      return status === 'waiting_merge' ? 'Waiting to merge' : (status || 'pending');
     }
     function syncTaskPolling() {
       if (taskPollTimer) {
@@ -137,10 +153,14 @@
     function renderTaskFields(task) {
       const fields = [
         ['Base branch', task.base_branch || 'main'],
+		['Base commit', task.base_commit || '-'],
         ['Task branch', task.task_branch || '-'],
-        ['Worktree', task.worktree_path || '-'],
+		['Worktree', task.worktree_path || '-'],
+		['Worktree state', task.worktree_state ? task.worktree_state + (task.worktree_detail ? ': ' + task.worktree_detail : '') : '-'],
         ['Commit', task.commit_sha || '-'],
         ['Merged at', task.merged_at ? compactDate(task.merged_at) : '-'],
+		['Merge blocked', task.merge_blocked_reason ? task.merge_blocked_reason + (task.merge_blocked_detail ? ': ' + task.merge_blocked_detail : '') : '-'],
+		['Merge attempts', String(task.merge_attempts || 0)],
         ['Updated', compactDate(task.updated_at)]
       ];
       if (task.type === 'deploy' || task.type === 'deployment') {

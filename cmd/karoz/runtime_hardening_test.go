@@ -134,6 +134,54 @@ func TestResidentToolPolicyAndReadOnlyRepositoryTools(t *testing.T) {
 	if err != nil || !strings.Contains(forbidden, "tool_forbidden") {
 		t.Fatalf("forbidden write = %s err=%v", forbidden, err)
 	}
+	for _, name := range []string{"create_task", "update_task_status", "save_plan_draft"} {
+		forbidden, err = a.executeResidentTool(context.Background(), ctx, codexToolCall{Name: name, Arguments: `{}`})
+		if err != nil || !strings.Contains(forbidden, "tool_forbidden") {
+			t.Fatalf("ask turn accepted %s: result=%s err=%v", name, forbidden, err)
+		}
+	}
+}
+
+func TestResidentTaskStatusTransitionsAreMechanicallyEnforced(t *testing.T) {
+	a, project := newHandlerTestApp(t)
+	agent, ok := a.projectAgent(project, "worker-a")
+	if !ok {
+		t.Fatal("worker-a missing")
+	}
+	task := Task{ID: "resident-task-transition", ProjectID: project.ID, Status: "pending", Title: "Validate resident transition"}
+	a.tasks[project.ID] = []Task{task}
+	a.taskHooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{
+		ID: "hook-transition", ProjectID: project.ID, TaskID: task.ID, AgentID: "karoz",
+		HookType: "resident_task_completion", Status: "pending",
+	}}
+	ctx := ResidentToolContext{Project: project, Agent: agent, Workdir: project.Path, TurnType: "dev", EnforcePolicy: true}
+
+	blocked, err := a.executeResidentTool(context.Background(), ctx, codexToolCall{Name: "update_task_status", Arguments: `{"task_id":"resident-task-transition","status":"merging","result":"must not claim merge ownership"}`})
+	if err != nil || !strings.Contains(blocked, "invalid_task_transition") {
+		t.Fatalf("executor-owned transition was accepted: result=%s err=%v", blocked, err)
+	}
+	if current, found := a.findTask(project.ID, task.ID); !found || current.Status != "pending" || current.Result != "" {
+		t.Fatalf("blocked transition mutated task: %+v found=%v", current, found)
+	}
+
+	completed, err := a.executeResidentTool(context.Background(), ctx, codexToolCall{Name: "update_task_status", Arguments: `{"task_id":"resident-task-transition","status":"done","result":"completed by resident"}`})
+	if err != nil || strings.Contains(completed, `"error"`) {
+		t.Fatalf("pending -> done rejected: result=%s err=%v", completed, err)
+	}
+	if current, found := a.findTask(project.ID, task.ID); !found || current.Status != "done" || current.Result != "completed by resident" {
+		t.Fatalf("valid terminal transition missing: %+v found=%v", current, found)
+	}
+	if got := a.taskHooks[project.ID+"/"+task.ID][0].Status; got != "delivered" {
+		t.Fatalf("terminal transition did not deliver task hook: %s", got)
+	}
+
+	reopen, err := a.executeResidentTool(context.Background(), ctx, codexToolCall{Name: "update_task_status", Arguments: `{"task_id":"resident-task-transition","status":"pending"}`})
+	if err != nil || !strings.Contains(reopen, "invalid_task_transition") {
+		t.Fatalf("terminal task was reopened by resident tool: result=%s err=%v", reopen, err)
+	}
+	if current, _ := a.findTask(project.ID, task.ID); current.Status != "done" {
+		t.Fatalf("rejected terminal transition changed status: %+v", current)
+	}
 }
 
 func TestResidentBashApprovalPolicy(t *testing.T) {

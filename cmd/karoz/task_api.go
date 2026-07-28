@@ -46,6 +46,33 @@ func (a *app) handleTasks(w http.ResponseWriter, r *http.Request, project Projec
 		writeJSON(w, updated)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "merge" && r.Method == http.MethodPost {
+		updated, err := a.retryTaskMerge(project, task)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, updated)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost {
+		updated, err := a.cancelTask(project, task)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, updated)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "cleanup" && r.Method == http.MethodPost {
+		updated, err := a.cleanupTaskWorktree(project, task)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, updated)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "logs" && r.Method == http.MethodGet {
 		logs, err := a.readTaskLog(project.ID, task.ID)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {

@@ -56,14 +56,24 @@ type scheduledRunSnapshot struct {
 	Jobs []ScheduledRun `json:"jobs"`
 }
 
-func newScheduledRun(kind ScheduledRunKind, input AgentRunInput, dedupKey string, payload any, timeout time.Duration) (ScheduledRun, error) {
+const defaultScheduledRunStartWait = 3 * time.Minute
+
+// scheduledRunExecutionTimeout selects the resident execution budget for a
+// queued Run. Queue admission has its own bounded start-wait window; it must
+// not shorten a plan/dev Run merely because an agent was busy before it began.
+func scheduledRunExecutionTimeout(turnType string) time.Duration {
+	return residentTurnBudgetFor(turnType).TotalDuration
+}
+
+func newScheduledRun(kind ScheduledRunKind, input AgentRunInput, dedupKey string, payload any, executionTimeout time.Duration) (ScheduledRun, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return ScheduledRun{}, err
 	}
 	now := time.Now().UTC()
-	if timeout <= 0 {
-		timeout = 3 * time.Minute
+	turnType := normalizeChatTurnType(input.TurnType)
+	if executionTimeout <= 0 {
+		executionTimeout = scheduledRunExecutionTimeout(turnType)
 	}
 	return ScheduledRun{
 		ID:          firstNonEmpty(input.RunID, randomID()),
@@ -71,14 +81,15 @@ func newScheduledRun(kind ScheduledRunKind, input AgentRunInput, dedupKey string
 		AgentID:     strings.TrimSpace(input.AgentID),
 		Kind:        kind,
 		Trigger:     normalizeRunTrigger(input.Trigger),
-		TurnType:    normalizeChatTurnType(input.TurnType),
+		TurnType:    turnType,
 		SourceID:    strings.TrimSpace(input.SourceID),
 		MessageID:   strings.TrimSpace(input.MessageID),
 		DedupKey:    strings.TrimSpace(dedupKey),
 		Payload:     raw,
 		Status:      ScheduledRunQueued,
 		MaxAttempts: 3,
-		TimeoutMS:   timeout.Milliseconds(),
+		TimeoutMS:   executionTimeout.Milliseconds(),
+		StartWaitMS: defaultScheduledRunStartWait.Milliseconds(),
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}, nil
@@ -100,7 +111,10 @@ func (a *app) scheduleAgentRun(job ScheduledRun) (string, bool) {
 		job.MaxAttempts = 3
 	}
 	if job.TimeoutMS <= 0 {
-		job.TimeoutMS = (3 * time.Minute).Milliseconds()
+		job.TimeoutMS = scheduledRunExecutionTimeout(job.TurnType).Milliseconds()
+	}
+	if job.StartWaitMS <= 0 {
+		job.StartWaitMS = defaultScheduledRunStartWait.Milliseconds()
 	}
 	now := time.Now().UTC()
 	if job.CreatedAt.IsZero() {
@@ -135,20 +149,39 @@ func (a *app) runScheduledAgentQueue(key string) {
 func (a *app) newSchedulerWorker() *runtimedomain.SchedulerWorker {
 	return runtimedomain.NewSchedulerWorker(a.ensureSchedulerQueue(), runtimedomain.SchedulerWorkerHooks{
 		Begin: func(job ScheduledRun) bool {
-			_, started := a.beginAgentRun(job.RunInput())
-			return started
+			run, started := a.beginAgentRun(job.RunInput())
+			if !started {
+				return false
+			}
+			if _, claimed := a.claimAndBindAgentRunWorkerContext(context.Background(), job.ProjectID, job.AgentID, run.ID); !claimed {
+				a.finishAgentRun(job.ProjectID, job.AgentID, run.ID, RunStateCancelled, context.Canceled)
+				return false
+			}
+			ledger := a.createRunLedger(run.ID)
+			ledger.publish("meta", map[string]any{"run_id": run.ID, "type": normalizeChatTurnType(job.TurnType)})
+			return true
+		},
+		WaitForRunFinished: func(ctx context.Context, job ScheduledRun) bool {
+			return a.waitForAgentRunFinished(ctx, job.ProjectID, job.AgentID)
 		},
 		Bind: func(ctx context.Context, job ScheduledRun) (context.Context, bool) {
+			if hook := a.scheduledRunBeforeBindHook; hook != nil {
+				hook()
+			}
 			return a.bindAgentRunContext(ctx, job.ProjectID, job.AgentID, job.ID)
 		},
 		Execute: a.executeScheduledRun,
 		Finish: func(job ScheduledRun, runErr error) {
 			if runErr != nil {
-				a.finishAgentRun(job.ProjectID, job.AgentID, job.ID, RunStateFailed, runErr)
+				state := RunStateFailed
+				if errors.Is(runErr, context.Canceled) {
+					state = RunStateCancelled
+				}
+				a.finishAgentRunWithLedger(Project{ID: job.ProjectID}, Agent{ID: job.AgentID}, job.ID, state, runErr, runErr.Error())
 				return
 			}
 			a.transitionAgentRun(job.ProjectID, job.AgentID, job.ID, RunStateCompleting)
-			a.finishAgentRun(job.ProjectID, job.AgentID, job.ID, RunStateDone, nil)
+			a.finishAgentRunWithLedger(Project{ID: job.ProjectID}, Agent{ID: job.AgentID}, job.ID, RunStateDone, nil, "Scheduled agent run completed.")
 		},
 		Claimed: func(ScheduledRun) {
 			if err := a.saveScheduledRuns(); err != nil {
@@ -158,7 +191,7 @@ func (a *app) newSchedulerWorker() *runtimedomain.SchedulerWorker {
 		Completed: a.handleScheduledRunCompletion,
 		RunFailed: func(job ScheduledRun, runErr error) {
 			if !errors.Is(runErr, context.Canceled) {
-				log.Printf("scheduled agent run failed project=%s agent=%s kind=%s run=%s: %v", job.ProjectID, job.AgentID, job.Kind, job.ID, runErr)
+				log.Printf("scheduled agent run failed project=%s agent=%s kind=%s run=%s queue_age=%s effects_started=%t: %v", job.ProjectID, job.AgentID, job.Kind, job.ID, time.Since(job.CreatedAt).Round(time.Millisecond), job.EffectsStarted, runErr)
 			}
 		},
 	})
@@ -206,6 +239,20 @@ func (a *app) executeScheduledRun(ctx context.Context, job ScheduledRun) error {
 	default:
 		return errors.New("unknown scheduled run kind: " + string(job.Kind))
 	}
+}
+
+// commitScheduledRunResult uses the same success/cancellation linearization as
+// a direct Run while leaving SchedulerWorker responsible for cancelling its
+// deadline child after Execute returns. This keeps a late explicit cancel from
+// persisting an assistant success and then reporting a cancelled Run.
+func (a *app) commitScheduledRunResult(project Project, agent Agent, runID, intent, body string) error {
+	if hook := a.scheduledRunBeforeResultCommitHook; hook != nil {
+		hook()
+	}
+	if !a.commitAgentRunResultWithLedger(project, agent, runID, intent, body, false) {
+		return context.Canceled
+	}
+	return nil
 }
 
 func (a *app) emitScheduledRunQueued(job ScheduledRun) {
@@ -272,6 +319,16 @@ func (a *app) loadScheduledRuns() error {
 	if err != nil || !found {
 		return err
 	}
+	if normalizeScheduledRunBudgets(snapshot.Jobs) {
+		// Pre-split snapshots used timeout_ms as both the busy-agent wait and
+		// execution window. The old production callers wrote the generic three
+		// minute value for every turn, including plan/dev. Preserve explicitly
+		// supplied non-default values, while upgrading that legacy default to
+		// the selected resident execution total and recording a separate wait.
+		if err := persistenceadapter.NewJSONStore(a.settings.DataDir).Save("agent-run-queue.json", scheduledRunSnapshot{Jobs: snapshot.Jobs}, 0644); err != nil {
+			return err
+		}
+	}
 	recovery := a.ensureSchedulerQueue().Recover(snapshot.Jobs, time.Now().UTC())
 	for _, job := range recovery.TerminalFailures {
 		if job.Kind == ScheduledRunHandoff {
@@ -291,6 +348,35 @@ func (a *app) loadScheduledRuns() error {
 		return a.saveScheduledRuns()
 	}
 	return nil
+}
+
+func normalizeScheduledRunBudgets(jobs []ScheduledRun) bool {
+	changed := false
+	for index := range jobs {
+		job := &jobs[index]
+		normalizedTurnType := normalizeChatTurnType(job.TurnType)
+		if job.TurnType != normalizedTurnType {
+			job.TurnType = normalizedTurnType
+			changed = true
+		}
+		if job.TimeoutMS <= 0 {
+			job.TimeoutMS = scheduledRunExecutionTimeout(job.TurnType).Milliseconds()
+			changed = true
+		}
+		if job.StartWaitMS > 0 {
+			continue
+		}
+		legacyTimeout := job.TimeoutMS
+		job.StartWaitMS = defaultScheduledRunStartWait.Milliseconds()
+		// All old production queued jobs were constructed with the generic
+		// three-minute timeout. Upgrade only that known legacy default; callers
+		// that had a deliberately shorter/longer timeout retain it.
+		if legacyTimeout == defaultScheduledRunStartWait.Milliseconds() {
+			job.TimeoutMS = scheduledRunExecutionTimeout(job.TurnType).Milliseconds()
+		}
+		changed = true
+	}
+	return changed
 }
 
 func (a *app) resumeScheduledRuns() {

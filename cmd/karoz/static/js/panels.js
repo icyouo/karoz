@@ -458,9 +458,11 @@
       const page = await api('/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID) + '/messages?limit=80') || {};
       if (!state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       state.chatMessages = Array.isArray(page.messages) ? page.messages : (Array.isArray(page) ? page : []);
+      state.modelContext = Array.isArray(page.model_context) ? page.model_context : [];
       state.chatHasMore = !!page.has_more;
       state.chatNextBeforeSeq = page.next_before_seq || (state.chatMessages[0] && state.chatMessages[0].seq) || 0;
       renderChatMessages();
+      renderActiveRunReplay();
       $('agentOutput').scrollTop = $('agentOutput').scrollHeight;
     }
     function scheduleChatRefresh() {
@@ -482,6 +484,7 @@
       if (!page || !state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       if (state.chatStreaming || state.chatLoadingHistory) return;
       const latest = Array.isArray(page.messages) ? page.messages : (Array.isArray(page) ? page : []);
+      const nextModelContext = Array.isArray(page.model_context) ? page.model_context : [];
       const wasEmpty = !(state.chatMessages || []).length;
       const byKey = new Map();
       (state.chatMessages || []).forEach(m => byKey.set(m.id || String(m.seq), m));
@@ -494,7 +497,9 @@
           changed = true;
         }
       });
-      if (!changed) return;
+      const contextChanged = JSON.stringify(state.modelContext || []) !== JSON.stringify(nextModelContext);
+      state.modelContext = nextModelContext;
+      if (!changed && !contextChanged) return;
       state.chatMessages = Array.from(byKey.values()).sort((a, b) => (a.seq || 0) - (b.seq || 0));
       if (wasEmpty) {
         state.chatHasMore = !!page.has_more;
@@ -503,6 +508,7 @@
       const box = $('agentOutput');
       const stickToBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
       renderChatMessages();
+      renderActiveRunReplay();
       if (stickToBottom) box.scrollTop = box.scrollHeight;
     }
     async function loadEarlierAgentMessages() {
@@ -518,11 +524,13 @@
       state.chatLoadingHistory = false;
       if (!page || !state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       const older = Array.isArray(page.messages) ? page.messages : [];
+      state.modelContext = Array.isArray(page.model_context) ? page.model_context : state.modelContext || [];
       const seen = new Set(state.chatMessages.map(message => message.id || String(message.seq)));
       state.chatMessages = older.filter(message => !seen.has(message.id || String(message.seq))).concat(state.chatMessages);
       state.chatHasMore = !!page.has_more;
       state.chatNextBeforeSeq = page.next_before_seq || (state.chatMessages[0] && state.chatMessages[0].seq) || 0;
       renderChatMessages();
+      renderActiveRunReplay();
       box.scrollTop = box.scrollHeight - previousHeight;
     }
     function renderChatMessages() {

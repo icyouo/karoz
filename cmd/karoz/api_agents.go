@@ -124,6 +124,11 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 		writeJSON(w, map[string]any{"cancelled": true, "run": run})
 		return
 	}
+	if len(parts) == 4 && parts[1] == "runs" && parts[3] == "events" && r.Method == http.MethodGet {
+		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+		a.streamRunLedger(w, r, parts[2], after)
+		return
+	}
 	if len(parts) >= 2 && parts[1] == "workspace" {
 		a.handleAgentWorkspace(w, r, project, agent, parts[2:])
 		return
@@ -156,7 +161,10 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 				writeError(w, http.StatusConflict, errors.New("wait for the active agent run to finish before resolving a bash approval"))
 				return
 			}
-			msg := a.appendAgentMessage(project.ID, agent.ID, "user", "interrupt", userText)
+			msg, appended := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", "interrupt", userText)
+			if !appended {
+				msg = a.appendAgentMessage(project.ID, agent.ID, "user", "interrupt", userText)
+			}
 			messageStored = true
 			item, queued := a.enqueueAgentInterrupt(project.ID, agent.ID, msg, turnType)
 			if queued {
@@ -183,16 +191,13 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 			writeError(w, http.StatusConflict, err)
 			return
 		}
-		defer a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateDone, nil)
-		runCtx, bound := a.bindAgentRunContext(r.Context(), project.ID, agent.ID, run.ID)
-		if !bound {
-			writeError(w, http.StatusConflict, errors.New("agent run changed before execution; retry"))
-			return
-		}
 		if !messageStored {
-			a.appendAgentMessage(project.ID, agent.ID, "user", turnType, userText)
+			if _, appended := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", turnType, userText); !appended {
+				a.appendAgentMessage(project.ID, agent.ID, "user", turnType, userText)
+			}
 		}
-		a.streamAgentMessage(w, r.Clone(runCtx), project, agent, run.ID, userText, turnType)
+		a.startAgentRunWorker(project, agent, run, userText, turnType)
+		a.streamRunLedger(w, r, run.ID, 0)
 		return
 	}
 	http.NotFound(w, r)

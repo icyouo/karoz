@@ -16,39 +16,54 @@ import (
 )
 
 type app struct {
-	mu                    sync.Mutex
-	artifactOpsMu         sync.Mutex
-	handoffOpsMu          sync.Mutex
-	handoffReplyMu        sync.Mutex
-	schedulerPersistMu    sync.Mutex
-	settings              Settings
-	tasks                 map[string][]Task
-	agents                map[string][]Agent
-	archives              map[string][]AgentArchiveMessage
-	memories              map[string][]AgentMemoryEntry
-	blackboard            map[string][]AgentBlackboardEntry
-	artifacts             map[string][]Artifact
-	groups                map[string][]AgentGroup
-	groupInbox            map[string][]GroupInboxMessage
-	plans                 map[string][]WorkPlan
-	inbox                 map[string][]AgentInboxMessage
-	taskHooks             map[string][]TaskRuntimeHook
-	agentRoutes           map[string][]AgentRoute
-	agentMessages         map[string][]AgentMessage
-	agentSessions         map[string]AgentSessionState
-	projectAliases        map[string]string
-	agentRuns             map[string]AgentRun
-	agentRunCancels       map[string]context.CancelFunc
-	residentBashApprovals map[string]ResidentBashApproval
-	schedulerQueue        *runtimedomain.SchedulerQueue
-	schedulerExecutors    map[ScheduledRunKind]ScheduledRunExecutor
-	runtimeHooks          map[string]bool
-	runtimeWatchers       map[string]map[chan RuntimeEvent]bool
-	residentToolsOnce     sync.Once
-	residentTools         *tooldomain.Registry[ResidentToolContext]
-	modelProvider         runtimedomain.ModelProvider[CLI2APIRequest, ResidentToolContext, AgentStreamCallbacks]
-	dynamicTools          tooldomain.DynamicProvider
-	memoryAnalyzer        memoryAnalyzerFunc
+	mu                                 sync.Mutex
+	taskRunMu                          sync.Mutex
+	taskRunCancels                     map[string]taskRun
+	taskIntegrationLocksMu             sync.Mutex
+	taskIntegrationLocks               map[string]*sync.Mutex
+	taskIntegrationPreLockHook         func()
+	artifactOpsMu                      sync.Mutex
+	handoffOpsMu                       sync.Mutex
+	handoffReplyMu                     sync.Mutex
+	schedulerPersistMu                 sync.Mutex
+	settings                           Settings
+	tasks                              map[string][]Task
+	agents                             map[string][]Agent
+	archives                           map[string][]AgentArchiveMessage
+	memories                           map[string][]AgentMemoryEntry
+	blackboard                         map[string][]AgentBlackboardEntry
+	artifacts                          map[string][]Artifact
+	groups                             map[string][]AgentGroup
+	groupInbox                         map[string][]GroupInboxMessage
+	plans                              map[string][]WorkPlan
+	inbox                              map[string][]AgentInboxMessage
+	taskHooks                          map[string][]TaskRuntimeHook
+	agentRoutes                        map[string][]AgentRoute
+	agentMessages                      map[string][]AgentMessage
+	agentTranscripts                   map[string][]AgentTranscriptItem
+	agentSessions                      map[string]AgentSessionState
+	projectAliases                     map[string]string
+	agentRuns                          map[string]AgentRun
+	agentRunCancels                    map[string]context.CancelFunc
+	agentRunContexts                   map[string]context.Context
+	agentRunWorkers                    map[string]string
+	agentRunCancelling                 map[string]string
+	agentRunResultCommitted            map[string]string
+	agentRunLedgers                    map[string]*agentRunLedger
+	agentRunFinishedWatchers           map[string]map[chan struct{}]struct{}
+	agentRunAfterProviderHook          func()
+	agentRunAfterSuccessHook           func()
+	scheduledRunBeforeBindHook         func()
+	scheduledRunBeforeResultCommitHook func()
+	residentBashApprovals              map[string]ResidentBashApproval
+	schedulerQueue                     *runtimedomain.SchedulerQueue
+	schedulerExecutors                 map[ScheduledRunKind]ScheduledRunExecutor
+	runtimeHooks                       map[string]bool
+	runtimeWatchers                    map[string]map[chan RuntimeEvent]bool
+	residentToolsOnce                  sync.Once
+	residentTools                      *tooldomain.Registry[ResidentToolContext]
+	modelProvider                      runtimedomain.ModelProvider[CLI2APIRequest, ResidentToolContext, AgentStreamCallbacks]
+	dynamicTools                       tooldomain.DynamicProvider
 }
 
 type Settings = settingsdomain.Settings
@@ -61,6 +76,8 @@ type Agent = agentdomain.Agent
 type AgentTemplate = agentdomain.AgentTemplate
 
 type AgentMessage = agentdomain.AgentMessage
+type AgentTranscriptItem = agentdomain.AgentTranscriptItem
+type AgentContextMessage = agentdomain.AgentContextMessage
 type AgentMessagesPage = agentdomain.AgentMessagesPage
 type AgentArchiveMessage = agentdomain.AgentArchiveMessage
 type AgentMemoryEntry = agentdomain.AgentMemoryEntry
@@ -225,11 +242,12 @@ type ResidentBashApproval struct {
 }
 
 type AgentStreamCallbacks struct {
-	OnDelta        func(string)
-	OnToolStart    func(codexToolCall)
-	OnToolResult   func(codexToolCall, string, bool)
-	OnInterrupt    func([]AgentInterrupt)
-	PollInterrupts func() []AgentInterrupt
+	OnDelta           func(string)
+	OnToolStart       func(codexToolCall)
+	OnToolResult      func(codexToolCall, string, bool)
+	OnBudgetExhausted func(map[string]any)
+	OnInterrupt       func([]AgentInterrupt)
+	PollInterrupts    func() []AgentInterrupt
 }
 
 type AgentInterrupt = runtimedomain.Interrupt

@@ -159,7 +159,10 @@ func (queue *SchedulerQueue) Complete(jobID string, outcome CompletionOutcome, m
 		if job.Attempt < job.MaxAttempts && !job.EffectsStarted {
 			job.Status = ScheduledQueued
 			key := AgentKey(job.ProjectID, job.AgentID)
-			queue.queues[key] = append(queue.queues[key], job.ID)
+			// Keep an earlier failed/wait-blocked job ahead of later jobs for the
+			// same agent. A retry is not permission for a later handoff to pass
+			// it, and no effect has started at this point.
+			queue.queues[key] = append([]string{job.ID}, queue.queues[key]...)
 			result.Requeue = true
 		} else {
 			job.Status = ScheduledFailed

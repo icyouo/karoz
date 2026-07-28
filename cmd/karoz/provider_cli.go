@@ -20,6 +20,8 @@ func invokeClaude(ctx context.Context, workdir, prompt, mode string) (CLI2APIRes
 	}
 	cmd := exec.CommandContext(ctx, "claude", "--print", "--permission-mode", permissionMode, "--output-format", "text", "--no-session-persistence", prompt)
 	cmd.Dir = workdir
+	prepareResidentBashProcess(cmd)
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return CLI2APIResponse{}, ctx.Err()
@@ -38,6 +40,8 @@ func invokeCodex(ctx context.Context, workdir, prompt, mode string) (CLI2APIResp
 		sandbox = "danger-full-access"
 	}
 	cmd := exec.CommandContext(ctx, "codex", "exec", "--sandbox", sandbox, "-C", workdir, prompt)
+	prepareResidentBashProcess(cmd)
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return CLI2APIResponse{}, ctx.Err()

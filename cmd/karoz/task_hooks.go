@@ -9,6 +9,9 @@ import (
 )
 
 func (a *app) notifyTaskRuntimeHooks(project Project, task Task) {
+	if !taskStatusIsTerminal(task.Status) {
+		return
+	}
 	if plan, changed := a.markPlanTaskTerminal(project.ID, task); changed {
 		a.schedulePlanEvent(project.ID, plan.OwnerAgentID, plan.ID, task.PlanStepID, "task_terminal", task.ID)
 	}
@@ -72,7 +75,7 @@ func (a *app) triggerAgentTaskEvent(project Project, task Task, hook TaskRuntime
 		},
 		"task_event/"+project.ID+"/"+task.ID+"/"+hook.ID,
 		TaskEventRunPayload{TaskID: task.ID, HookID: hook.ID},
-		3*time.Minute,
+		scheduledRunExecutionTimeout("ask"),
 	)
 	if err != nil {
 		log.Printf("create task event scheduled run project=%s agent=%s task=%s hook=%s: %v", project.ID, agent.ID, task.ID, hook.ID, err)

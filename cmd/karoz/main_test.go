@@ -659,10 +659,11 @@ func TestAgentPromptDeltaCompactsLargeToolResults(t *testing.T) {
 }
 
 func TestLimitToolResultForModelCapsCurrentLoopOutput(t *testing.T) {
-	result := strings.Repeat("x", maxCodexToolOutputChars+1000)
+	limit := residentTurnBudgetFor("ask").MaxToolOutputChars
+	result := strings.Repeat("x", limit+1000)
 	got := limitToolResultForModel(result)
 
-	if len(got) > maxCodexToolOutputChars {
+	if len(got) > limit {
 		t.Fatalf("tool result was not capped: %d", len(got))
 	}
 	if !strings.Contains(got, "karoz truncated tool result") {

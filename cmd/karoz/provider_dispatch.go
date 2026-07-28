@@ -55,7 +55,16 @@ func (a *app) invokeCLI2API(ctx context.Context, req CLI2APIRequest) (CLI2APIRes
 }
 
 func (a *app) invokeCLI2APIStream(ctx context.Context, req CLI2APIRequest, toolCtx ResidentToolContext, callbacks AgentStreamCallbacks) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	provider := a.resolveResidentProvider(req.Provider)
+	budget := residentTurnBudgetFor(toolCtx.TurnType)
+	// Every resident provider path, including a compatibility/non-streaming
+	// fallback, is bounded by the selected turn's total deadline. Direct
+	// streaming providers create narrower tool/final children from this parent.
+	ctx, cancel := context.WithTimeout(ctx, budget.TotalDuration)
+	defer cancel()
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
 		return errors.New("prompt is required")
@@ -66,21 +75,21 @@ func (a *app) invokeCLI2APIStream(ctx context.Context, req CLI2APIRequest, toolC
 	}
 	if provider == "codex-direct" || provider == "codex-oauth" || provider == "codex-api" {
 		toolCtx.Workdir = workdir
-		tools := a.residentToolSpecsForContext(ctx, toolCtx)
-		return invokeCodexDirectStream(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, func(call codexToolCall) (string, error) {
-			return a.executeResidentTool(ctx, toolCtx, call)
+		tools := a.residentToolContractForProvider(ctx, toolCtx, provider)
+		return invokeCodexDirectStreamWithBudget(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, budget, func(toolCallCtx context.Context, call codexToolCall) (string, error) {
+			return a.executeResidentTool(toolCallCtx, toolCtx, call)
 		})
 	}
 	if provider == "claude-api" {
 		toolCtx.Workdir = workdir
-		tools := a.residentToolSpecsForContext(ctx, toolCtx)
+		tools := a.residentToolContractForProvider(ctx, toolCtx, provider)
 		if claudeCLIAuthenticated(ctx) {
-			return invokeClaudeCLIStream(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, func(call codexToolCall) (string, error) {
-				return a.executeResidentTool(ctx, toolCtx, call)
+			return invokeClaudeCLIStreamWithBudget(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, budget, func(toolCallCtx context.Context, call codexToolCall) (string, error) {
+				return a.executeResidentTool(toolCallCtx, toolCtx, call)
 			})
 		}
-		return invokeClaudeDirectStream(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, func(call codexToolCall) (string, error) {
-			return a.executeResidentTool(ctx, toolCtx, call)
+		return invokeClaudeDirectStreamWithBudget(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, budget, func(toolCallCtx context.Context, call codexToolCall) (string, error) {
+			return a.executeResidentTool(toolCallCtx, toolCtx, call)
 		})
 	}
 	cli, err := a.invokeCLI2API(ctx, req)
@@ -91,6 +100,18 @@ func (a *app) invokeCLI2APIStream(ctx context.Context, req CLI2APIRequest, toolC
 		callbacks.OnDelta(cli.Output)
 	}
 	return nil
+}
+
+// residentToolContractForProvider is intentionally provider-neutral. Codex and
+// Claude have different wire adapters, but they must receive the exact same
+// mechanically allowed tool surface for an identical Run context.
+func (a *app) residentToolContractForProvider(ctx context.Context, toolCtx ResidentToolContext, provider string) []map[string]any {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex-direct", "codex-oauth", "codex-api", "claude-api":
+		return a.residentToolSpecsForContext(ctx, toolCtx)
+	default:
+		return nil
+	}
 }
 
 func (a *app) resolveResidentProvider(raw string) string {

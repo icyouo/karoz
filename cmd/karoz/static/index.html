@@ -109,6 +109,9 @@
               <div class="task-actions">
                 <span id="taskStatusText" class="status-pill">pending</span>
                 <button id="runTask" class="icon" title="Run task" aria-label="Run task"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg></button>
+				<button id="cancelTask" class="secondary" hidden>Cancel</button>
+				<button id="retryTaskMerge" class="secondary" hidden>Retry merge</button>
+				<button id="cleanupTask" class="secondary" hidden>Clean up worktree</button>
               </div>
             </div>
             <div class="task-section">
@@ -340,6 +343,7 @@
   <script src="/static/js/projects-tasks.js"></script>
   <script src="/static/js/chat-render.js"></script>
   <script src="/static/js/bindings.js"></script>
+  <script src="/static/js/run-replay.js"></script>
   <script src="/static/js/chat-stream.js"></script>
   <script src="/static/js/init.js"></script>
 </body>

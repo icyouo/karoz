@@ -54,6 +54,9 @@ func (a *app) bootstrap() error {
 	if err := a.loadAgentMessages(); err != nil {
 		return err
 	}
+	if err := a.loadAgentTranscripts(); err != nil {
+		return err
+	}
 	if err := a.loadAgentSessions(); err != nil {
 		return err
 	}
@@ -363,6 +366,23 @@ func (a *app) saveAgentMessages() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.saveJSON("agent-messages.json", a.agentMessages, 0644)
+}
+
+func (a *app) loadAgentTranscripts() error {
+	_, err := a.loadJSON("agent-transcripts.json", &a.agentTranscripts)
+	if err != nil {
+		return err
+	}
+	if a.agentTranscripts == nil {
+		a.agentTranscripts = map[string][]AgentTranscriptItem{}
+	}
+	return nil
+}
+
+func (a *app) saveAgentTranscripts() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.saveJSON("agent-transcripts.json", a.agentTranscripts, 0644)
 }
 
 func (a *app) loadAgentSessions() error {

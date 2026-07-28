@@ -138,7 +138,7 @@ func (a *app) maybeTriggerKarozIdleReconcile(event RuntimeEvent) {
 		AgentRunInput{ProjectID: projectID, AgentID: "karoz", Trigger: RunTriggerSystem, TurnType: "dev", SourceID: karozIdleReconcileHook},
 		projectID+"/"+karozIdleReconcileHook,
 		IdleReconcileRunPayload{Reason: event.Reason},
-		3*time.Minute,
+		scheduledRunExecutionTimeout("dev"),
 	)
 	if err != nil {
 		a.endRuntimeHook(projectID, karozIdleReconcileHook)

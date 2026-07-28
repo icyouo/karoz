@@ -27,7 +27,13 @@ type claudeToolAccumulator struct {
 }
 
 func invokeClaudeDirectStream(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
-	return invokeResidentToolLoop(ctx, newClaudeStreamWire(workdir, prompt, model, effort), tools, callbacks, executeTool)
+	return invokeClaudeDirectStreamWithBudget(ctx, workdir, prompt, model, effort, tools, callbacks, residentTurnBudgetFor("ask"), func(_ context.Context, call codexToolCall) (string, error) {
+		return executeTool(call)
+	})
+}
+
+func invokeClaudeDirectStreamWithBudget(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, executeTool residentToolExecutor) error {
+	return invokeResidentToolLoop(ctx, newClaudeStreamWire(workdir, prompt, model, effort), tools, callbacks, budget, executeTool)
 }
 
 // claudeStreamWire adapts the Claude messages SSE protocol to the shared

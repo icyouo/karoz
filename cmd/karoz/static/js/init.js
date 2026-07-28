@@ -71,6 +71,14 @@
       await renderTaskDetail();
       syncTaskPolling();
     };
+    $('retryTaskMerge').onclick = async () => {
+	  if (!state.project || !state.task) return;
+	  const t = await api('/api/projects/' + state.project.id + '/tasks/' + state.task.id + '/merge', { method: 'POST' });
+	  state.task = t;
+	  await loadTasks();
+	  await renderTaskDetail();
+	  notify(t.status === 'done' ? 'Task merged.' : 'Merge remains blocked: ' + (t.merge_blocked_reason || 'unknown reason') + '.', t.status === 'done' ? 'success' : 'error');
+	};
     document.querySelectorAll('.task-log-tab').forEach(button => {
       button.onclick = async () => {
         state.taskLogTab = button.dataset.taskLog || 'runtime';
@@ -88,6 +96,20 @@
       await selectAgent(agent);
       notify('Agent added.', 'success');
     };
+	$('cancelTask').onclick = async () => {
+	  if (!state.project || !state.task) return;
+	  const t = await api('/api/projects/' + state.project.id + '/tasks/' + state.task.id + '/cancel', { method: 'POST' });
+	  state.task = t;
+	  await loadTasks(); await renderTaskDetail(); syncTaskPolling();
+	  notify(t.status === 'cancelled' ? 'Task cancelled.' : 'Cancellation requested.', 'success');
+	};
+	$('cleanupTask').onclick = async () => {
+	  if (!state.project || !state.task) return;
+	  const t = await api('/api/projects/' + state.project.id + '/tasks/' + state.task.id + '/cleanup', { method: 'POST' });
+	  state.task = t;
+	  await loadTasks(); await renderTaskDetail();
+	  notify('Task worktree removed.', 'success');
+	};
     $('createTeam').onclick = async () => {
       if (!state.project || !state.selectedTeam) return;
       const instance = $('newTeamInstance').value.trim() || state.selectedTeam.id;

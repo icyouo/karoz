@@ -45,27 +45,31 @@ func (a *app) createTask(project Project, req TaskCreateRequest) Task {
 }
 
 func (a *app) runTask(project Project, task Task) Task {
-	if !taskRunnable(task.Status) {
-		a.appendTaskLog(project.ID, task.ID, "run skipped: task status is "+task.Status)
+	claimed, ctx, finishRun, ok := a.claimTaskRun(project.ID, task.ID)
+	if !ok {
+		if latest, found := a.findTask(project.ID, task.ID); found {
+			a.appendTaskLog(project.ID, task.ID, "run skipped: task status is "+latest.Status)
+			return latest
+		}
 		return task
 	}
-	task.Status = "running"
-	task.FailureSummary = ""
-	task.Result = ""
-	task.UpdatedAt = time.Now().UTC()
-	a.updateTask(project.ID, task)
+	task = claimed
+	defer finishRun()
+	a.saveOrLog("tasks", a.saveTasks())
 	a.appendTaskLog(project.ID, task.ID, "task started")
 
 	switch task.Type {
 	case "deploy", "deployment":
-		task = a.runDeploymentTask(project, task)
+		task = a.runDeploymentTask(ctx, project, task)
 	default:
-		task = a.runDevelopmentTask(project, task)
+		task = a.runDevelopmentTask(ctx, project, task)
 	}
 	task.UpdatedAt = time.Now().UTC()
 	a.updateTask(project.ID, task)
 	a.saveOrLog("tasks", a.saveTasks())
-	a.notifyTaskRuntimeHooks(project, task)
+	if taskStatusIsTerminal(task.Status) {
+		a.notifyTaskRuntimeHooks(project, task)
+	}
 	a.emitRuntimeStateChanged(RuntimeEvent{
 		ID:        randomID(),
 		ProjectID: project.ID,
@@ -108,29 +112,32 @@ func (a *app) startTaskAsync(project Project, task Task, source string) {
 }
 
 func (a *app) runTaskAsync(project Project, task Task, source string) Task {
-	if !taskRunnable(task.Status) {
-		a.appendTaskLog(project.ID, task.ID, "async run skipped: task status is "+task.Status+" source="+source)
+	claimed, ctx, finishRun, ok := a.claimTaskRun(project.ID, task.ID)
+	if !ok {
+		if latest, found := a.findTask(project.ID, task.ID); found {
+			a.appendTaskLog(project.ID, task.ID, "async run skipped: task status is "+latest.Status+" source="+source)
+			return latest
+		}
 		return task
 	}
-	task.Status = "running"
-	task.FailureSummary = ""
-	task.Result = ""
-	task.UpdatedAt = time.Now().UTC()
-	a.updateTask(project.ID, task)
+	task = claimed
 	a.saveOrLog("tasks", a.saveTasks())
 	a.appendTaskLog(project.ID, task.ID, "task queued for execution source="+source)
 	go func(started Task) {
+		defer finishRun()
 		a.appendTaskLog(project.ID, started.ID, "task started")
 		switch started.Type {
 		case "deploy", "deployment":
-			started = a.runDeploymentTask(project, started)
+			started = a.runDeploymentTask(ctx, project, started)
 		default:
-			started = a.runDevelopmentTask(project, started)
+			started = a.runDevelopmentTask(ctx, project, started)
 		}
 		started.UpdatedAt = time.Now().UTC()
 		a.updateTask(project.ID, started)
 		a.saveOrLog("tasks", a.saveTasks())
-		a.notifyTaskRuntimeHooks(project, started)
+		if taskStatusIsTerminal(started.Status) {
+			a.notifyTaskRuntimeHooks(project, started)
+		}
 		a.emitRuntimeStateChanged(RuntimeEvent{
 			ID:        randomID(),
 			ProjectID: project.ID,

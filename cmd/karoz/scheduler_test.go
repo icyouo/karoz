@@ -4,9 +4,178 @@ import (
 	"context"
 	runtimedomain "github.com/karoz/karoz/internal/runtime"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestScheduledRunWakesWhenTheActiveRunFinishes(t *testing.T) {
+	a, project := newHandlerTestApp(t)
+	active, started := a.beginAgentRun(AgentRunInput{RunID: "active-run", ProjectID: project.ID, AgentID: "worker-a", Trigger: RunTriggerUserDirect})
+	if !started {
+		t.Fatal("active Run did not start")
+	}
+	const kind ScheduledRunKind = "wake-test"
+	executed := make(chan struct{}, 1)
+	a.schedulerExecutors[kind] = func(context.Context, ScheduledRun) error {
+		executed <- struct{}{}
+		return nil
+	}
+	job, err := newScheduledRun(kind, AgentRunInput{RunID: "scheduled-wake", ProjectID: project.ID, AgentID: "worker-a", Trigger: RunTriggerSystem}, "wake-test", map[string]string{"reason": "test"}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, accepted := a.scheduleAgentRun(job); !accepted {
+		t.Fatal("scheduled Run was not accepted")
+	}
+
+	watcherDeadline := time.Now().Add(time.Second)
+	key := projectAgentKey(project.ID, "worker-a")
+	for {
+		a.mu.Lock()
+		waiting := len(a.agentRunFinishedWatchers[key]) > 0
+		a.mu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(watcherDeadline) {
+			t.Fatal("scheduled worker did not subscribe to active Run completion")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, finished := a.finishAgentRun(project.ID, "worker-a", active.ID, RunStateDone, nil); !finished {
+		t.Fatal("active Run did not finish")
+	}
+	select {
+	case <-executed:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled Run did not wake after the active Run finished")
+	}
+	quiescentDeadline := time.Now().Add(time.Second)
+	for a.agentRunActive(project.ID, "worker-a") || a.scheduledAgentRunCount(project.ID, "worker-a") > 0 || a.scheduledAgentWorkerActive(project.ID, "worker-a") {
+		if time.Now().After(quiescentDeadline) {
+			t.Fatal("scheduled worker did not become quiescent after wake")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestScheduledPlanAndDevBusyWaitRetainExecutionBudgetAndFinalReserve(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		turnType     string
+		total        time.Duration
+		tool         time.Duration
+		finalReserve time.Duration
+		busyWait     time.Duration
+	}{
+		{name: "plan", turnType: "plan", total: 600 * time.Millisecond, tool: 50 * time.Millisecond, finalReserve: 300 * time.Millisecond, busyWait: 400 * time.Millisecond},
+		{name: "dev", turnType: "dev", total: 700 * time.Millisecond, tool: 60 * time.Millisecond, finalReserve: 350 * time.Millisecond, busyWait: 470 * time.Millisecond},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prefix := "KAROZ_RESIDENT_" + strings.ToUpper(test.turnType) + "_"
+			t.Setenv(prefix+"TOTAL_TIMEOUT", test.total.String())
+			t.Setenv(prefix+"TOOL_TIMEOUT", test.tool.String())
+			t.Setenv(prefix+"FINAL_RESERVE", test.finalReserve.String())
+			budget := residentTurnBudgetFor(test.turnType)
+
+			a, project := newHandlerTestApp(t)
+			active, started := a.beginAgentRun(AgentRunInput{RunID: "busy-" + test.name, ProjectID: project.ID, AgentID: "worker-a", Trigger: RunTriggerUserDirect})
+			if !started {
+				t.Fatal("could not create busy Run")
+			}
+			kind := ScheduledRunKind("budget-after-wait-" + test.name)
+			type observation struct {
+				executionRemaining time.Duration
+				finalRemaining     time.Duration
+				err                error
+			}
+			observed := make(chan observation, 1)
+			a.schedulerExecutors[kind] = func(ctx context.Context, _ ScheduledRun) error {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					err := context.DeadlineExceeded
+					observed <- observation{err: err}
+					return err
+				}
+				wire := &budgetTestWire{finalRemaining: make(chan time.Duration, 1)}
+				err := invokeResidentToolLoop(ctx, wire, nil, AgentStreamCallbacks{}, budget, func(toolCtx context.Context, _ codexToolCall) (string, error) {
+					<-toolCtx.Done()
+					return "", toolCtx.Err()
+				})
+				result := observation{executionRemaining: time.Until(deadline), err: err}
+				select {
+				case result.finalRemaining = <-wire.finalRemaining:
+				default:
+				}
+				observed <- result
+				return err
+			}
+
+			job, err := newScheduledRun(kind, AgentRunInput{
+				RunID: "scheduled-" + test.name, ProjectID: project.ID, AgentID: "worker-a", Trigger: RunTriggerSystem, TurnType: test.turnType,
+			}, "budget-after-wait/"+test.name, map[string]string{"test": test.name}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job.MaxAttempts = 1
+			if got := time.Duration(job.TimeoutMS) * time.Millisecond; got != budget.TotalDuration {
+				t.Fatalf("scheduled %s execution timeout = %s, want selected budget %s", test.turnType, got, budget.TotalDuration)
+			}
+			if got := time.Duration(job.StartWaitMS) * time.Millisecond; got != defaultScheduledRunStartWait {
+				t.Fatalf("scheduled %s start wait = %s, want %s", test.turnType, got, defaultScheduledRunStartWait)
+			}
+			if _, scheduled := a.scheduleAgentRun(job); !scheduled {
+				t.Fatal("scheduled Run was not accepted")
+			}
+
+			key := projectAgentKey(project.ID, "worker-a")
+			waitDeadline := time.Now().Add(2 * time.Second)
+			for {
+				a.mu.Lock()
+				waiting := len(a.agentRunFinishedWatchers[key]) > 0
+				a.mu.Unlock()
+				if waiting {
+					break
+				}
+				if time.Now().After(waitDeadline) {
+					t.Fatal("scheduler did not subscribe to the busy Run")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			time.Sleep(test.busyWait)
+			if _, finished := a.finishAgentRun(project.ID, "worker-a", active.ID, RunStateDone, nil); !finished {
+				t.Fatal("could not finish busy Run")
+			}
+
+			select {
+			case result := <-observed:
+				if result.err != nil {
+					t.Fatalf("scheduled %s execution failed after busy wait: %v", test.turnType, result.err)
+				}
+				if wantMinimum := budget.TotalDuration - 100*time.Millisecond; result.executionRemaining < wantMinimum {
+					t.Fatalf("busy wait consumed scheduled %s execution budget: remaining=%s want at least %s", test.turnType, result.executionRemaining, wantMinimum)
+				}
+				if wantMinimum := budget.FinalResponseReserve - 50*time.Millisecond; result.finalRemaining < wantMinimum {
+					t.Fatalf("busy wait consumed scheduled %s final reserve: remaining=%s want at least %s", test.turnType, result.finalRemaining, wantMinimum)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatalf("scheduled %s Run did not execute after busy agent released", test.turnType)
+			}
+			// The observation is sent from Execute before SchedulerWorker finishes
+			// lifecycle persistence and runtime notifications. Keep this test's
+			// temporary app alive until that worker has fully drained so cleanup
+			// cannot race its durable writes.
+			quiescentDeadline := time.Now().Add(2 * time.Second)
+			for a.agentRunActive(project.ID, "worker-a") || a.scheduledAgentRunCount(project.ID, "worker-a") > 0 || a.scheduledAgentWorkerActive(project.ID, "worker-a") {
+				if time.Now().After(quiescentDeadline) {
+					t.Fatalf("scheduled %s worker did not drain after execution", test.turnType)
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+	}
+}
 
 func newSchedulerTestApp(dataDir string) *app {
 	return &app{
@@ -102,6 +271,39 @@ func TestScheduledRunRecoveryStopsAtMaxAttempts(t *testing.T) {
 	}
 	if queued := after.scheduledAgentRunCount("p1", "designer"); queued != 0 {
 		t.Fatalf("exhausted job was queued: %d", queued)
+	}
+}
+
+func TestLoadScheduledRunsUpgradesLegacyDefaultToSelectedExecutionBudget(t *testing.T) {
+	dataDir := t.TempDir()
+	now := time.Now().UTC()
+	jobs := []ScheduledRun{
+		{ID: "legacy-plan", ProjectID: "p1", AgentID: "designer", Kind: ScheduledRunKind("test"), Trigger: RunTriggerPlanEvent, TurnType: "plan", Status: ScheduledRunQueued, MaxAttempts: 1, TimeoutMS: (3 * time.Minute).Milliseconds(), CreatedAt: now, UpdatedAt: now},
+		{ID: "legacy-dev", ProjectID: "p1", AgentID: "builder", Kind: ScheduledRunKind("test"), Trigger: RunTriggerHandoff, TurnType: "dev", Status: ScheduledRunQueued, MaxAttempts: 1, TimeoutMS: (3 * time.Minute).Milliseconds(), CreatedAt: now.Add(time.Millisecond), UpdatedAt: now.Add(time.Millisecond)},
+	}
+	writeScheduledRunSnapshot(t, dataDir, jobs)
+
+	after := newSchedulerTestApp(dataDir)
+	if err := after.loadScheduledRuns(); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		id       string
+		turnType string
+	}{
+		{id: "legacy-plan", turnType: "plan"},
+		{id: "legacy-dev", turnType: "dev"},
+	} {
+		stored, found := after.schedulerQueue.Job(test.id)
+		if !found {
+			t.Fatalf("missing normalized legacy job %s", test.id)
+		}
+		if got, want := time.Duration(stored.TimeoutMS)*time.Millisecond, residentTurnBudgetFor(test.turnType).TotalDuration; got != want {
+			t.Fatalf("legacy %s execution timeout=%s, want selected budget %s", test.turnType, got, want)
+		}
+		if got := time.Duration(stored.StartWaitMS) * time.Millisecond; got != defaultScheduledRunStartWait {
+			t.Fatalf("legacy %s start wait=%s, want %s", test.turnType, got, defaultScheduledRunStartWait)
+		}
 	}
 }
 

@@ -252,6 +252,29 @@ func TestPeerRouteUsesNicknameAndDoesNotAuthorizeByIntent(t *testing.T) {
 	}
 }
 
+func TestPeerRouteDenialPreventsInboxDelivery(t *testing.T) {
+	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
+	a, project, source, target := newHandoffTestApp(t)
+	// Presence of an unrelated route turns the route set into an explicit
+	// acceptance boundary. The source/target edge below is intentionally absent.
+	a.agentRoutes[project.ID] = []AgentRoute{{
+		ID: "other-edge", ProjectID: project.ID, FromAgentID: target.ID, ToAgentID: source.ID,
+		Enabled: true,
+	}}
+	args, _ := json.Marshal(map[string]any{
+		"target_agent_id": target.Nickname,
+		"intent":          "handoff",
+		"body":            "This must not bypass the configured route graph.",
+	})
+	result, err := a.executeResidentTool(context.Background(), ResidentToolContext{Project: project, Agent: source, Workdir: project.Path}, codexToolCall{Name: "send_to", Arguments: string(args)})
+	if err != nil || !strings.Contains(result, "route_denied") {
+		t.Fatalf("unauthorized route result=%s err=%v", result, err)
+	}
+	if pending := a.pendingInboxFor(project.ID, target.ID, 10); len(pending) != 0 {
+		t.Fatalf("route-denied handoff was delivered: %+v", pending)
+	}
+}
+
 func TestCollaborationCorrelationMessageLimit(t *testing.T) {
 	a, project, source, target := newHandoffTestApp(t)
 	for i := 0; i < maxCollaborationMessagesPerCorrelation; i++ {

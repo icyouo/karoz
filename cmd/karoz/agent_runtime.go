@@ -42,7 +42,7 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 			if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateExecutingTool); !ok {
 				return
 			}
-			if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, runID, "tool_call", call.Name, call.Arguments); !ok {
+			if _, ok := a.appendAgentToolCallForRun(project.ID, agent.ID, runID, call); !ok {
 				return
 			}
 		}
@@ -53,7 +53,7 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 	outerToolResult := cb.OnToolResult
 	cb.OnToolResult = func(call codexToolCall, result string, success bool) {
 		if runID != "" {
-			if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, runID, "tool_result", call.Name, result); !ok {
+			if _, ok := a.appendAgentToolResultForRun(project.ID, agent.ID, runID, call, result, success); !ok {
 				return
 			}
 			if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateWaitingModel); !ok {

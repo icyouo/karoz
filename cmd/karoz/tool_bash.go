@@ -31,11 +31,36 @@ func (a *app) executeResidentBashTool(ctx context.Context, toolCtx ResidentToolC
 		return toolJSON(map[string]any{"error": "effect_barrier_failed", "message": err.Error()}), err
 	}
 
-	result := runResidentBashTool(ctx, toolCtx.Workdir, command, clampToolInt(args, "timeout_ms", 60000, 1, 300000), clampToolInt(args, "max_output", 20000, 1, 200000))
+	requestedTimeout := clampToolInt(args, "timeout_ms", 60000, 1, 300000)
+	// The provider loop gives tools only the remaining tool-phase context. Do
+	// not advertise or attempt a Bash timeout that outlives that context.
+	requestedTimeout = clampResidentBashTimeout(ctx, requestedTimeout)
+	result := runResidentBashTool(ctx, toolCtx.Workdir, command, requestedTimeout, clampToolInt(args, "max_output", 20000, 1, 200000))
 	if err := ctx.Err(); err != nil {
 		return toolJSON(result), err
 	}
 	return toolJSON(result), nil
+}
+
+func clampResidentBashTimeout(ctx context.Context, requestedMS int) int {
+	if requestedMS < 1 {
+		requestedMS = 1
+	}
+	if ctx == nil {
+		return requestedMS
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return requestedMS
+	}
+	remaining := time.Until(deadline).Milliseconds()
+	if remaining < 1 {
+		return 1
+	}
+	if remaining < int64(requestedMS) {
+		return int(remaining)
+	}
+	return requestedMS
 }
 
 func runResidentBashTool(parent context.Context, workdir, command string, timeoutMS, maxOutput int) BashToolResult {

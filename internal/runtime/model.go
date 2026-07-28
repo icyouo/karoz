@@ -127,27 +127,34 @@ const (
 )
 
 type ScheduledRun struct {
-	ID               string          `json:"id"`
-	ProjectID        string          `json:"project_id"`
-	AgentID          string          `json:"agent_id"`
-	Kind             ScheduledKind   `json:"kind"`
-	Trigger          Trigger         `json:"trigger"`
-	TurnType         string          `json:"turn_type,omitempty"`
-	SourceID         string          `json:"source_id,omitempty"`
-	MessageID        string          `json:"message_id,omitempty"`
-	DedupKey         string          `json:"dedup_key,omitempty"`
-	Payload          json.RawMessage `json:"payload,omitempty"`
-	Status           ScheduledStatus `json:"status"`
-	Attempt          int             `json:"attempt"`
-	MaxAttempts      int             `json:"max_attempts"`
-	TimeoutMS        int64           `json:"timeout_ms"`
-	Error            string          `json:"error,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
-	StartedAt        *time.Time      `json:"started_at,omitempty"`
-	LastFailedAt     *time.Time      `json:"last_failed_at,omitempty"`
-	EffectsStarted   bool            `json:"effects_started,omitempty"`
-	EffectsStartedAt *time.Time      `json:"effects_started_at,omitempty"`
+	ID          string          `json:"id"`
+	ProjectID   string          `json:"project_id"`
+	AgentID     string          `json:"agent_id"`
+	Kind        ScheduledKind   `json:"kind"`
+	Trigger     Trigger         `json:"trigger"`
+	TurnType    string          `json:"turn_type,omitempty"`
+	SourceID    string          `json:"source_id,omitempty"`
+	MessageID   string          `json:"message_id,omitempty"`
+	DedupKey    string          `json:"dedup_key,omitempty"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
+	Status      ScheduledStatus `json:"status"`
+	Attempt     int             `json:"attempt"`
+	MaxAttempts int             `json:"max_attempts"`
+	// TimeoutMS is the execution deadline, measured from when the scheduler
+	// acquires the agent and begins this Run. Keep the JSON name compatible
+	// with pre-split scheduled-run snapshots.
+	TimeoutMS int64 `json:"timeout_ms"`
+	// StartWaitMS independently bounds the time spent waiting for a busy agent
+	// before Begin succeeds. Zero means the worker's bounded default for
+	// legacy snapshots.
+	StartWaitMS      int64      `json:"start_wait_ms,omitempty"`
+	Error            string     `json:"error,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	LastFailedAt     *time.Time `json:"last_failed_at,omitempty"`
+	EffectsStarted   bool       `json:"effects_started,omitempty"`
+	EffectsStartedAt *time.Time `json:"effects_started_at,omitempty"`
 }
 
 func (job ScheduledRun) Timeout(defaultTimeout time.Duration) time.Duration {
@@ -155,6 +162,13 @@ func (job ScheduledRun) Timeout(defaultTimeout time.Duration) time.Duration {
 		return defaultTimeout
 	}
 	return time.Duration(job.TimeoutMS) * time.Millisecond
+}
+
+func (job ScheduledRun) StartWait(defaultTimeout time.Duration) time.Duration {
+	if job.StartWaitMS <= 0 {
+		return defaultTimeout
+	}
+	return time.Duration(job.StartWaitMS) * time.Millisecond
 }
 
 func (job ScheduledRun) RunInput() RunInput {
