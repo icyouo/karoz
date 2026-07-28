@@ -108,6 +108,40 @@ func TestCodexCompletedOutputItemsPreserveSSEOrder(t *testing.T) {
 	}
 }
 
+func TestCompactCodexFinalInputKeepsReasoningCallOutputAtomicAtBoundary(t *testing.T) {
+	input := []map[string]any{
+		codexMessage("user", "initial"),
+		{"type": "reasoning", "id": "reasoning-boundary", "encrypted_content": strings.Repeat("r", 1200)},
+		{"type": "function_call", "id": "provider-call", "call_id": "boundary-call", "name": "repo_read", "arguments": `{}`},
+		{"type": "function_call_output", "call_id": "boundary-call", "output": strings.Repeat("o", 1200)},
+		codexMessage("user", "finalize now"),
+	}
+	compacted := compactCodexInputForFinal(input, 800)
+	raw, err := json.Marshal(compacted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"reasoning-boundary", "boundary-call", "provider-call"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("final compaction orphaned part of an oversized native group: %s", raw)
+		}
+	}
+	if !strings.Contains(string(raw), "omitted atomically") || !strings.Contains(string(raw), "finalize now") {
+		t.Fatalf("safe summary or final instruction missing: %s", raw)
+	}
+
+	kept := compactCodexInputForFinal(input, 6000)
+	keptRaw, err := json.Marshal(kept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"reasoning-boundary", "boundary-call", "provider-call", "finalize now"} {
+		if !strings.Contains(string(keptRaw), required) {
+			t.Fatalf("complete native group was not retained with sufficient budget: %s", keptRaw)
+		}
+	}
+}
+
 func TestProviderWiresUseNativeToolPairsAndTextFallback(t *testing.T) {
 	success := true
 	items := []AgentTranscriptItem{

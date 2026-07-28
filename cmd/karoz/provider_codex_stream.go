@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -252,20 +253,141 @@ func compactCodexInputForFinal(input []map[string]any, maxChars int) []map[strin
 	if len(input) <= 2 || maxChars <= 0 {
 		return input
 	}
-	keptReversed := make([]map[string]any, 0, len(input))
-	used := 0
-	for i := len(input) - 1; i >= 1; i-- {
+	parent := make([]int, len(input))
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(index int) int {
+		if parent[index] != index {
+			parent[index] = find(parent[index])
+		}
+		return parent[index]
+	}
+	union := func(left, right int) {
+		left, right = find(left), find(right)
+		if left != right {
+			parent[right] = left
+		}
+	}
+	callIndexes := map[string][]int{}
+	outputIndexes := map[string][]int{}
+	for i := 1; i < len(input); i++ {
+		itemType, _ := input[i]["type"].(string)
+		callID, _ := input[i]["call_id"].(string)
+		switch itemType {
+		case "function_call", "tool_call":
+			callIndexes[callID] = append(callIndexes[callID], i)
+		case "function_call_output":
+			outputIndexes[callID] = append(outputIndexes[callID], i)
+		}
+	}
+	invalid := map[int]bool{}
+	for callID, calls := range callIndexes {
+		outputs := outputIndexes[callID]
+		if strings.TrimSpace(callID) == "" || len(calls) != 1 || len(outputs) != 1 || calls[0] >= outputs[0] {
+			for _, index := range append(append([]int{}, calls...), outputs...) {
+				invalid[index] = true
+			}
+			continue
+		}
+		union(calls[0], outputs[0])
+	}
+	for callID, outputs := range outputIndexes {
+		if _, ok := callIndexes[callID]; !ok {
+			for _, index := range outputs {
+				invalid[index] = true
+			}
+		}
+	}
+	// A completed response batch may contain reasoning, assistant text, and
+	// multiple calls before their outputs. Keep the whole batch connected so
+	// tail compaction cannot retain a result while dropping its predecessor.
+	for i := 1; i < len(input); {
+		itemType, _ := input[i]["type"].(string)
+		if itemType != "reasoning" && itemType != "function_call" && itemType != "tool_call" {
+			i++
+			continue
+		}
+		group := []int{i}
+		j := i + 1
+		seenOutput := false
+		for ; j < len(input); j++ {
+			nextType, _ := input[j]["type"].(string)
+			role, _ := input[j]["role"].(string)
+			if nextType == "reasoning" || nextType == "message" && (role == "user" || role == "developer") {
+				break
+			}
+			if seenOutput && (nextType == "function_call" || nextType == "tool_call") {
+				break
+			}
+			if nextType == "message" || nextType == "function_call" || nextType == "tool_call" || nextType == "function_call_output" {
+				group = append(group, j)
+			}
+			if nextType == "function_call_output" {
+				seenOutput = true
+			}
+		}
+		for _, index := range group[1:] {
+			union(group[0], index)
+		}
+		i = j
+	}
+	type compactGroup struct {
+		indexes []int
+		cost    int
+		max     int
+		invalid bool
+	}
+	groupsByRoot := map[int]*compactGroup{}
+	for i := 1; i < len(input); i++ {
+		root := find(i)
+		group := groupsByRoot[root]
+		if group == nil {
+			group = &compactGroup{max: i}
+			groupsByRoot[root] = group
+		}
 		raw, _ := json.Marshal(input[i])
-		if len(keptReversed) > 0 && used+len(raw) > maxChars {
+		group.indexes = append(group.indexes, i)
+		group.cost += len(raw)
+		group.max = i
+		group.invalid = group.invalid || invalid[i]
+	}
+	groups := make([]*compactGroup, 0, len(groupsByRoot))
+	for _, group := range groupsByRoot {
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].max > groups[j].max })
+	selected := make([]bool, len(input))
+	used := 0
+	omitted := false
+	for _, group := range groups {
+		if group.invalid {
+			omitted = true
+			continue
+		}
+		if used > 0 && used+group.cost > maxChars {
+			omitted = true
 			break
 		}
-		keptReversed = append(keptReversed, input[i])
-		used += len(raw)
+		if group.cost > maxChars {
+			omitted = true
+			break
+		}
+		for _, index := range group.indexes {
+			selected[index] = true
+		}
+		used += group.cost
 	}
-	out := make([]map[string]any, 0, len(keptReversed)+1)
+	out := make([]map[string]any, 0, len(input))
 	out = append(out, input[0])
-	for i := len(keptReversed) - 1; i >= 0; i-- {
-		out = append(out, keptReversed[i])
+	if omitted {
+		out = append(out, codexMessage("user", "[Earlier provider reasoning and tool evidence was omitted atomically to fit the final response context.]"))
+	}
+	for i := 1; i < len(input); i++ {
+		if selected[i] {
+			out = append(out, input[i])
+		}
 	}
 	return out
 }
