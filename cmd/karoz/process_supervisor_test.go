@@ -237,6 +237,59 @@ func TestProcessSupervisorTrueOneWriteAndLongRun(t *testing.T) {
 	}
 }
 
+func TestProcessSupervisorInstantExitReturnsRecoveredTerminalSnapshot(t *testing.T) {
+	exitObserved := make(chan struct{})
+	releaseFinalize := make(chan struct{})
+	var observedOnce sync.Once
+	store := newMemoryProcessStore()
+	supervisor := testSupervisor(
+		t,
+		store,
+		newMemoryReservationBoundary(),
+		&synchronizedBuffer{},
+		processSupervisorConfig{
+			BeforeFinalize: func() {
+				observedOnce.Do(func() { close(exitObserved) })
+				<-releaseFinalize
+			},
+			Fail: func(point processFailpoint) error {
+				if point == processFailRegistration {
+					<-exitObserved
+				}
+				return nil
+			},
+		},
+	)
+	result := make(chan processdomain.Process, 1)
+	startErr := make(chan error, 1)
+	workdir := t.TempDir()
+	go func() {
+		record, err := supervisor.Start(
+			context.Background(),
+			startRequest("instant-terminal", "exit 7", workdir),
+		)
+		result <- record
+		startErr <- err
+	}()
+	select {
+	case record := <-result:
+		t.Fatalf("Start returned before finalization was released: %+v", record)
+	case <-exitObserved:
+	}
+	close(releaseFinalize)
+	record := <-result
+	if err := <-startErr; err != nil {
+		t.Fatalf("instant exit recovery = %v", err)
+	}
+	if record.State != processdomain.StateFailed || record.ExitCode != 7 || record.EndedAt == nil {
+		t.Fatalf("Start returned stale instant-exit snapshot: %+v", record)
+	}
+	persisted := store.get(record.ID)
+	if persisted.State != record.State || persisted.ExitCode != record.ExitCode {
+		t.Fatalf("returned snapshot=%+v persisted=%+v", record, persisted)
+	}
+}
+
 func TestProcessSupervisorStreamOrdering(t *testing.T) {
 	store := newMemoryProcessStore()
 	supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{})

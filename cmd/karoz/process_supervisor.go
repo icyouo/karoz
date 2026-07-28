@@ -69,6 +69,7 @@ type processSupervisorConfig struct {
 	BoundaryFactory func(*exec.Cmd) (processBoundary, error)
 	ProcessKill     func(*os.Process) error
 	ProcessWait     func(*exec.Cmd) error
+	BeforeFinalize  func()
 }
 
 type processStartRequest struct {
@@ -343,7 +344,8 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 	case <-handle.exitObserved:
 		ctx, cancel := context.WithTimeout(context.Background(), 2*supervisor.config.StopGrace)
 		defer cancel()
-		return handle.snapshot(), supervisor.recoverExited(ctx, handle)
+		err := supervisor.recoverExited(ctx, handle)
+		return handle.snapshot(), err
 	default:
 		return handle.snapshot(), nil
 	}
@@ -532,6 +534,9 @@ func (supervisor *processSupervisor) armWaiter(handle *supervisedProcess) {
 		handle.waitErr = waitErr
 		handle.stateMu.Unlock()
 		close(handle.exitObserved)
+		if supervisor.config.BeforeFinalize != nil {
+			supervisor.config.BeforeFinalize()
+		}
 		supervisor.waitForCollectors(handle)
 		<-handle.gate
 		handle.stateMu.Lock()
