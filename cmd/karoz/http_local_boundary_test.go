@@ -32,11 +32,18 @@ func TestDockerComposeStartupListenContract(t *testing.T) {
 	for _, required := range []string{
 		`- "127.0.0.1:${KAROZ_PORT:-8088}:8088"`,
 		`KAROZ_ADDR: ":8088"`,
-		`KAROZ_CONTAINER: "1"`,
+		`KAROZ_ALLOW_NON_LOOPBACK_LISTEN: "1"`,
 	} {
 		if !strings.Contains(config, required) {
 			t.Fatalf("docker-compose.yml is missing startup contract %q", required)
 		}
+	}
+	dockerfile, err := os.ReadFile("../../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(dockerfile), "KAROZ_ALLOW_NON_LOOPBACK_LISTEN") {
+		t.Fatal("Dockerfile must not enable the Compose-only non-loopback listen exception")
 	}
 	if err := validateStudioListenAddr(":8088", true); err != nil {
 		t.Fatalf("compose container address rejected at startup: %v", err)

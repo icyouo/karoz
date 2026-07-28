@@ -18,11 +18,11 @@ func main() {
 		return
 	}
 	addr := getenv("KAROZ_ADDR", "127.0.0.1:8088")
-	containerMode := envFlagEnabled("KAROZ_CONTAINER")
+	allowNonLoopbackListen := envFlagEnabled("KAROZ_ALLOW_NON_LOOPBACK_LISTEN")
 	// Validate before opening persistence files, recovering tasks, or making
 	// project directories. A rejected network binding must be a true failed
 	// startup, not a partially initialized Studio.
-	if err := validateStudioListenAddr(addr, containerMode); err != nil {
+	if err := validateStudioListenAddr(addr, allowNonLoopbackListen); err != nil {
 		log.Fatalf("invalid KAROZ_ADDR: %v", err)
 	}
 	projectsRootFromEnv := strings.TrimSpace(os.Getenv("KAROZ_PROJECTS_ROOT")) != ""
@@ -74,10 +74,10 @@ func envFlagEnabled(name string) bool {
 
 // validateStudioListenAddr keeps a host-run unauthenticated Studio private to
 // the local machine. Containers must listen on their network interface for a
-// loopback-only published port to reach them, so KAROZ_CONTAINER explicitly
-// permits only wildcard addresses; concrete non-loopback addresses stay
-// rejected in every mode.
-func validateStudioListenAddr(addr string, containerMode bool) error {
+// loopback-only published port to reach them, so Compose explicitly permits
+// only wildcard addresses; concrete non-loopback addresses stay rejected even
+// when the exception is enabled.
+func validateStudioListenAddr(addr string, allowNonLoopbackListen bool) error {
 	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
 	if err != nil {
 		return fmt.Errorf("invalid listen address %q: %w", addr, err)
@@ -89,7 +89,7 @@ func validateStudioListenAddr(addr string, containerMode bool) error {
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return nil
 	}
-	if containerMode {
+	if allowNonLoopbackListen {
 		if host == "" {
 			return nil
 		}
@@ -98,7 +98,7 @@ func validateStudioListenAddr(addr string, containerMode bool) error {
 		}
 	}
 	if host == "" || (net.ParseIP(host) != nil && net.ParseIP(host).IsUnspecified()) {
-		return fmt.Errorf("%q is a wildcard address; set KAROZ_CONTAINER=1 only inside a container with a loopback-only published port", addr)
+		return fmt.Errorf("%q is a wildcard address; set KAROZ_ALLOW_NON_LOOPBACK_LISTEN=1 only with an explicitly loopback-published container port", addr)
 	}
 	return fmt.Errorf("%q is not localhost or a loopback IP", addr)
 }
