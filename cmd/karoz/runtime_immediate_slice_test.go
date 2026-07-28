@@ -373,8 +373,8 @@ func TestInterruptAfterCompletedToolDiscardsProviderGroupForBothWires(t *testing
 				bytes.Contains(raw, []byte("function_call_output")) || bytes.Contains(raw, []byte("tool_result")) {
 				t.Fatalf("interrupted provider tool group survived or executed: executed=%d history=%s", executed, raw)
 			}
-			if strings.Count(string(raw), "partial assistant text") != 1 || !strings.Contains(string(raw), "change direction") {
-				t.Fatalf("interrupted turn was not normalized exactly once: %s", raw)
+			if strings.Contains(string(raw), "partial assistant text") || strings.Count(string(raw), "change direction") != 1 {
+				t.Fatalf("interrupted provider round was not discarded before the user interrupt: %s", raw)
 			}
 		})
 	}

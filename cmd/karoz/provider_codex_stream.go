@@ -208,10 +208,7 @@ func (w *codexStreamWire) appendAssistantTurn(streamed residentStepOutput) {
 	}
 }
 
-func (w *codexStreamWire) appendInterruptTurn(streamed residentStepOutput, interrupts []AgentInterrupt) {
-	if strings.TrimSpace(streamed.Text) != "" {
-		w.input = append(w.input, codexMessage("assistant", streamed.Text))
-	}
+func (w *codexStreamWire) appendInterruptTurn(_ residentStepOutput, interrupts []AgentInterrupt) {
 	w.input = append(w.input, codexMessage("user", renderAgentInterruptsForModel(interrupts)))
 }
 
