@@ -45,6 +45,9 @@ const (
 	processPersistAfterJournalInitialize   processPersistenceFailpoint = "after_journal_initialize"
 	processPersistAfterAuthorityInitialize processPersistenceFailpoint = "after_authority_initialize"
 	processPersistAfterIndexReady          processPersistenceFailpoint = "after_index_ready"
+	processPersistAfterImportWorkspace     processPersistenceFailpoint = "after_import_workspace"
+	processPersistAfterImportAliases       processPersistenceFailpoint = "after_import_aliases"
+	processPersistAfterImportSettings      processPersistenceFailpoint = "after_import_settings"
 	processPersistAfterIntent              processPersistenceFailpoint = "after_intent"
 	processPersistAfterTokenSelection      processPersistenceFailpoint = "after_token_selection"
 	processPersistAfterLedgerAllocate      processPersistenceFailpoint = "after_ledger_allocate"
@@ -278,8 +281,32 @@ func (runtime *processRuntimePersistence) bootstrap(
 	for _, identity := range identities {
 		identityKeys[identity.SafeProjectKey] = true
 	}
-	for key := range index.Projects {
+	indexNeedsSave := !indexFound
+	for key, entry := range index.Projects {
 		if !identityKeys[key] {
+			if entry.State == "initializing" {
+				_, authorityExists := authority.Projects[key]
+				dir := filepath.Join("project-runtime", key)
+				var ledger monitordomain.TerminalReservationLedger
+				ledgerFound, ledgerErr := runtime.store.loadJSON(
+					filepath.Join(dir, "terminal-reservations.json"), &ledger,
+				)
+				if ledgerErr != nil {
+					return ledgerErr
+				}
+				var journal runtimeMutationSnapshot
+				journalFound, journalErr := runtime.store.loadJSON(
+					filepath.Join(dir, "runtime-mutations.json"), &journal,
+				)
+				if journalErr != nil {
+					return journalErr
+				}
+				if !authorityExists && !ledgerFound && !journalFound {
+					delete(index.Projects, key)
+					indexNeedsSave = true
+					continue
+				}
+			}
 			return errors.New("runtime index references a missing canonical project")
 		}
 	}
@@ -316,7 +343,6 @@ func (runtime *processRuntimePersistence) bootstrap(
 			invalidAuthority[key] = err
 		}
 	}
-	indexNeedsSave := !indexFound
 	establishedKeys := make(map[string]bool, len(index.Projects))
 	for key := range index.Projects {
 		establishedKeys[key] = true
@@ -682,6 +708,7 @@ func validateRuntimeMutationSnapshot(
 			}
 		case "process_terminal_release":
 			if operation.ID != "process/"+operation.EntityID+"/release" ||
+				operation.ReservationToken == "" ||
 				(operation.State != "release_intent" &&
 					operation.State != "release_marked" &&
 					operation.State != "authority_detached") {

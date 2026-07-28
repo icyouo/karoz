@@ -82,10 +82,18 @@ func (a *app) registerProcessRuntimeProject(project Project) error {
 
 func (a *app) registerProcessRuntimeProjectPrepared(
 	project Project,
-	prepare func() error,
+	prepare func() (bool, error),
 ) error {
 	if a.processRuntime == nil {
-		return prepare()
+		_, err := prepare()
+		return err
 	}
 	return a.processRuntime.RegisterProjectPrepared(project, prepare)
+}
+
+func (a *app) processRuntimePersistenceFail(point processPersistenceFailpoint) error {
+	if a.processRuntime == nil {
+		return nil
+	}
+	return a.processRuntime.persistenceFail(point)
 }

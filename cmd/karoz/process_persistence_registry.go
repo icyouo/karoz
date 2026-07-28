@@ -18,7 +18,7 @@ func (runtime *processRuntimePersistence) RegisterProject(project Project) error
 // committed. A rejected identity therefore cannot mutate application config.
 func (runtime *processRuntimePersistence) RegisterProjectPrepared(
 	project Project,
-	prepare func() error,
+	prepare func() (bool, error),
 ) error {
 	identities, err := resolveRuntimeProjectIdentities(runtime.store.root, []Project{project})
 	if err != nil {
@@ -37,25 +37,9 @@ func (runtime *processRuntimePersistence) RegisterProjectPrepared(
 	if alreadyRegistered {
 		runtime.indexMu.Unlock()
 		if prepare != nil {
-			return prepare()
-		}
-		return nil
-	}
-	runtime.indexMu.Unlock()
-	if prepare != nil {
-		if err := prepare(); err != nil {
+			_, err := prepare()
 			return err
 		}
-	}
-
-	runtime.indexMu.Lock()
-	alreadyRegistered, candidate, err = runtime.validateProjectRegistrationLocked(identity)
-	if err != nil {
-		runtime.indexMu.Unlock()
-		return err
-	}
-	if alreadyRegistered {
-		runtime.indexMu.Unlock()
 		return nil
 	}
 	entry := candidate.Projects[identity.SafeProjectKey]
@@ -69,6 +53,19 @@ func (runtime *processRuntimePersistence) RegisterProjectPrepared(
 	runtime.indexMu.Unlock()
 	if err := runtime.persistenceFail(processPersistAfterIndexInitializing); err != nil {
 		return err
+	}
+	if prepare != nil {
+		committed, err := prepare()
+		if err != nil {
+			var injected *processPersistenceInjectedFailure
+			if committed || errors.As(err, &injected) {
+				return err
+			}
+			if abortErr := runtime.abortProjectRegistrationClaim(identity, entry.Generation); abortErr != nil {
+				return errors.Join(err, abortErr)
+			}
+			return err
+		}
 	}
 
 	runtime.authorityMu.Lock()
@@ -157,6 +154,34 @@ func (runtime *processRuntimePersistence) validateProjectRegistrationLocked(
 		return false, runtimeProjectIndex{}, err
 	}
 	return false, candidate, nil
+}
+
+func (runtime *processRuntimePersistence) abortProjectRegistrationClaim(
+	identity monitordomain.RuntimeProjectIdentity,
+	generation uint64,
+) error {
+	runtime.indexMu.Lock()
+	defer runtime.indexMu.Unlock()
+	entry, exists := runtime.index.Projects[identity.SafeProjectKey]
+	if !exists {
+		return nil
+	}
+	if entry.Project != identity || entry.State != "initializing" ||
+		entry.Generation != generation {
+		return errors.New("runtime project registration claim changed before abort")
+	}
+	candidate := cloneRuntimeProjectIndex(runtime.index)
+	delete(candidate.Projects, identity.SafeProjectKey)
+	if err := validateRuntimeProjectIndex(candidate); err != nil {
+		return err
+	}
+	if err := runtime.store.saveJSON(
+		filepath.Join("project-runtime", "index.json"), candidate,
+	); err != nil {
+		return err
+	}
+	runtime.index = candidate
+	return nil
 }
 
 func cloneRuntimeProjectIndex(index runtimeProjectIndex) runtimeProjectIndex {

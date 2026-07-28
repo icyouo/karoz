@@ -66,22 +66,15 @@ func (runtime *processRuntimePersistence) recoverAdmissionLocked(
 		authority.Reservation.Token != operation.ReservationToken) {
 		return errors.New("process admission operation/authority token mismatch")
 	}
+	if err := validateAdmissionRecoveryState(
+		project.identity, operation, ledgerReservation, ledgerExists,
+		authority, authorityExists,
+	); err != nil {
+		return err
+	}
 	if !authorityExists {
 		if !ledgerExists {
-			switch operation.State {
-			case "intent", "token_selected", "allocated":
-			default:
-				return errors.New("committed admission operation lost authority and ledger state")
-			}
 			return runtime.deleteOperation(project, operation.ID)
-		}
-		switch operation.State {
-		case "token_selected", "allocated":
-		default:
-			return errors.New("post-authority admission operation lost its authority record")
-		}
-		if ledgerReservation.State != monitordomain.ReservationAllocating {
-			return errors.New("active ledger reservation has no process authority record")
 		}
 		project.ledgerMu.Lock()
 		next, err := project.ledger.RollbackAllocation(project.identity, ledgerReservation)
@@ -148,6 +141,88 @@ func (runtime *processRuntimePersistence) recoverAdmissionLocked(
 		}
 	}
 	return nil
+}
+
+func validateAdmissionRecoveryState(
+	project monitordomain.RuntimeProjectIdentity,
+	operation monitordomain.RuntimeMutationOperation,
+	ledger monitordomain.TerminalReservation,
+	ledgerExists bool,
+	authority durableProcessRecord,
+	authorityExists bool,
+) error {
+	if !authorityExists {
+		switch operation.State {
+		case "intent":
+			if ledgerExists || operation.ReservationToken != "" {
+				return errors.New("admission intent has premature durable state")
+			}
+		case "token_selected":
+			if ledgerExists && ledger.State != monitordomain.ReservationAllocating {
+				return errors.New("token-selected admission has invalid ledger state")
+			}
+		case "allocated":
+			if !ledgerExists || ledger.State != monitordomain.ReservationAllocating {
+				return errors.New("allocated admission lost its allocating ledger state")
+			}
+		default:
+			return errors.New("post-authority admission operation lost its authority record")
+		}
+		return nil
+	}
+	if authority.Reservation == nil || !ledgerExists ||
+		!sameReservationBinding(project, *authority.Reservation, ledger) {
+		return errors.New("process admission ledger/authority binding mismatch")
+	}
+	authorityState := authority.Reservation.State
+	ledgerState := ledger.State
+	switch operation.State {
+	case "allocated":
+		if ledgerState != monitordomain.ReservationAllocating ||
+			authorityState != monitordomain.ReservationAllocating {
+			return errors.New("allocated admission has invalid authority/ledger state")
+		}
+	case "authority_saved":
+		if authorityState != monitordomain.ReservationAllocating ||
+			(ledgerState != monitordomain.ReservationAllocating &&
+				ledgerState != monitordomain.ReservationActive) {
+			return errors.New("authority-saved admission has invalid authority/ledger state")
+		}
+	case "active":
+		if ledgerState != monitordomain.ReservationActive ||
+			(authorityState != monitordomain.ReservationAllocating &&
+				authorityState != monitordomain.ReservationActive) {
+			return errors.New("active admission has invalid authority/ledger state")
+		}
+	case "committed":
+		if authority.Process.State.Terminal() {
+			if authorityState != monitordomain.ReservationTerminalUnacknowledged ||
+				(ledgerState != monitordomain.ReservationActive &&
+					ledgerState != monitordomain.ReservationTerminalUnacknowledged) {
+				return errors.New("committed terminal admission has invalid reservation state")
+			}
+		} else if authorityState != monitordomain.ReservationActive ||
+			ledgerState != monitordomain.ReservationActive {
+			return errors.New("committed active admission has invalid reservation state")
+		}
+	default:
+		return errors.New("pre-authority admission operation has an authority record")
+	}
+	return nil
+}
+
+func sameReservationBinding(
+	project monitordomain.RuntimeProjectIdentity,
+	left, right monitordomain.TerminalReservation,
+) bool {
+	if err := monitordomain.ValidateTerminalReservation(project, left); err != nil {
+		return false
+	}
+	if err := monitordomain.ValidateTerminalReservation(project, right); err != nil {
+		return false
+	}
+	left.State = right.State
+	return left == right
 }
 
 func (runtime *processRuntimePersistence) validateProjectBijection(
@@ -300,12 +375,17 @@ func (runtime *processRuntimePersistence) releaseTerminalLocked(
 	if err != nil || alreadyReleased {
 		return err
 	}
+	reservation, err := runtime.authorityReservation(project.identity, processID)
+	if err != nil {
+		return err
+	}
 	operationID := "process/" + processID + "/release"
 	operation, exists := project.journal.Operations[operationID]
 	if !exists {
 		operation = monitordomain.RuntimeMutationOperation{
 			ID: operationID, Project: project.identity, Kind: "process_terminal_release",
 			State: "release_intent", AuthorityID: processAuthorityID, EntityID: processID,
+			ReservationToken: reservation.Token,
 		}
 		if err := runtime.putOperation(project, operation); err != nil {
 			return err
@@ -313,6 +393,8 @@ func (runtime *processRuntimePersistence) releaseTerminalLocked(
 		if err := runtime.persistenceFail(processPersistAfterReleaseIntent); err != nil {
 			return err
 		}
+	} else if operation.ReservationToken != reservation.Token {
+		return errors.New("terminal release operation reservation token mismatch")
 	}
 	if err := runtime.markAuthorityAcknowledged(project.identity, processID, eventID); err != nil {
 		return err
@@ -327,7 +409,7 @@ func (runtime *processRuntimePersistence) releaseTerminalLocked(
 	if err := runtime.persistenceFail(processPersistAfterReleaseOperation); err != nil {
 		return err
 	}
-	reservation, err := runtime.authorityReservation(project.identity, processID)
+	reservation, err = runtime.authorityReservation(project.identity, processID)
 	if err != nil {
 		return err
 	}
@@ -386,6 +468,7 @@ func (runtime *processRuntimePersistence) validateTerminalAcknowledgement(
 	}
 	if record.Event != nil {
 		if record.Event.ID != eventID || record.Reservation == nil ||
+			validateProcessTerminalEvent(identity, record) != nil ||
 			record.Reservation.State != monitordomain.ReservationTerminalUnacknowledged {
 			return false, errors.New("terminal event acknowledgement comparison failed")
 		}
@@ -408,7 +491,22 @@ func (runtime *processRuntimePersistence) recoverReleaseLocked(
 	if !recordExists {
 		return errors.New("terminal release operation lost its process record")
 	}
+	project.ledgerMu.Lock()
+	ledgerReservation, ledgerExists := reservationByToken(
+		project.ledger, operation.ReservationToken,
+	)
+	project.ledgerMu.Unlock()
+	if err := validateReleaseRecoveryState(
+		project.identity, operation, record, ledgerReservation, ledgerExists,
+	); err != nil {
+		return err
+	}
 	if record.Event != nil {
+		if record.Reservation == nil ||
+			record.Reservation.Token != operation.ReservationToken ||
+			record.Event.Reservation.Token != operation.ReservationToken {
+			return errors.New("terminal release event/token binding mismatch")
+		}
 		if err := runtime.markAuthorityAcknowledged(
 			project.identity, operation.EntityID, record.Event.ID,
 		); err != nil {
@@ -417,14 +515,21 @@ func (runtime *processRuntimePersistence) recoverReleaseLocked(
 	}
 	if record.Reservation != nil {
 		reservation := *record.Reservation
+		if reservation.Token != operation.ReservationToken {
+			return errors.New("terminal release authority token mismatch")
+		}
 		if reservation.State == monitordomain.ReservationTerminalUnacknowledged {
-			next, err := runtime.transitionLedger(
-				project, reservation, monitordomain.ReservationReleasing,
-			)
-			if err != nil {
-				return err
+			if ledgerReservation.State == monitordomain.ReservationReleasing {
+				reservation = ledgerReservation
+			} else {
+				next, err := runtime.transitionLedger(
+					project, reservation, monitordomain.ReservationReleasing,
+				)
+				if err != nil {
+					return err
+				}
+				reservation = next
 			}
-			reservation = next
 			if err := runtime.updateAuthorityReservation(
 				project.identity, operation.EntityID, reservation,
 			); err != nil {
@@ -441,9 +546,13 @@ func (runtime *processRuntimePersistence) recoverReleaseLocked(
 		}
 	} else {
 		project.ledgerMu.Lock()
-		reservation, exists := reservationByEntity(project.ledger, processAuthorityID, operation.EntityID)
+		reservation, exists := reservationByToken(project.ledger, operation.ReservationToken)
 		project.ledgerMu.Unlock()
 		if exists {
+			if reservation.AuthorityID != processAuthorityID ||
+				reservation.EntityID != operation.EntityID {
+				return errors.New("terminal release ledger binding mismatch")
+			}
 			if reservation.State == monitordomain.ReservationTerminalUnacknowledged {
 				next, err := runtime.transitionLedger(
 					project, reservation, monitordomain.ReservationReleasing,
@@ -467,6 +576,72 @@ func (runtime *processRuntimePersistence) recoverReleaseLocked(
 	return runtime.deleteOperation(project, operation.ID)
 }
 
+func validateReleaseRecoveryState(
+	project monitordomain.RuntimeProjectIdentity,
+	operation monitordomain.RuntimeMutationOperation,
+	record durableProcessRecord,
+	ledger monitordomain.TerminalReservation,
+	ledgerExists bool,
+) error {
+	eventID := processTerminalEventID(operation.EntityID)
+	if !record.Process.State.Terminal() || operation.ReservationToken == "" {
+		return errors.New("terminal release operation has invalid terminal identity")
+	}
+	if record.Event == nil && record.AcknowledgedEventID != eventID {
+		return errors.New("terminal release operation lost its exact acknowledgement")
+	}
+	if record.Reservation != nil {
+		if record.Reservation.Token != operation.ReservationToken {
+			return errors.New("terminal release authority token mismatch")
+		}
+		if !ledgerExists ||
+			!sameReservationBinding(project, *record.Reservation, ledger) {
+			return errors.New("terminal release authority/ledger binding mismatch")
+		}
+	} else if ledgerExists {
+		if ledger.Token != operation.ReservationToken ||
+			ledger.AuthorityID != processAuthorityID ||
+			ledger.EntityID != operation.EntityID {
+			return errors.New("terminal release detached ledger binding mismatch")
+		}
+	}
+	switch operation.State {
+	case "release_intent":
+		if record.Reservation == nil || !ledgerExists ||
+			record.Reservation.State != monitordomain.ReservationTerminalUnacknowledged ||
+			ledger.State != monitordomain.ReservationTerminalUnacknowledged {
+			return errors.New("release intent has invalid reservation state")
+		}
+	case "release_marked":
+		if record.Event != nil || !ledgerExists {
+			return errors.New("release-marked operation has invalid authority state")
+		}
+		if record.Reservation == nil {
+			if ledger.State != monitordomain.ReservationReleasing {
+				return errors.New("release-marked detached authority has invalid ledger state")
+			}
+			break
+		}
+		if record.Reservation.State == monitordomain.ReservationTerminalUnacknowledged {
+			if ledger.State != monitordomain.ReservationTerminalUnacknowledged &&
+				ledger.State != monitordomain.ReservationReleasing {
+				return errors.New("release-marked operation has invalid ledger state")
+			}
+		} else if record.Reservation.State != monitordomain.ReservationReleasing ||
+			ledger.State != monitordomain.ReservationReleasing {
+			return errors.New("release-marked operation has invalid reservation state")
+		}
+	case "authority_detached":
+		if record.Event != nil || record.Reservation != nil ||
+			(ledgerExists && ledger.State != monitordomain.ReservationReleasing) {
+			return errors.New("authority-detached release has invalid durable state")
+		}
+	default:
+		return errors.New("invalid terminal release recovery state")
+	}
+	return nil
+}
+
 func (runtime *processRuntimePersistence) markAuthorityAcknowledged(
 	identity monitordomain.RuntimeProjectIdentity,
 	processID, eventID string,
@@ -486,6 +661,9 @@ func (runtime *processRuntimePersistence) markAuthorityAcknowledged(
 	}
 	if record.Event.ID != eventID || record.Reservation == nil {
 		return errors.New("terminal event acknowledgement comparison failed")
+	}
+	if err := validateProcessTerminalEvent(identity, record); err != nil {
+		return err
 	}
 	record.Event = nil
 	record.AcknowledgedEventID = eventID
@@ -560,6 +738,18 @@ func reservationByEntity(
 ) (monitordomain.TerminalReservation, bool) {
 	for _, reservation := range ledger.Slots {
 		if reservation.AuthorityID == authorityID && reservation.EntityID == entityID {
+			return reservation, true
+		}
+	}
+	return monitordomain.TerminalReservation{}, false
+}
+
+func reservationByToken(
+	ledger monitordomain.TerminalReservationLedger,
+	token string,
+) (monitordomain.TerminalReservation, bool) {
+	for _, reservation := range ledger.Slots {
+		if reservation.Token == token {
 			return reservation, true
 		}
 	}

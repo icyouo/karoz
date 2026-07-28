@@ -388,6 +388,189 @@ func TestProcessRuntimeTerminalAcknowledgementIsExactAndIdempotent(t *testing.T)
 	}
 }
 
+func TestAdmissionRecoveryStateMatrix(t *testing.T) {
+	project := runtimeTestProject(t, "admission-matrix")
+	identity := monitordomain.RuntimeProjectIdentity{
+		ProjectID: project.ID, CanonicalProjectPath: project.Path,
+		CanonicalPathSHA256: monitordomain.CanonicalProjectPathSHA256(project.Path),
+		SafeProjectKey:      monitordomain.SafeProjectKey(project.ID),
+	}
+	operation := monitordomain.RuntimeMutationOperation{
+		ID: "process/entity/admit", Project: identity, Kind: "process_admission",
+		State: "allocated", ReservationToken: "token",
+		AuthorityID: processAuthorityID, EntityID: "entity",
+	}
+	reservation := monitordomain.TerminalReservation{
+		Slot: 1, Token: "token", ProjectID: identity.ProjectID,
+		ProjectIdentitySHA256: identity.CanonicalPathSHA256,
+		OperationID:           operation.ID, AuthorityID: processAuthorityID,
+		EntityID: "entity", EventKind: processTerminalEventKind,
+		State: monitordomain.ReservationAllocating,
+	}
+	authority := durableProcessRecord{
+		Process: processdomain.Process{
+			ID: "entity", ProjectID: identity.ProjectID,
+			State: processdomain.StateStarting,
+		},
+		Reservation: &reservation,
+	}
+	tests := []struct {
+		name            string
+		state           string
+		ledgerState     monitordomain.TerminalReservationState
+		ledgerExists    bool
+		authorityState  monitordomain.TerminalReservationState
+		authorityExists bool
+		valid           bool
+	}{
+		{name: "intent", state: "intent", valid: true},
+		{name: "token-selected-no-ledger", state: "token_selected", valid: true},
+		{name: "token-selected-ledger", state: "token_selected", ledgerExists: true, ledgerState: monitordomain.ReservationAllocating, valid: true},
+		{name: "allocated-no-authority", state: "allocated", ledgerExists: true, ledgerState: monitordomain.ReservationAllocating, valid: true},
+		{name: "allocated-authority", state: "allocated", ledgerExists: true, ledgerState: monitordomain.ReservationAllocating, authorityExists: true, authorityState: monitordomain.ReservationAllocating, valid: true},
+		{name: "authority-saved-after-ledger", state: "authority_saved", ledgerExists: true, ledgerState: monitordomain.ReservationActive, authorityExists: true, authorityState: monitordomain.ReservationAllocating, valid: true},
+		{name: "active-before-authority", state: "active", ledgerExists: true, ledgerState: monitordomain.ReservationActive, authorityExists: true, authorityState: monitordomain.ReservationAllocating, valid: true},
+		{name: "committed", state: "committed", ledgerExists: true, ledgerState: monitordomain.ReservationActive, authorityExists: true, authorityState: monitordomain.ReservationActive, valid: true},
+		{name: "allocated-lost-ledger", state: "allocated"},
+		{name: "intent-with-ledger", state: "intent", ledgerExists: true, ledgerState: monitordomain.ReservationAllocating},
+		{name: "token-selected-with-authority", state: "token_selected", ledgerExists: true, ledgerState: monitordomain.ReservationAllocating, authorityExists: true, authorityState: monitordomain.ReservationAllocating},
+		{name: "allocated-active-ledger", state: "allocated", ledgerExists: true, ledgerState: monitordomain.ReservationActive, authorityExists: true, authorityState: monitordomain.ReservationAllocating},
+		{name: "authority-saved-active-authority", state: "authority_saved", ledgerExists: true, ledgerState: monitordomain.ReservationActive, authorityExists: true, authorityState: monitordomain.ReservationActive},
+		{name: "active-allocating-ledger", state: "active", ledgerExists: true, ledgerState: monitordomain.ReservationAllocating, authorityExists: true, authorityState: monitordomain.ReservationAllocating},
+		{name: "committed-allocating-authority", state: "committed", ledgerExists: true, ledgerState: monitordomain.ReservationActive, authorityExists: true, authorityState: monitordomain.ReservationAllocating},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidateOperation := operation
+			candidateOperation.State = test.state
+			if test.state == "intent" {
+				candidateOperation.ReservationToken = ""
+			}
+			candidateLedger := reservation
+			candidateLedger.State = test.ledgerState
+			candidateAuthority := authority
+			candidateReservation := reservation
+			candidateReservation.State = test.authorityState
+			candidateAuthority.Reservation = &candidateReservation
+			err := validateAdmissionRecoveryState(
+				identity, candidateOperation, candidateLedger, test.ledgerExists,
+				candidateAuthority, test.authorityExists,
+			)
+			if (err == nil) != test.valid {
+				t.Fatalf("valid=%v, err=%v", test.valid, err)
+			}
+		})
+	}
+}
+
+func TestAdmissionRecoveryRejectsPersistedImpossibleState(t *testing.T) {
+	dataDir := t.TempDir()
+	project := runtimeTestProject(t, "admission-persisted-matrix")
+	runtime, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := runtimeStartingRecord(t, runtime, project.ID, "entity")
+	admitRuntimeRecord(t, runtime, record)
+	state := runtime.projects[project.ID]
+	state.journalMu.Lock()
+	operation := state.journal.Operations["process/"+record.ID+"/admit"]
+	state.journalMu.Unlock()
+	operation.State = "allocated"
+	if err := runtime.putOperation(state, operation); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.projectRuntime(project.ID) != nil ||
+		recovered.ProjectError(project.ID) == nil {
+		t.Fatal("impossible admission state did not fail closed for its project")
+	}
+}
+
+func TestTerminalReleaseRecoveryRejectsTokenEventAndAckMismatch(t *testing.T) {
+	for _, mutation := range []string{"operation-token", "event-token", "ack-id"} {
+		t.Run(mutation, func(t *testing.T) {
+			dataDir := t.TempDir()
+			project := runtimeTestProject(t, "release-binding-"+mutation)
+			var failPoint processPersistenceFailpoint
+			if mutation == "ack-id" {
+				failPoint = processPersistAfterAck
+			} else {
+				failPoint = processPersistAfterReleaseIntent
+			}
+			var enabled atomic.Bool
+			runtime, err := newProcessRuntimePersistence(
+				dataDir, []Project{project},
+				func(point processPersistenceFailpoint) error {
+					if enabled.Load() && point == failPoint {
+						enabled.Store(false)
+						return errors.New("crash")
+					}
+					return nil
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := runtimeStartingRecord(t, runtime, project.ID, "terminal")
+			admitRuntimeRecord(t, runtime, record)
+			record.State = processdomain.StateFailed
+			record.EndedAt = timePointer(record.UpdatedAt)
+			if err := runtime.MarkTerminal(record); err != nil {
+				t.Fatal(err)
+			}
+			enabled.Store(true)
+			if err := runtime.AcknowledgeTerminal(
+				project.ID, record.ID, processTerminalEventID(record.ID),
+			); err == nil {
+				t.Fatal("release failpoint did not fire")
+			}
+			state := runtime.projects[project.ID]
+			switch mutation {
+			case "operation-token":
+				state.journalMu.Lock()
+				operation := state.journal.Operations["process/"+record.ID+"/release"]
+				state.journalMu.Unlock()
+				operation.ReservationToken = "wrong-token"
+				err = runtime.putOperation(state, operation)
+			case "event-token":
+				runtime.authorityMu.Lock()
+				partition := runtime.authority.Projects[state.identity.SafeProjectKey]
+				durable := partition.Records[record.ID]
+				durable.Event.Reservation.Token = "wrong-token"
+				partition.Records[record.ID] = durable
+				runtime.authority.Projects[state.identity.SafeProjectKey] = partition
+				err = runtime.store.saveJSON("processes.json", runtime.authority)
+				runtime.authorityMu.Unlock()
+			case "ack-id":
+				runtime.authorityMu.Lock()
+				partition := runtime.authority.Projects[state.identity.SafeProjectKey]
+				durable := partition.Records[record.ID]
+				durable.AcknowledgedEventID = "process/other/terminal"
+				partition.Records[record.ID] = durable
+				runtime.authority.Projects[state.identity.SafeProjectKey] = partition
+				err = runtime.store.saveJSON("processes.json", runtime.authority)
+				runtime.authorityMu.Unlock()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovered, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recovered.projectRuntime(project.ID) != nil ||
+				recovered.ProjectError(project.ID) == nil {
+				t.Fatal("corrupt terminal release binding did not disable its project")
+			}
+		})
+	}
+}
+
 func TestProcessSnapshotRejectsCrossProjectLogAndUnsafeTombstone(t *testing.T) {
 	project := runtimeTestProject(t, "snapshot-integrity")
 	identity := monitordomain.RuntimeProjectIdentity{
@@ -1122,6 +1305,198 @@ func TestImportProjectRejectsCanonicalPathAliasWithoutRuntimeWrites(t *testing.T
 		if restarted.processRuntime.projectRuntime(aliasProject.ID) != nil {
 			t.Fatal("restart adopted a rejected canonical alias")
 		}
+	}
+}
+
+func TestImportProjectSettingsFailureAbortsClaimAndRollsBackConfig(t *testing.T) {
+	root := t.TempDir()
+	existingPath := filepath.Join(root, "existing")
+	if err := os.MkdirAll(filepath.Join(existingPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := a.bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.saveSettings(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.saveProjectAliases(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := a.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown process runtime: %v", err)
+		}
+	})
+
+	externalPath := filepath.Join(t.TempDir(), "external")
+	if err := os.MkdirAll(filepath.Join(externalPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	external := projectFromPath(externalPath, externalPath, "extra")
+	paths := []string{
+		filepath.Join(dataDir, "settings.json"),
+		filepath.Join(dataDir, "project-aliases.json"),
+		filepath.Join(dataDir, "project-runtime", "index.json"),
+		filepath.Join(dataDir, "processes.json"),
+	}
+	before := make(map[string][]byte, len(paths))
+	for _, path := range paths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[path] = body
+	}
+	a.projectImportSettingsSave = func() error {
+		return errors.New("settings save failed")
+	}
+	if _, err := a.importProject(ProjectCreateRequest{
+		Path: externalPath, Name: "rejected-external",
+	}); err == nil {
+		t.Fatal("settings failure did not reject import")
+	}
+	a.projectImportSettingsSave = nil
+
+	for _, path := range paths {
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before[path]) {
+			t.Errorf("settings failure changed %s", path)
+		}
+	}
+	a.mu.Lock()
+	extraRoots := append([]string(nil), a.settings.ExtraProjectsRoots...)
+	_, aliasExists := a.projectAliases[external.ID]
+	a.mu.Unlock()
+	if len(extraRoots) != 0 || aliasExists {
+		t.Fatalf("settings failure changed in-memory config: roots=%v alias=%v", extraRoots, aliasExists)
+	}
+	a.processRuntime.indexMu.Lock()
+	_, claimExists := a.processRuntime.index.Projects[monitordomain.SafeProjectKey(external.ID)]
+	a.processRuntime.indexMu.Unlock()
+	if claimExists {
+		t.Fatal("pre-commit settings failure retained its initializing claim")
+	}
+	if _, err := os.Stat(filepath.Join(
+		dataDir, "project-runtime", monitordomain.SafeProjectKey(external.ID),
+	)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("settings failure created a runtime partition: %v", err)
+	}
+}
+
+func TestImportProjectClaimCrashRecovery(t *testing.T) {
+	tests := []struct {
+		point     processPersistenceFailpoint
+		committed bool
+	}{
+		{point: processPersistAfterIndexInitializing},
+		{point: processPersistAfterImportWorkspace},
+		{point: processPersistAfterImportSettings, committed: true},
+		{point: processPersistAfterImportAliases, committed: true},
+		{point: processPersistAfterAuthorityInitialize, committed: true},
+		{point: processPersistAfterLedgerInitialize, committed: true},
+		{point: processPersistAfterJournalInitialize, committed: true},
+		{point: processPersistAfterIndexReady, committed: true},
+	}
+	for _, test := range tests {
+		t.Run(string(test.point), func(t *testing.T) {
+			root := t.TempDir()
+			existingPath := filepath.Join(root, "existing")
+			if err := os.MkdirAll(filepath.Join(existingPath, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			existing := projectFromPath(existingPath, root, "main")
+			externalPath := filepath.Join(t.TempDir(), "external")
+			if err := os.MkdirAll(filepath.Join(externalPath, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			external := projectFromPath(externalPath, externalPath, "extra")
+			dataDir := t.TempDir()
+			a := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+			if err := a.bootstrap(); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.saveSettings(); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.saveProjectAliases(); err != nil {
+				t.Fatal(err)
+			}
+			var fired atomic.Bool
+			a.processRuntime.fail = func(point processPersistenceFailpoint) error {
+				if point == test.point && fired.CompareAndSwap(false, true) {
+					return errors.New("simulated import crash")
+				}
+				return nil
+			}
+			if _, err := a.importProject(ProjectCreateRequest{
+				Path: externalPath, Name: "external",
+			}); err == nil {
+				t.Fatalf("failpoint %s did not interrupt import", test.point)
+			}
+			if !fired.Load() {
+				t.Fatalf("failpoint %s was not reached", test.point)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := a.shutdownProcessRuntime(ctx); err != nil {
+				cancel()
+				t.Fatal(err)
+			}
+			cancel()
+
+			restarted := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+			if err := restarted.loadSettings(); err != nil {
+				t.Fatal(err)
+			}
+			if err := restarted.bootstrap(); err != nil {
+				t.Fatalf("restart after %s: %v", test.point, err)
+			}
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := restarted.shutdownProcessRuntime(ctx); err != nil {
+					t.Errorf("shutdown restarted runtime: %v", err)
+				}
+			})
+			if restarted.processRuntime.projectRuntime(existing.ID) == nil {
+				t.Fatal("recovery lost the existing project runtime")
+			}
+			externalRuntime := restarted.processRuntime.projectRuntime(external.ID)
+			externalKey := monitordomain.SafeProjectKey(external.ID)
+			restarted.processRuntime.indexMu.Lock()
+			entry, claimExists := restarted.processRuntime.index.Projects[externalKey]
+			restarted.processRuntime.indexMu.Unlock()
+			if test.committed {
+				if externalRuntime == nil || !claimExists || entry.State != "ready" {
+					t.Fatalf(
+						"committed import was not completed: runtime=%v claim=%+v exists=%v",
+						externalRuntime, entry, claimExists,
+					)
+				}
+			} else if externalRuntime != nil || claimExists {
+				t.Fatalf(
+					"uncommitted import was not rolled back: runtime=%v claim=%+v exists=%v",
+					externalRuntime, entry, claimExists,
+				)
+			}
+			roots := restarted.settings.WorkspaceRoots()
+			var configured bool
+			for _, candidate := range roots {
+				if filepath.Clean(candidate) == filepath.Clean(externalPath) {
+					configured = true
+				}
+			}
+			if configured != test.committed {
+				t.Fatalf("configured=%v, want %v after %s", configured, test.committed, test.point)
+			}
+		})
 	}
 }
 

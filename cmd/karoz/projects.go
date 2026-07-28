@@ -183,11 +183,19 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 	project.Name = name
 	a.projectRegistrationMu.Lock()
 	defer a.projectRegistrationMu.Unlock()
-	if err := a.registerProcessRuntimeProjectPrepared(project, func() error {
+	if err := a.registerProcessRuntimeProjectPrepared(project, func() (bool, error) {
 		if err := initializeProjectKaroz(project.Path); err != nil {
-			return err
+			return false, err
+		}
+		if err := a.processRuntimePersistenceFail(processPersistAfterImportWorkspace); err != nil {
+			return false, err
 		}
 		a.mu.Lock()
+		previousSettings := a.settings
+		previousSettings.ExtraProjectsRoots = append(
+			[]string(nil), a.settings.ExtraProjectsRoots...,
+		)
+		previousAliases := cloneProjectAliases(a.projectAliases)
 		if a.projectAliases == nil {
 			a.projectAliases = map[string]string{}
 		}
@@ -197,14 +205,55 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 			a.settings.ProjectsRoot,
 		)
 		a.mu.Unlock()
-		if err := a.saveProjectAliases(); err != nil {
-			return err
+		var settingsErr error
+		if a.projectImportSettingsSave != nil {
+			settingsErr = a.projectImportSettingsSave()
+		} else {
+			settingsErr = a.saveSettings()
 		}
-		return a.saveSettings()
+		if settingsErr != nil {
+			if rollbackErr := a.restoreImportedProjectConfig(
+				previousSettings, previousAliases,
+			); rollbackErr != nil {
+				// Recovery must retain the initializing claim when config
+				// rollback cannot be proven durable.
+				return true, errors.Join(settingsErr, rollbackErr)
+			}
+			return false, settingsErr
+		}
+		if err := a.processRuntimePersistenceFail(processPersistAfterImportSettings); err != nil {
+			return true, err
+		}
+		if err := a.saveProjectAliases(); err != nil {
+			return true, err
+		}
+		if err := a.processRuntimePersistenceFail(processPersistAfterImportAliases); err != nil {
+			return true, err
+		}
+		return true, nil
 	}); err != nil {
 		return Project{}, fmt.Errorf("register imported project runtime: %w", err)
 	}
 	return project, nil
+}
+
+func cloneProjectAliases(aliases map[string]string) map[string]string {
+	cloned := make(map[string]string, len(aliases))
+	for id, name := range aliases {
+		cloned[id] = name
+	}
+	return cloned
+}
+
+func (a *app) restoreImportedProjectConfig(
+	settings Settings,
+	aliases map[string]string,
+) error {
+	a.mu.Lock()
+	a.settings = settings
+	a.projectAliases = cloneProjectAliases(aliases)
+	a.mu.Unlock()
+	return errors.Join(a.saveProjectAliases(), a.saveSettings())
 }
 
 func initializeProjectKaroz(projectPath string) error {
