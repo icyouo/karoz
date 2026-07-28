@@ -54,6 +54,7 @@ type codexStreamWire struct {
 	input          []map[string]any
 	model          string
 	thinkingEffort string
+	replayedCalls  map[string]int
 }
 
 func newCodexStreamWire(workdir, prompt, model, thinkingEffort string, transcript []AgentTranscriptItem) *codexStreamWire {
@@ -63,32 +64,101 @@ func newCodexStreamWire(workdir, prompt, model, thinkingEffort string, transcrip
 		input:          input,
 		model:          model,
 		thinkingEffort: thinkingEffort,
+		replayedCalls:  map[string]int{},
 	}
 }
 
 func codexTranscriptInput(items []AgentTranscriptItem) []map[string]any {
 	out := make([]map[string]any, 0, len(items))
+	pairs := nativeTranscriptPairIndexes(items)
 	for i := 0; i < len(items); i++ {
 		item := items[i]
-		if i+1 < len(items) && transcriptToolPair(item, items[i+1]) {
+		if _, ok := pairs.calls[i]; ok {
 			out = append(out, codexFunctionCallItem(codexToolCall{
-				CallID: item.ToolCallID, Name: item.ToolName, Arguments: item.ToolArguments,
+				CallID: item.ToolCallID, Name: item.ToolName, Arguments: boundedTranscriptToolArguments(item),
 			}))
-			result := firstNonEmpty(items[i+1].ToolResult, items[i+1].Body)
-			out = append(out, map[string]any{"type": "function_call_output", "call_id": item.ToolCallID, "output": result})
-			i++
 			continue
 		}
-		out = append(out, codexMessage(transcriptTextRole(item), promptAgentTranscriptBody(item)))
+		if _, ok := pairs.results[i]; ok {
+			out = append(out, map[string]any{"type": "function_call_output", "call_id": item.ToolCallID, "output": boundedTranscriptToolResult(item)})
+			continue
+		}
+		out = append(out, codexMessage(transcriptTextRole(item), boundedTranscriptText(item)))
 	}
 	return out
 }
 
+type transcriptPairIndexes struct {
+	calls   map[int]int
+	results map[int]int
+}
+
+func nativeTranscriptPairIndexes(items []AgentTranscriptItem) transcriptPairIndexes {
+	type candidate struct {
+		calls   []int
+		results []int
+	}
+	candidates := map[string]*candidate{}
+	for index, item := range items {
+		kind := firstNonEmpty(item.Kind, transcriptKindForMessage(item.Role, item.Intent))
+		if kind != "tool_call" && kind != "tool_result" || strings.TrimSpace(item.ToolCallID) == "" {
+			continue
+		}
+		key := item.SessionID + "\x00" + item.RunID + "\x00" + item.ToolCallID
+		entry := candidates[key]
+		if entry == nil {
+			entry = &candidate{}
+			candidates[key] = entry
+		}
+		if kind == "tool_call" {
+			entry.calls = append(entry.calls, index)
+		} else {
+			entry.results = append(entry.results, index)
+		}
+	}
+	pairs := transcriptPairIndexes{calls: map[int]int{}, results: map[int]int{}}
+	for _, candidate := range candidates {
+		if len(candidate.calls) != 1 || len(candidate.results) != 1 {
+			continue
+		}
+		callIndex, resultIndex := candidate.calls[0], candidate.results[0]
+		if callIndex >= resultIndex || strings.TrimSpace(items[callIndex].ToolName) == "" {
+			continue
+		}
+		pairs.calls[callIndex] = resultIndex
+		pairs.results[resultIndex] = callIndex
+	}
+	return pairs
+}
+
 func transcriptToolPair(call, result AgentTranscriptItem) bool {
-	return firstNonEmpty(call.Kind, transcriptKindForMessage(call.Role, call.Intent)) == "tool_call" &&
-		firstNonEmpty(result.Kind, transcriptKindForMessage(result.Role, result.Intent)) == "tool_result" &&
-		strings.TrimSpace(call.ToolCallID) != "" && call.ToolCallID == result.ToolCallID &&
-		strings.TrimSpace(call.ToolName) != ""
+	pairs := nativeTranscriptPairIndexes([]AgentTranscriptItem{call, result})
+	_, ok := pairs.calls[0]
+	return ok
+}
+
+func boundedTranscriptToolArguments(item AgentTranscriptItem) string {
+	arguments := firstNonEmpty(strings.TrimSpace(item.ToolArguments), strings.TrimSpace(item.Body))
+	if len([]rune(arguments)) <= 1400 && json.Valid([]byte(arguments)) {
+		return arguments
+	}
+	key := "_legacy_text"
+	if json.Valid([]byte(arguments)) {
+		key = "_truncated_json"
+	}
+	fallback, _ := json.Marshal(map[string]any{
+		key:              limitString(arguments, 1200),
+		"original_chars": len([]rune(arguments)),
+	})
+	return string(fallback)
+}
+
+func boundedTranscriptToolResult(item AgentTranscriptItem) string {
+	return compactToolResultForPrompt(firstNonEmpty(strings.TrimSpace(item.ToolResult), strings.TrimSpace(item.Body)))
+}
+
+func boundedTranscriptText(item AgentTranscriptItem) string {
+	return limitString(promptAgentTranscriptBody(item), residentTranscriptMessageMaxChars)
 }
 
 func transcriptTextRole(item AgentTranscriptItem) string {
@@ -104,11 +174,27 @@ func transcriptTextRole(item AgentTranscriptItem) string {
 
 func (w *codexStreamWire) step(ctx context.Context, tools []map[string]any, callbacks AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {
 	streamed, interrupts, err := streamCodexStep(ctx, w.input, w.model, w.thinkingEffort, tools, callbacks)
-	return residentStepOutput{Text: streamed.Text, ToolCalls: streamed.ToolCalls, ReasoningItems: streamed.ReasoningItems}, interrupts, err
+	return residentStepOutput{Text: streamed.Text, ToolCalls: streamed.ToolCalls, CompletedItems: streamed.CompletedItems}, interrupts, err
 }
 
 func (w *codexStreamWire) appendAssistantTurn(streamed residentStepOutput) {
-	w.input = append(w.input, streamed.ReasoningItems...)
+	for _, item := range streamed.CompletedItems {
+		itemType, _ := item["type"].(string)
+		if itemType != "reasoning" && itemType != "function_call" && itemType != "tool_call" && itemType != "message" {
+			continue
+		}
+		w.input = append(w.input, item)
+		if itemType == "function_call" || itemType == "tool_call" {
+			callID, _ := item["call_id"].(string)
+			if strings.TrimSpace(callID) == "" {
+				callID, _ = item["tool_call_id"].(string)
+			}
+			if strings.TrimSpace(callID) == "" {
+				callID, _ = item["id"].(string)
+			}
+			w.replayedCalls[callID]++
+		}
+	}
 }
 
 func (w *codexStreamWire) appendInterruptTurn(streamed residentStepOutput, interrupts []AgentInterrupt) {
@@ -119,6 +205,11 @@ func (w *codexStreamWire) appendInterruptTurn(streamed residentStepOutput, inter
 }
 
 func (w *codexStreamWire) appendToolCall(call codexToolCall) {
+	callID := firstNonEmpty(call.CallID, call.ID)
+	if w.replayedCalls[callID] > 0 {
+		w.replayedCalls[callID]--
+		return
+	}
 	w.input = append(w.input, codexFunctionCallItem(call))
 }
 
@@ -181,7 +272,7 @@ func compactCodexInputForFinal(input []map[string]any, maxChars int) []map[strin
 
 type codexStreamResult struct {
 	ToolCalls      []codexToolCall
-	ReasoningItems []map[string]any
+	CompletedItems []map[string]any
 	Text           string
 }
 
@@ -280,7 +371,7 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) (codexStre
 		return codexStreamResult{}, fmt.Errorf("codex direct status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	var toolCalls []codexToolCall
-	var reasoningItems []map[string]any
+	var completedItems []map[string]any
 	var streamed strings.Builder
 	var finalText string
 	scanner := bufio.NewScanner(resp.Body)
@@ -306,15 +397,15 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) (codexStre
 				finalText = text
 			}
 		}
-		if call, ok := codexSSEToolCall([]byte(payload)); ok {
-			toolCalls = append(toolCalls, call)
-		}
-		if item, ok := codexSSEReasoningItem([]byte(payload)); ok {
-			reasoningItems = append(reasoningItems, item)
+		if item, ok := codexSSECompletedItem([]byte(payload)); ok {
+			completedItems = append(completedItems, item)
+			if call, ok := codexToolCallFromCompletedItem(item); ok {
+				toolCalls = append(toolCalls, call)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return codexStreamResult{ToolCalls: toolCalls, ReasoningItems: reasoningItems, Text: streamed.String()}, err
+		return codexStreamResult{ToolCalls: toolCalls, CompletedItems: completedItems, Text: streamed.String()}, err
 	}
 	if streamed.Len() == 0 && strings.TrimSpace(finalText) != "" && onDelta != nil {
 		onDelta(finalText)
@@ -323,5 +414,5 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) (codexStre
 	if strings.TrimSpace(text) == "" {
 		text = finalText
 	}
-	return codexStreamResult{ToolCalls: toolCalls, ReasoningItems: reasoningItems, Text: text}, nil
+	return codexStreamResult{ToolCalls: toolCalls, CompletedItems: completedItems, Text: text}, nil
 }

@@ -140,41 +140,58 @@ func codexSSETextSnapshot(payload []byte) string {
 }
 
 func codexSSEToolCall(payload []byte) (codexToolCall, bool) {
-	var event struct {
-		Type string `json:"type"`
-		Item struct {
-			ID        string          `json:"id"`
-			Type      string          `json:"type"`
-			CallID    string          `json:"call_id"`
-			ToolCall  string          `json:"tool_call_id"`
-			Name      string          `json:"name"`
-			Arguments json.RawMessage `json:"arguments"`
-			Args      json.RawMessage `json:"args"`
-		} `json:"item"`
-	}
-	if err := json.Unmarshal(payload, &event); err != nil {
+	item, ok := codexSSECompletedItem(payload)
+	if !ok {
 		return codexToolCall{}, false
 	}
-	if event.Type != "response.output_item.done" && event.Type != "item.completed" {
+	return codexToolCallFromCompletedItem(item)
+}
+
+func codexToolCallFromCompletedItem(item map[string]any) (codexToolCall, bool) {
+	raw, err := json.Marshal(item)
+	if err != nil {
 		return codexToolCall{}, false
 	}
-	itemType := strings.TrimSpace(event.Item.Type)
+	var parsed struct {
+		ID        string          `json:"id"`
+		Type      string          `json:"type"`
+		CallID    string          `json:"call_id"`
+		ToolCall  string          `json:"tool_call_id"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+		Args      json.RawMessage `json:"args"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return codexToolCall{}, false
+	}
+	itemType := strings.TrimSpace(parsed.Type)
 	if itemType != "function_call" && itemType != "tool_call" {
 		return codexToolCall{}, false
 	}
-	args := decodeRawJSONText(event.Item.Arguments)
+	args := decodeRawJSONText(parsed.Arguments)
 	if args == "" || args == "null" {
-		args = decodeRawJSONText(event.Item.Args)
+		args = decodeRawJSONText(parsed.Args)
 	}
 	return codexToolCall{
-		ID:        event.Item.ID,
-		CallID:    firstNonEmpty(event.Item.CallID, event.Item.ToolCall, event.Item.ID),
-		Name:      event.Item.Name,
+		ID:        parsed.ID,
+		CallID:    firstNonEmpty(parsed.CallID, parsed.ToolCall, parsed.ID),
+		Name:      parsed.Name,
 		Arguments: args,
-	}, strings.TrimSpace(event.Item.Name) != ""
+	}, strings.TrimSpace(parsed.Name) != ""
 }
 
 func codexSSEReasoningItem(payload []byte) (map[string]any, bool) {
+	item, ok := codexSSECompletedItem(payload)
+	if !ok {
+		return nil, false
+	}
+	if itemType, _ := item["type"].(string); itemType != "reasoning" {
+		return nil, false
+	}
+	return item, true
+}
+
+func codexSSECompletedItem(payload []byte) (map[string]any, bool) {
 	var event struct {
 		Type string         `json:"type"`
 		Item map[string]any `json:"item"`
@@ -185,7 +202,7 @@ func codexSSEReasoningItem(payload []byte) (map[string]any, bool) {
 	if event.Type != "response.output_item.done" && event.Type != "item.completed" {
 		return nil, false
 	}
-	if itemType, _ := event.Item["type"].(string); itemType != "reasoning" {
+	if len(event.Item) == 0 {
 		return nil, false
 	}
 	return event.Item, true

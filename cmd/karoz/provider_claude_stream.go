@@ -60,23 +60,26 @@ func newClaudeStreamWire(workdir, prompt, model, effort string, transcript []Age
 
 func claudeTranscriptMessages(items []AgentTranscriptItem) []map[string]any {
 	out := make([]map[string]any, 0, len(items))
+	pairs := nativeTranscriptPairIndexes(items)
 	for i := 0; i < len(items); i++ {
 		item := items[i]
-		if i+1 < len(items) && transcriptToolPair(item, items[i+1]) {
+		if _, ok := pairs.calls[i]; ok {
 			var input any = map[string]any{}
-			if strings.TrimSpace(item.ToolArguments) != "" {
-				_ = json.Unmarshal([]byte(item.ToolArguments), &input)
+			if arguments := boundedTranscriptToolArguments(item); strings.TrimSpace(arguments) != "" {
+				_ = json.Unmarshal([]byte(arguments), &input)
 			}
 			out = appendClaudeHistoryContent(out, "assistant", []map[string]any{{"type": "tool_use", "id": item.ToolCallID, "name": item.ToolName, "input": input}})
-			out = appendClaudeHistoryContent(out, "user", []map[string]any{{"type": "tool_result", "tool_use_id": item.ToolCallID, "content": firstNonEmpty(items[i+1].ToolResult, items[i+1].Body), "is_error": items[i+1].ToolSuccess != nil && !*items[i+1].ToolSuccess}})
-			i++
+			continue
+		}
+		if _, ok := pairs.results[i]; ok {
+			out = appendClaudeHistoryContent(out, "user", []map[string]any{{"type": "tool_result", "tool_use_id": item.ToolCallID, "content": boundedTranscriptToolResult(item), "is_error": item.ToolSuccess != nil && !*item.ToolSuccess}})
 			continue
 		}
 		role := transcriptTextRole(item)
 		if role == "system" {
 			role = "user"
 		}
-		out = appendClaudeHistoryContent(out, role, []map[string]any{{"type": "text", "text": promptAgentTranscriptBody(item)}})
+		out = appendClaudeHistoryContent(out, role, []map[string]any{{"type": "text", "text": boundedTranscriptText(item)}})
 	}
 	return out
 }

@@ -142,41 +142,33 @@ func boundedProviderTranscript(items []AgentTranscriptItem, currentRunID, userTe
 			}
 		}
 	}
-	type transcriptUnit []AgentTranscriptItem
-	units := make([]transcriptUnit, 0, len(filtered))
-	for i := 0; i < len(filtered); i++ {
-		if i+1 < len(filtered) && transcriptToolPair(filtered[i], filtered[i+1]) {
-			units = append(units, transcriptUnit{filtered[i], filtered[i+1]})
-			i++
-			continue
-		}
-		units = append(units, transcriptUnit{filtered[i]})
-	}
-	var reversed []transcriptUnit
+	selected := make([]bool, len(filtered))
 	used := 0
 	itemCount := 0
-	for i := len(units) - 1; i >= 0; i-- {
-		unit := units[i]
-		cost := 0
-		for _, item := range unit {
-			cost += utf8.RuneCountInString(promptAgentTranscriptBody(item))
-		}
-		if len(reversed) > 0 && (used+cost > residentTranscriptPromptMaxChars || itemCount+len(unit) > residentTranscriptPromptMaxItems) {
+	for i := len(filtered) - 1; i >= 0; i-- {
+		cost := utf8.RuneCountInString(contextCounterRecord(contextMessageFromTranscript(filtered[i])))
+		if itemCount > 0 && (used+cost > residentTranscriptPromptMaxChars || itemCount+1 > residentTranscriptPromptMaxItems) {
 			break
 		}
-		if len(unit) > residentTranscriptPromptMaxItems {
-			continue
-		}
-		reversed = append(reversed, unit)
+		selected[i] = true
 		used += cost
-		itemCount += len(unit)
+		itemCount++
 		if itemCount >= residentTranscriptPromptMaxItems {
 			break
 		}
 	}
+	pairs := nativeTranscriptPairIndexes(filtered)
+	for callIndex, resultIndex := range pairs.calls {
+		if selected[callIndex] != selected[resultIndex] {
+			selected[callIndex] = false
+			selected[resultIndex] = false
+		}
+	}
 	out := make([]AgentTranscriptItem, 0, itemCount)
-	for i := len(reversed) - 1; i >= 0; i-- {
-		out = append(out, reversed[i]...)
+	for i, item := range filtered {
+		if selected[i] {
+			out = append(out, item)
+		}
 	}
 	return out
 }

@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -67,15 +69,42 @@ func TestCodexReasoningReplayIsOpaqueOrderedAndTurnLocal(t *testing.T) {
 	if !ok || item["encrypted_content"] != "ciphertext" {
 		t.Fatalf("reasoning item = %#v, %t", item, ok)
 	}
+	call := map[string]any{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "repo_read", "arguments": `{"path":"go.mod"}`}
+	message := map[string]any{"id": "msg_1", "type": "message", "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": "checking"}}}
+	secondReasoning := map[string]any{"id": "rs_2", "type": "reasoning", "encrypted_content": "ciphertext-2"}
 	wire := newCodexStreamWire("/tmp/project", "current", "", "", nil)
-	wire.appendAssistantTurn(residentStepOutput{ReasoningItems: []map[string]any{item}})
+	wire.appendAssistantTurn(residentStepOutput{CompletedItems: []map[string]any{item, message, call, secondReasoning}})
 	wire.appendToolCall(codexToolCall{ID: "fc_1", CallID: "call_1", Name: "repo_read", Arguments: `{"path":"go.mod"}`})
-	if wire.input[1]["type"] != "reasoning" || wire.input[2]["type"] != "function_call" {
+	if wire.input[1]["type"] != "reasoning" || wire.input[2]["type"] != "message" || wire.input[3]["type"] != "function_call" || wire.input[4]["type"] != "reasoning" || len(wire.input) != 5 {
 		t.Fatalf("same-turn replay order = %#v", wire.input)
 	}
 	next := newCodexStreamWire("/tmp/project", "next", "", "", nil)
 	if len(next.input) != 1 {
 		t.Fatalf("reasoning crossed user turn: %#v", next.input)
+	}
+}
+
+func TestCodexCompletedOutputItemsPreserveSSEOrder(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"one\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"repo_read\",\"arguments\":\"{}\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_2\",\"type\":\"reasoning\",\"encrypted_content\":\"two\"}}\n\n"))
+	}))
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodPost, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := streamCodexResponse(request, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.CompletedItems) != 3 || result.CompletedItems[0]["id"] != "rs_1" || result.CompletedItems[1]["id"] != "fc_1" || result.CompletedItems[2]["id"] != "rs_2" {
+		t.Fatalf("completed item order = %#v", result.CompletedItems)
+	}
+	if len(result.ToolCalls) != 1 || result.ToolCalls[0].CallID != "call_1" {
+		t.Fatalf("derived tool calls = %#v", result.ToolCalls)
 	}
 }
 
@@ -101,6 +130,63 @@ func TestProviderWiresUseNativeToolPairsAndTextFallback(t *testing.T) {
 		t.Fatalf("Claude tool result = %#v", claude[1])
 	} else if len(content) != 2 || !strings.Contains(content[1]["text"].(string), "legacy-unpaired") {
 		t.Fatalf("legacy fallback = %#v", claude[1])
+	}
+}
+
+func TestNativeTranscriptPairingRejectsCollisionsAndSupportsMultiCallGrouping(t *testing.T) {
+	success := true
+	items := []AgentTranscriptItem{
+		{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "a", ToolName: "repo_read", ToolArguments: `{}`},
+		{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "b", ToolName: "repo_search", ToolArguments: `{}`},
+		{SessionID: "s", RunID: "r", Kind: "tool_result", ToolCallID: "a", ToolResult: "A", ToolSuccess: &success},
+		{SessionID: "s", RunID: "r", Kind: "tool_result", ToolCallID: "b", ToolResult: "B", ToolSuccess: &success},
+	}
+	native := codexTranscriptInput(items)
+	wantTypes := []string{"function_call", "function_call", "function_call_output", "function_call_output"}
+	for i, want := range wantTypes {
+		if native[i]["type"] != want {
+			t.Fatalf("multi-call chronology[%d] = %#v, want %s", i, native, want)
+		}
+	}
+
+	fallbackCases := map[string][]AgentTranscriptItem{
+		"duplicate id": {
+			{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "x", ToolName: "one"},
+			{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "x", ToolName: "two"},
+			{SessionID: "s", RunID: "r", Kind: "tool_result", ToolCallID: "x", ToolResult: "result"},
+		},
+		"cross run collision": {
+			{SessionID: "s", RunID: "r1", Kind: "tool_call", ToolCallID: "x", ToolName: "one"},
+			{SessionID: "s", RunID: "r2", Kind: "tool_result", ToolCallID: "x", ToolResult: "result"},
+		},
+		"orphan call and result": {
+			{SessionID: "s", RunID: "r", Kind: "tool_result", ToolCallID: "before", ToolResult: "result"},
+			{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "after", ToolName: "one"},
+		},
+	}
+	for name, transcript := range fallbackCases {
+		t.Run(name, func(t *testing.T) {
+			for _, item := range codexTranscriptInput(transcript) {
+				if item["type"] != "message" {
+					t.Fatalf("ambiguous/orphan history became native: %#v", item)
+				}
+			}
+		})
+	}
+}
+
+func TestNativeTranscriptPayloadUsesContextBounds(t *testing.T) {
+	success := true
+	items := []AgentTranscriptItem{
+		{SessionID: "s", RunID: "r", Kind: "tool_call", ToolCallID: "large", ToolName: "repo_read", ToolArguments: strings.Repeat("a", 9000)},
+		{SessionID: "s", RunID: "r", Kind: "tool_result", ToolCallID: "large", ToolResult: strings.Repeat("b", 9000), ToolSuccess: &success},
+	}
+	input := codexTranscriptInput(items)
+	if arguments := input[0]["arguments"].(string); len(arguments) > 1400 || !json.Valid([]byte(arguments)) {
+		t.Fatalf("native arguments exceeded context bound or became invalid JSON: %d %q", len(arguments), arguments)
+	}
+	if result := input[1]["output"].(string); len(result) > 2200 {
+		t.Fatalf("native result exceeded context bound: %d", len(result))
 	}
 }
 
