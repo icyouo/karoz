@@ -90,15 +90,61 @@ func TestProviderWiresUseNativeToolPairsAndTextFallback(t *testing.T) {
 	if codex[0]["type"] != "function_call" || codex[1]["type"] != "function_call_output" || codex[2]["type"] != "message" {
 		t.Fatalf("Codex history mapping = %#v", codex)
 	}
+	if _, present := codex[0]["id"]; present {
+		t.Fatalf("persisted call_id was incorrectly reused as provider item id: %#v", codex[0])
+	}
 	claude := claudeTranscriptMessages(items)
 	if content := claude[0]["content"].([]map[string]any); content[0]["type"] != "tool_use" {
 		t.Fatalf("Claude tool call = %#v", claude[0])
 	}
 	if content := claude[1]["content"].([]map[string]any); content[0]["type"] != "tool_result" {
 		t.Fatalf("Claude tool result = %#v", claude[1])
+	} else if len(content) != 2 || !strings.Contains(content[1]["text"].(string), "legacy-unpaired") {
+		t.Fatalf("legacy fallback = %#v", claude[1])
 	}
-	if !strings.Contains(claude[2]["content"].(string), "legacy-unpaired") {
-		t.Fatalf("legacy fallback = %#v", claude[2])
+}
+
+func TestProviderTranscriptBoundsToolPairsAtomically(t *testing.T) {
+	success := true
+	items := make([]AgentTranscriptItem, 0, residentTranscriptPromptMaxItems+2)
+	items = append(items,
+		AgentTranscriptItem{Role: "assistant", Kind: "tool_call", ToolCallID: "edge-call", ToolName: "repo_read", ToolArguments: `{}`},
+		AgentTranscriptItem{Role: "tool", Kind: "tool_result", ToolCallID: "edge-call", ToolResult: "edge-result", ToolSuccess: &success},
+	)
+	for i := 0; i < residentTranscriptPromptMaxItems-1; i++ {
+		items = append(items, AgentTranscriptItem{Role: "assistant", Kind: "message", Body: "newer"})
+	}
+	bounded := boundedProviderTranscript(items, "", "")
+	if len(bounded) > residentTranscriptPromptMaxItems {
+		t.Fatalf("item bound exceeded: %d", len(bounded))
+	}
+	for i, item := range bounded {
+		if item.ToolCallID != "edge-call" {
+			continue
+		}
+		t.Fatalf("boundary retained orphaned member of native pair at %d: %#v", i, bounded)
+	}
+}
+
+func TestClaudeHistoryNormalizesRolesAndCurrentUserOnce(t *testing.T) {
+	items := []AgentTranscriptItem{
+		{Role: "user", Kind: "message", Body: "first"},
+		{Role: "user", Kind: "message", Body: "second"},
+		{Role: "tool", Kind: "tool_result", Body: "legacy orphan"},
+		{Role: "assistant", Kind: "message", Body: "answer"},
+	}
+	wire := newClaudeStreamWire("/workspace", "current request", "", "", items)
+	for i := 1; i < len(wire.messages); i++ {
+		if wire.messages[i-1]["role"] == wire.messages[i]["role"] {
+			t.Fatalf("adjacent Claude roles were not coalesced: %#v", wire.messages)
+		}
+	}
+	raw, err := json.Marshal(wire.messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(raw), "current request") != 1 {
+		t.Fatalf("current user input duplicated: %s", raw)
 	}
 }
 
@@ -121,5 +167,8 @@ func TestResidentPromptStablePrefixAndSingleToolContract(t *testing.T) {
 	}
 	if strings.Contains(ask, "### Recent structured resident transcript") {
 		t.Fatal("provider-native transcript was also duplicated into prompt prose")
+	}
+	if strings.Count(ask, "plain request") != 1 {
+		t.Fatalf("current user input must appear once:\n%s", ask)
 	}
 }

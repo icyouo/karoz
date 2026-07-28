@@ -138,23 +138,41 @@ func boundedProviderTranscript(items []AgentTranscriptItem, currentRunID, userTe
 			}
 		}
 	}
-	var reversed []AgentTranscriptItem
+	type transcriptUnit []AgentTranscriptItem
+	units := make([]transcriptUnit, 0, len(filtered))
+	for i := 0; i < len(filtered); i++ {
+		if i+1 < len(filtered) && transcriptToolPair(filtered[i], filtered[i+1]) {
+			units = append(units, transcriptUnit{filtered[i], filtered[i+1]})
+			i++
+			continue
+		}
+		units = append(units, transcriptUnit{filtered[i]})
+	}
+	var reversed []transcriptUnit
 	used := 0
-	for i := len(filtered) - 1; i >= 0; i-- {
-		item := filtered[i]
-		cost := utf8.RuneCountInString(promptAgentTranscriptBody(item))
-		if len(reversed) > 0 && used+cost > residentTranscriptPromptMaxChars {
+	itemCount := 0
+	for i := len(units) - 1; i >= 0; i-- {
+		unit := units[i]
+		cost := 0
+		for _, item := range unit {
+			cost += utf8.RuneCountInString(promptAgentTranscriptBody(item))
+		}
+		if len(reversed) > 0 && (used+cost > residentTranscriptPromptMaxChars || itemCount+len(unit) > residentTranscriptPromptMaxItems) {
 			break
 		}
-		reversed = append(reversed, item)
+		if len(unit) > residentTranscriptPromptMaxItems {
+			continue
+		}
+		reversed = append(reversed, unit)
 		used += cost
-		if len(reversed) >= residentTranscriptPromptMaxItems {
+		itemCount += len(unit)
+		if itemCount >= residentTranscriptPromptMaxItems {
 			break
 		}
 	}
-	out := make([]AgentTranscriptItem, len(reversed))
-	for i := range reversed {
-		out[len(reversed)-1-i] = reversed[i]
+	out := make([]AgentTranscriptItem, 0, itemCount)
+	for i := len(reversed) - 1; i >= 0; i-- {
+		out = append(out, reversed[i]...)
 	}
 	return out
 }

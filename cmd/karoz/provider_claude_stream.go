@@ -48,7 +48,9 @@ type claudeStreamWire struct {
 
 func newClaudeStreamWire(workdir, prompt, model, effort string, transcript []AgentTranscriptItem) *claudeStreamWire {
 	messages := claudeTranscriptMessages(transcript)
-	messages = append(messages, map[string]any{"role": "user", "content": prompt + "\n\nProject workspace: " + workdir})
+	messages = appendClaudeHistoryContent(messages, "user", []map[string]any{{
+		"type": "text", "text": prompt + "\n\nProject workspace: " + workdir,
+	}})
 	return &claudeStreamWire{
 		messages: messages,
 		model:    model,
@@ -65,10 +67,8 @@ func claudeTranscriptMessages(items []AgentTranscriptItem) []map[string]any {
 			if strings.TrimSpace(item.ToolArguments) != "" {
 				_ = json.Unmarshal([]byte(item.ToolArguments), &input)
 			}
-			out = append(out,
-				map[string]any{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": item.ToolCallID, "name": item.ToolName, "input": input}}},
-				map[string]any{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": item.ToolCallID, "content": firstNonEmpty(items[i+1].ToolResult, items[i+1].Body), "is_error": items[i+1].ToolSuccess != nil && !*items[i+1].ToolSuccess}}},
-			)
+			out = appendClaudeHistoryContent(out, "assistant", []map[string]any{{"type": "tool_use", "id": item.ToolCallID, "name": item.ToolName, "input": input}})
+			out = appendClaudeHistoryContent(out, "user", []map[string]any{{"type": "tool_result", "tool_use_id": item.ToolCallID, "content": firstNonEmpty(items[i+1].ToolResult, items[i+1].Body), "is_error": items[i+1].ToolSuccess != nil && !*items[i+1].ToolSuccess}})
 			i++
 			continue
 		}
@@ -76,9 +76,21 @@ func claudeTranscriptMessages(items []AgentTranscriptItem) []map[string]any {
 		if role == "system" {
 			role = "user"
 		}
-		out = append(out, map[string]any{"role": role, "content": promptAgentTranscriptBody(item)})
+		out = appendClaudeHistoryContent(out, role, []map[string]any{{"type": "text", "text": promptAgentTranscriptBody(item)}})
 	}
 	return out
+}
+
+func appendClaudeHistoryContent(messages []map[string]any, role string, content []map[string]any) []map[string]any {
+	if len(content) == 0 {
+		return messages
+	}
+	if len(messages) > 0 && messages[len(messages)-1]["role"] == role {
+		existing, _ := messages[len(messages)-1]["content"].([]map[string]any)
+		messages[len(messages)-1]["content"] = append(existing, content...)
+		return messages
+	}
+	return append(messages, map[string]any{"role": role, "content": content})
 }
 
 func (w *claudeStreamWire) step(ctx context.Context, tools []map[string]any, callbacks AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {

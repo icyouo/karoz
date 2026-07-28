@@ -72,7 +72,7 @@ func codexTranscriptInput(items []AgentTranscriptItem) []map[string]any {
 		item := items[i]
 		if i+1 < len(items) && transcriptToolPair(item, items[i+1]) {
 			out = append(out, codexFunctionCallItem(codexToolCall{
-				ID: item.ToolCallID, CallID: item.ToolCallID, Name: item.ToolName, Arguments: item.ToolArguments,
+				CallID: item.ToolCallID, Name: item.ToolName, Arguments: item.ToolArguments,
 			}))
 			result := firstNonEmpty(items[i+1].ToolResult, items[i+1].Body)
 			out = append(out, map[string]any{"type": "function_call_output", "call_id": item.ToolCallID, "output": result})
