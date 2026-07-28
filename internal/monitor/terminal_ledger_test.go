@@ -8,9 +8,10 @@ import (
 )
 
 func testProjectIdentity(id string) RuntimeProjectIdentity {
+	path := "/projects/" + id
 	return RuntimeProjectIdentity{
-		ProjectID: id, CanonicalProjectPath: "/projects/" + id,
-		CanonicalPathSHA256: "path-sha-" + id, SafeProjectKey: "safe-key-" + id,
+		ProjectID: id, CanonicalProjectPath: path,
+		CanonicalPathSHA256: CanonicalProjectPathSHA256(path), SafeProjectKey: SafeProjectKey(id),
 	}
 }
 
@@ -74,6 +75,16 @@ func TestTerminalReservationRejectsProjectMismatch(t *testing.T) {
 	if ValidateTerminalReservation(projectA, badIdentity) == nil {
 		t.Fatal("mismatched project identity digest accepted")
 	}
+	badSafeKey := projectA
+	badSafeKey.SafeProjectKey = projectB.SafeProjectKey
+	if badSafeKey.Validate() == nil {
+		t.Fatal("mismatched safe project key accepted")
+	}
+	badPath := projectA
+	badPath.CanonicalProjectPath = projectB.CanonicalProjectPath
+	if badPath.Validate() == nil {
+		t.Fatal("mismatched canonical project path accepted")
+	}
 }
 
 func TestTerminalReservationCapacityIsIndependentPerProject(t *testing.T) {
@@ -128,5 +139,44 @@ func TestTerminalReservationDeterministicJSONAndCopy(t *testing.T) {
 	second, err := json.Marshal(decoded)
 	if err != nil || !bytes.Equal(first, second) {
 		t.Fatalf("ledger JSON changed: %s != %s (%v)", first, second, err)
+	}
+}
+
+func TestRuntimeProjectSafeKeyContract(t *testing.T) {
+	const want = "3689b1e1169ca1c14a9ed48a53a174a986917426624c5c33ad63b6e044572862"
+	if got := SafeProjectKey("project-a"); got != want {
+		t.Fatalf("safe key = %q want %q", got, want)
+	}
+	if len(SafeProjectKey("project-a")) != 64 || SafeProjectKey("Project-A") == SafeProjectKey("project-a") {
+		t.Fatal("safe key is not full lowercase SHA-256 over exact canonical ID")
+	}
+}
+
+func TestOperationAndAuthorityRequireExactProjectIdentity(t *testing.T) {
+	projectA := testProjectIdentity("project-a")
+	projectB := testProjectIdentity("project-b")
+	reservation := testReservation(projectA, 1, "one")
+	operation := RuntimeMutationOperation{
+		ID: "operation-one", Project: projectA, Kind: "admit", State: "intent",
+		ReservationToken: reservation.Token, AuthorityID: reservation.AuthorityID,
+		EntityID: reservation.EntityID,
+	}
+	if err := operation.Validate(projectA); err != nil {
+		t.Fatal(err)
+	}
+	if err := operation.Validate(projectB); err == nil {
+		t.Fatal("operation validated across projects")
+	}
+	authority := TerminalAuthorityReservation{Project: projectA, Reservation: reservation}
+	if err := authority.Validate(projectA); err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.Validate(projectB); err == nil {
+		t.Fatal("authority reservation validated across projects")
+	}
+	forged := authority
+	forged.Project = projectB
+	if SameTerminalAuthorityReservation(projectA, authority, forged) {
+		t.Fatal("authority records compared equal across project identities")
 	}
 }

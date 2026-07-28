@@ -1,11 +1,14 @@
 package monitor
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 )
 
 const TerminalReservationCapacity uint16 = 4096
+const runtimeProjectKeyDomain = "karoz-project-runtime-v1\x00"
 
 type RuntimeProjectIdentity struct {
 	ProjectID            string `json:"project_id"`
@@ -19,7 +22,23 @@ func (identity RuntimeProjectIdentity) Validate() error {
 		identity.CanonicalPathSHA256 == "" || identity.SafeProjectKey == "" {
 		return errors.New("runtime project identity is incomplete")
 	}
+	if identity.CanonicalPathSHA256 != CanonicalProjectPathSHA256(identity.CanonicalProjectPath) {
+		return errors.New("runtime project canonical path digest mismatch")
+	}
+	if identity.SafeProjectKey != SafeProjectKey(identity.ProjectID) {
+		return errors.New("runtime project safe key mismatch")
+	}
 	return nil
+}
+
+func SafeProjectKey(canonicalProjectID string) string {
+	sum := sha256.Sum256([]byte(runtimeProjectKeyDomain + canonicalProjectID))
+	return hex.EncodeToString(sum[:])
+}
+
+func CanonicalProjectPathSHA256(canonicalProjectPath string) string {
+	sum := sha256.Sum256([]byte(canonicalProjectPath))
+	return hex.EncodeToString(sum[:])
 }
 
 type TerminalReservationState string
@@ -47,6 +66,52 @@ type TerminalReservationLedger struct {
 	Project  RuntimeProjectIdentity         `json:"project"`
 	Capacity uint16                         `json:"capacity"`
 	Slots    map[uint16]TerminalReservation `json:"slots"`
+}
+
+type RuntimeMutationOperation struct {
+	ID               string                 `json:"id"`
+	Project          RuntimeProjectIdentity `json:"project"`
+	Kind             string                 `json:"kind"`
+	State            string                 `json:"state"`
+	ReservationToken string                 `json:"reservation_token,omitempty"`
+	AuthorityID      string                 `json:"authority_id"`
+	EntityID         string                 `json:"entity_id"`
+}
+
+func (operation RuntimeMutationOperation) Validate(project RuntimeProjectIdentity) error {
+	if err := project.Validate(); err != nil {
+		return err
+	}
+	if operation.Project != project {
+		return errors.New("runtime mutation operation project mismatch")
+	}
+	if operation.ID == "" || operation.Kind == "" || operation.State == "" ||
+		operation.AuthorityID == "" || operation.EntityID == "" {
+		return errors.New("runtime mutation operation is incomplete")
+	}
+	return nil
+}
+
+type TerminalAuthorityReservation struct {
+	Project     RuntimeProjectIdentity `json:"project"`
+	Reservation TerminalReservation    `json:"reservation"`
+}
+
+func (authority TerminalAuthorityReservation) Validate(project RuntimeProjectIdentity) error {
+	if err := project.Validate(); err != nil {
+		return err
+	}
+	if authority.Project != project {
+		return errors.New("terminal authority project mismatch")
+	}
+	return ValidateTerminalReservation(project, authority.Reservation)
+}
+
+func SameTerminalAuthorityReservation(
+	project RuntimeProjectIdentity,
+	left, right TerminalAuthorityReservation,
+) bool {
+	return left.Validate(project) == nil && right.Validate(project) == nil && left == right
 }
 
 func NewTerminalReservationLedger(project RuntimeProjectIdentity) (TerminalReservationLedger, error) {
