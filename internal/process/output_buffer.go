@@ -1,6 +1,7 @@
 package process
 
 import (
+	"sort"
 	"strings"
 	"sync"
 )
@@ -9,8 +10,15 @@ const maxPendingLineBytes = 8 * 1024
 
 type OutputLine struct {
 	Sequence  uint64 `json:"sequence"`
+	Stream    string `json:"stream,omitempty"`
 	Text      string `json:"text"`
 	Truncated bool   `json:"line_truncated,omitempty"`
+}
+
+type partialLine struct {
+	pending          strings.Builder
+	pendingTruncated bool
+	discardingLine   bool
 }
 
 // OutputBuffer is safe for concurrent stdout/stderr collectors. Line
@@ -25,10 +33,8 @@ type OutputBuffer struct {
 	truncated bool
 	nextSeq   uint64
 
-	pending          strings.Builder
-	pendingTruncated bool
-	discardingLine   bool
-	tail             []OutputLine
+	partials map[string]*partialLine
+	tail     []OutputLine
 }
 
 func NewOutputBuffer(tailLimit int, byteLimit int64) *OutputBuffer {
@@ -38,7 +44,10 @@ func NewOutputBuffer(tailLimit int, byteLimit int64) *OutputBuffer {
 	if byteLimit < 0 {
 		byteLimit = 0
 	}
-	return &OutputBuffer{tailLimit: tailLimit, byteLimit: byteLimit}
+	return &OutputBuffer{
+		tailLimit: tailLimit, byteLimit: byteLimit,
+		partials: make(map[string]*partialLine),
+	}
 }
 
 func (b *OutputBuffer) Append(chunk string) (accepted []string, accountedBytes int64) {
@@ -47,23 +56,33 @@ func (b *OutputBuffer) Append(chunk string) (accepted []string, accountedBytes i
 }
 
 func (b *OutputBuffer) AppendSequenced(chunk string) (accepted []OutputLine, accountedBytes int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.appendLocked(chunk)
+	return b.AppendStream("", chunk)
 }
 
-func (b *OutputBuffer) appendLocked(chunk string) ([]OutputLine, int64) {
+func (b *OutputBuffer) AppendStream(stream, chunk string) (accepted []OutputLine, accountedBytes int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.appendLocked(stream, chunk)
+}
+
+func (b *OutputBuffer) appendLocked(stream, chunk string) ([]OutputLine, int64) {
+	partial := b.partialLocked(stream)
 	remaining := b.byteLimit - b.bytes
 	if remaining <= 0 {
 		if chunk != "" {
 			b.truncated = true
+			if partial.pending.Len() > 0 || partial.discardingLine {
+				partial.pendingTruncated = true
+			}
 		}
 		return nil, 0
 	}
 	accounted := int64(len(chunk))
+	clipped := false
 	if accounted > remaining {
 		accounted = remaining
 		b.truncated = true
+		clipped = true
 	}
 	acceptedChunk := chunk[:int(accounted)]
 	b.bytes += accounted
@@ -74,26 +93,29 @@ func (b *OutputBuffer) appendLocked(chunk string) ([]OutputLine, int64) {
 		if hasNewline {
 			part = strings.TrimSuffix(part, "\n")
 		}
-		if !b.discardingLine && part != "" {
-			available := maxPendingLineBytes - b.pending.Len()
+		if !partial.discardingLine && part != "" {
+			available := maxPendingLineBytes - partial.pending.Len()
 			if len(part) <= available {
-				b.pending.WriteString(part)
+				partial.pending.WriteString(part)
 			} else {
 				if available > 0 {
-					b.pending.WriteString(part[:available])
+					partial.pending.WriteString(part[:available])
 				}
-				b.pendingTruncated = true
-				b.discardingLine = true
+				partial.pendingTruncated = true
+				partial.discardingLine = true
 			}
 		}
 		if !hasNewline {
 			continue
 		}
-		text := strings.TrimSuffix(b.pending.String(), "\r")
-		accepted = append(accepted, b.acceptLineLocked(text, b.pendingTruncated))
-		b.pending.Reset()
-		b.pendingTruncated = false
-		b.discardingLine = false
+		text := strings.TrimSuffix(partial.pending.String(), "\r")
+		accepted = append(accepted, b.acceptLineLocked(stream, text, partial.pendingTruncated))
+		partial.pending.Reset()
+		partial.pendingTruncated = false
+		partial.discardingLine = false
+	}
+	if clipped && (partial.pending.Len() > 0 || partial.discardingLine) {
+		partial.pendingTruncated = true
 	}
 	return accepted, accounted
 }
@@ -104,23 +126,56 @@ func (b *OutputBuffer) Flush() (accepted []string, accountedBytes int64) {
 }
 
 func (b *OutputBuffer) FlushSequenced() (accepted []OutputLine, accountedBytes int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.pending.Len() == 0 && !b.pendingTruncated {
-		return nil, 0
-	}
-	text := strings.TrimSuffix(b.pending.String(), "\r")
-	line := b.acceptLineLocked(text, b.pendingTruncated)
-	b.pending.Reset()
-	b.pendingTruncated = false
-	b.discardingLine = false
-	return []OutputLine{line}, 0
+	return b.FlushStream("")
 }
 
-func (b *OutputBuffer) acceptLineLocked(text string, truncated bool) OutputLine {
+func (b *OutputBuffer) FlushStream(stream string) (accepted []OutputLine, accountedBytes int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.flushStreamLocked(stream), 0
+}
+
+func (b *OutputBuffer) FlushAllSequenced() []OutputLine {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	streams := make([]string, 0, len(b.partials))
+	for stream := range b.partials {
+		streams = append(streams, stream)
+	}
+	// Map iteration must not decide cross-stream sequence ordering at EOF.
+	// Callers that need source order should flush each known stream explicitly.
+	sort.Strings(streams)
+	var accepted []OutputLine
+	for _, stream := range streams {
+		accepted = append(accepted, b.flushStreamLocked(stream)...)
+	}
+	return accepted
+}
+
+func (b *OutputBuffer) flushStreamLocked(stream string) []OutputLine {
+	partial, ok := b.partials[stream]
+	if !ok || partial.pending.Len() == 0 && !partial.pendingTruncated {
+		return nil
+	}
+	text := strings.TrimSuffix(partial.pending.String(), "\r")
+	line := b.acceptLineLocked(stream, text, partial.pendingTruncated)
+	delete(b.partials, stream)
+	return []OutputLine{line}
+}
+
+func (b *OutputBuffer) partialLocked(stream string) *partialLine {
+	partial := b.partials[stream]
+	if partial == nil {
+		partial = &partialLine{}
+		b.partials[stream] = partial
+	}
+	return partial
+}
+
+func (b *OutputBuffer) acceptLineLocked(stream, text string, truncated bool) OutputLine {
 	b.nextSeq++
 	b.lines++
-	line := OutputLine{Sequence: b.nextSeq, Text: text, Truncated: truncated}
+	line := OutputLine{Sequence: b.nextSeq, Stream: stream, Text: text, Truncated: truncated}
 	if b.tailLimit > 0 {
 		if len(b.tail) == b.tailLimit {
 			copy(b.tail, b.tail[1:])

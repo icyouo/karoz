@@ -24,6 +24,9 @@ func SourceGapKey(authorityID, sourceKind string) string {
 }
 
 func ApplySourceGap(item Monitor, gap SourceGapStatus, now time.Time) (Monitor, error) {
+	if err := ValidateSourceGaps(item.SourceGaps); err != nil {
+		return item, err
+	}
 	if gap.AuthorityID == "" || gap.SourceKind == "" || gap.GapVersion == 0 ||
 		gap.FirstVersion == 0 || gap.LastVersion < gap.FirstVersion || gap.LostCount == 0 {
 		return item, errors.New("invalid source gap")
@@ -66,6 +69,9 @@ func ApplySourceGap(item Monitor, gap SourceGapStatus, now time.Time) (Monitor, 
 }
 
 func AcknowledgeSourceGap(item Monitor, authorityID, sourceKind string, expectedGapVersion, barrier uint64, principal string, now time.Time) (Monitor, error) {
+	if err := ValidateSourceGaps(item.SourceGaps); err != nil {
+		return item, err
+	}
 	item = cloneMonitor(item)
 	key := SourceGapKey(authorityID, sourceKind)
 	gap, ok := item.SourceGaps[key]
@@ -88,6 +94,9 @@ func AcknowledgeSourceGap(item Monitor, authorityID, sourceKind string, expected
 }
 
 func CanEnableAfterSourceGaps(item Monitor, validatedBarriers map[string]uint64) error {
+	if err := ValidateSourceGaps(item.SourceGaps); err != nil {
+		return err
+	}
 	for key, gap := range item.SourceGaps {
 		if gap.AcknowledgedGapVersion != gap.GapVersion || gap.AcknowledgedGapVersion == 0 {
 			return fmt.Errorf("source gap %s is unacknowledged", key)

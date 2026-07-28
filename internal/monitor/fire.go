@@ -85,7 +85,15 @@ func Fire(item Monitor, detail string, now time.Time) Decision {
 
 func cloneMonitor(item Monitor) Monitor {
 	item.RecentFires = append([]time.Time(nil), item.RecentFires...)
-	item.PendingFires = append([]PendingFire(nil), item.PendingFires...)
+	if item.PendingFires != nil {
+		pendingFires := item.PendingFires
+		item.PendingFires = make([]PendingFire, len(pendingFires))
+		for index, pending := range pendingFires {
+			pending.EventBriefing = append([]byte(nil), pending.EventBriefing...)
+			pending.Action.ActionPayload = append([]byte(nil), pending.Action.ActionPayload...)
+			item.PendingFires[index] = pending
+		}
+	}
 	if item.SourceGaps != nil {
 		sourceGaps := item.SourceGaps
 		item.SourceGaps = make(map[string]SourceGapStatus, len(sourceGaps))

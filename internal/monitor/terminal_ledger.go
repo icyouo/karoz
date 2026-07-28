@@ -134,10 +134,15 @@ func (ledger TerminalReservationLedger) Validate(project RuntimeProjectIdentity)
 	if ledger.Capacity != TerminalReservationCapacity {
 		return errors.New("terminal reservation ledger capacity must be 4096")
 	}
+	if ledger.Slots == nil {
+		return errors.New("terminal reservation ledger slots are missing")
+	}
 	if len(ledger.Slots) > int(ledger.Capacity) {
 		return errors.New("terminal reservation capacity exceeded")
 	}
 	tokens := make(map[string]bool, len(ledger.Slots))
+	operations := make(map[string]bool, len(ledger.Slots))
+	entities := make(map[[2]string]bool, len(ledger.Slots))
 	for slot, reservation := range ledger.Slots {
 		if reservation.Slot != slot {
 			return fmt.Errorf("terminal reservation slot mismatch at %d", slot)
@@ -149,6 +154,15 @@ func (ledger TerminalReservationLedger) Validate(project RuntimeProjectIdentity)
 			return errors.New("duplicate terminal reservation token in project")
 		}
 		tokens[reservation.Token] = true
+		if operations[reservation.OperationID] {
+			return errors.New("duplicate terminal reservation operation in project")
+		}
+		operations[reservation.OperationID] = true
+		entity := [2]string{reservation.AuthorityID, reservation.EntityID}
+		if entities[entity] {
+			return errors.New("duplicate terminal reservation entity in project")
+		}
+		entities[entity] = true
 	}
 	return nil
 }
@@ -202,6 +216,12 @@ func (ledger TerminalReservationLedger) Allocate(project RuntimeProjectIdentity,
 	for _, existing := range ledger.Slots {
 		if existing.Token == reservation.Token {
 			return ledger, errors.New("duplicate terminal reservation token in project")
+		}
+		if existing.OperationID == reservation.OperationID {
+			return ledger, errors.New("duplicate terminal reservation operation in project")
+		}
+		if existing.AuthorityID == reservation.AuthorityID && existing.EntityID == reservation.EntityID {
+			return ledger, errors.New("duplicate terminal reservation entity in project")
 		}
 	}
 	result := cloneTerminalLedger(ledger)

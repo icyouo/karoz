@@ -180,3 +180,39 @@ func TestOperationAndAuthorityRequireExactProjectIdentity(t *testing.T) {
 		t.Fatal("authority records compared equal across project identities")
 	}
 }
+
+func TestTerminalLedgerRejectsSchemaLossAndDuplicateBijection(t *testing.T) {
+	project := testProjectIdentity("project-a")
+	body, err := json.Marshal(struct {
+		Project  RuntimeProjectIdentity `json:"project"`
+		Capacity uint16                 `json:"capacity"`
+		Slots    any                    `json:"slots"`
+	}{Project: project, Capacity: TerminalReservationCapacity, Slots: nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corrupted TerminalReservationLedger
+	if err := json.Unmarshal(body, &corrupted); err != nil {
+		t.Fatal(err)
+	}
+	if err := corrupted.Validate(project); err == nil {
+		t.Fatal("null slots validated as an empty ledger")
+	}
+
+	ledger, _ := NewTerminalReservationLedger(project)
+	first := testReservation(project, 0, "one")
+	second := testReservation(project, 1, "two")
+	ledger.Slots[0] = first
+	second.OperationID = first.OperationID
+	ledger.Slots[1] = second
+	if err := ledger.Validate(project); err == nil {
+		t.Fatal("duplicate operation reservation accepted")
+	}
+	second.OperationID = "operation-two"
+	second.AuthorityID = first.AuthorityID
+	second.EntityID = first.EntityID
+	ledger.Slots[1] = second
+	if err := ledger.Validate(project); err == nil {
+		t.Fatal("duplicate authority/entity reservation accepted")
+	}
+}

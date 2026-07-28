@@ -78,3 +78,46 @@ func TestOutputBufferConcurrentSequences(t *testing.T) {
 		}
 	}
 }
+
+func TestOutputBufferKeepsConcurrentStreamPartialsSeparate(t *testing.T) {
+	buffer := NewOutputBuffer(200, 1024)
+	stdoutStarted := make(chan struct{})
+	stderrDone := make(chan []OutputLine)
+	stdoutDone := make(chan []OutputLine)
+	go func() {
+		lines, _ := buffer.AppendStream("stdout", "out")
+		if len(lines) != 0 {
+			t.Errorf("stdout partial emitted: %#v", lines)
+		}
+		close(stdoutStarted)
+		stderr := <-stderrDone
+		_ = stderr
+		lines, _ = buffer.AppendStream("stdout", "\n")
+		stdoutDone <- lines
+	}()
+	<-stdoutStarted
+	stderr, _ := buffer.AppendStream("stderr", "err\n")
+	stderrDone <- stderr
+	stdout := <-stdoutDone
+	if len(stderr) != 1 || stderr[0].Text != "err" || stderr[0].Stream != "stderr" {
+		t.Fatalf("stderr framing corrupted: %#v", stderr)
+	}
+	if len(stdout) != 1 || stdout[0].Text != "out" || stdout[0].Stream != "stdout" {
+		t.Fatalf("stdout framing corrupted: %#v", stdout)
+	}
+	if stderr[0].Sequence+1 != stdout[0].Sequence {
+		t.Fatalf("global sequence lost: %#v, %#v", stderr, stdout)
+	}
+}
+
+func TestOutputBufferByteCapMarksFlushedPartialTruncated(t *testing.T) {
+	buffer := NewOutputBuffer(200, 5)
+	lines, accepted := buffer.AppendStream("stdout", "abcdef")
+	if len(lines) != 0 || accepted != 5 {
+		t.Fatalf("capped partial append = %#v, %d", lines, accepted)
+	}
+	flushed, _ := buffer.FlushStream("stdout")
+	if len(flushed) != 1 || flushed[0].Text != "abcde" || !flushed[0].Truncated {
+		t.Fatalf("clipped partial not marked truncated: %#v", flushed)
+	}
+}

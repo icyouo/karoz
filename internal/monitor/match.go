@@ -109,9 +109,15 @@ func matchOrigin(item Monitor, origin Origin) bool {
 }
 
 func ValidateTrigger(trigger Trigger) error {
+	if trigger.Revision <= 0 {
+		return errInvalidTrigger
+	}
 	switch trigger.Kind {
 	case TriggerRuntimeEvent:
 		if len(trigger.EventKinds) == 0 || len(trigger.EventKinds) > MaxEventKinds {
+			return errInvalidTrigger
+		}
+		if trigger.ProcessID != "" || trigger.FailureOnly || trigger.Pattern != "" || hasProbeFields(trigger) {
 			return errInvalidTrigger
 		}
 		seen := make(map[string]bool)
@@ -123,21 +129,44 @@ func ValidateTrigger(trigger Trigger) error {
 			seen[kind] = true
 		}
 	case TriggerProcessExit:
+		if strings.TrimSpace(trigger.ProcessID) == "" || trigger.Pattern != "" ||
+			hasRuntimeFields(trigger) || hasProbeFields(trigger) {
+			return errInvalidTrigger
+		}
 	case TriggerProcessOutput:
-		if trigger.Pattern == "" {
+		if strings.TrimSpace(trigger.ProcessID) == "" || trigger.Pattern == "" ||
+			trigger.FailureOnly || hasRuntimeFields(trigger) || hasProbeFields(trigger) {
 			return errInvalidTrigger
 		}
 		if _, err := regexp.Compile(trigger.Pattern); err != nil {
 			return errInvalidTrigger
 		}
 	case TriggerScriptProbe:
-		if trigger.ProbeLanguage != "shell" && trigger.ProbeLanguage != "javascript" {
+		if trigger.ProbeLanguage != "shell" && trigger.ProbeLanguage != "javascript" ||
+			strings.TrimSpace(trigger.ProbePath) == "" ||
+			!validSHA256(trigger.ProbeSHA256) ||
+			trigger.IntervalMS < 10_000 ||
+			trigger.TimeoutMS <= 0 || trigger.TimeoutMS > 30_000 ||
+			strings.TrimSpace(trigger.ApprovalReceiptID) == "" ||
+			hasRuntimeFields(trigger) || trigger.ProcessID != "" ||
+			trigger.FailureOnly || trigger.Pattern != "" {
 			return errInvalidTrigger
 		}
 	default:
 		return errInvalidTrigger
 	}
 	return nil
+}
+
+func hasRuntimeFields(trigger Trigger) bool {
+	return len(trigger.EventKinds) != 0 || trigger.EntityID != "" ||
+		trigger.FromState != "" || trigger.ToState != "" || trigger.IncludeMonitorEvents
+}
+
+func hasProbeFields(trigger Trigger) bool {
+	return trigger.ProbeLanguage != "" || trigger.ProbePath != "" ||
+		trigger.ProbeSHA256 != "" || trigger.IntervalMS != 0 ||
+		trigger.TimeoutMS != 0 || trigger.ApprovalReceiptID != ""
 }
 
 var errInvalidTrigger = &validationError{"invalid trigger"}

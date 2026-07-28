@@ -74,12 +74,40 @@ func TestSourceGapNewVersionClearsAcknowledgementAndCap(t *testing.T) {
 	full := Monitor{State: StateActive, SourceGaps: make(map[string]SourceGapStatus)}
 	for index := 0; index < MaxSourceGaps; index++ {
 		authority := string(rune('a' + index))
-		full.SourceGaps[SourceGapKey(authority, "kind")] = SourceGapStatus{AuthorityID: authority, SourceKind: "kind"}
+		full.SourceGaps[SourceGapKey(authority, "kind")] = SourceGapStatus{
+			AuthorityID: authority, SourceKind: "kind",
+			GapVersion: 1, FirstVersion: 1, LastVersion: 1, LostCount: 1,
+		}
 	}
 	if _, err := ApplySourceGap(full, SourceGapStatus{
 		AuthorityID: "overflow", SourceKind: "kind", GapVersion: 1, FirstVersion: 1, LastVersion: 1, LostCount: 1,
 	}, now); err == nil {
 		t.Fatal("17th source gap accepted")
+	}
+}
+
+func TestSourceGapForgedKeyFailsClosed(t *testing.T) {
+	item := Monitor{
+		State: StateDisabled, ErrorCode: "source_gap",
+		SourceGaps: map[string]SourceGapStatus{
+			SourceGapKey("task-store", "task_changed"): {
+				AuthorityID: "plan-store", SourceKind: "plan_changed",
+				GapVersion: 1, FirstVersion: 1, LastVersion: 1, LostCount: 1,
+				AcknowledgedGapVersion: 1, AcknowledgedAt: timePointer(time.Now()),
+				AcknowledgedBy: "operator", ResumeAfterVersion: 1,
+			},
+		},
+	}
+	if _, err := EnableAfterSourceGaps(item, map[string]uint64{
+		SourceGapKey("task-store", "task_changed"): 1,
+	}, time.Now()); err == nil {
+		t.Fatal("forged source gap map enabled")
+	}
+	monitor := validMonitorFixture()
+	monitor.State = StateDisabled
+	monitor.SourceGaps = item.SourceGaps
+	if ValidateMonitor(monitor) == nil {
+		t.Fatal("monitor validation accepted forged source gap map")
 	}
 }
 
