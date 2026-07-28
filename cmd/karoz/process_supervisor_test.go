@@ -179,6 +179,20 @@ func waitTerminal(t *testing.T, store *memoryProcessStore, id string) processdom
 	return processdomain.Process{}
 }
 
+func waitTerminalWithSupervisor(t *testing.T, supervisor *processSupervisor, store *memoryProcessStore, id string) processdomain.Process {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		record := store.get(id)
+		if record.State.Terminal() {
+			return record
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("process %s did not become terminal: %+v faults=%#v", id, store.get(id), supervisor.RecoveryFaults())
+	return processdomain.Process{}
+}
+
 func TestProcessSupervisorTrueOneWriteAndLongRun(t *testing.T) {
 	cases := []struct {
 		id, command, output string
@@ -442,7 +456,7 @@ func TestProcessSupervisorLogFailureAndTerminalArbitration(t *testing.T) {
 	if _, err := supervisor.Start(context.Background(), startRequest("log-fail", "printf x; sleep 30", t.TempDir())); err != nil {
 		t.Fatal(err)
 	}
-	record := waitTerminal(t, store, "log-fail")
+	record := waitTerminalWithSupervisor(t, supervisor, store, "log-fail")
 	if record.State != processdomain.StateFailed || !strings.Contains(record.Error, "log write failed") {
 		t.Fatalf("log failure = %+v", record)
 	}
@@ -454,7 +468,7 @@ func TestProcessSupervisorLogFailureAndTerminalArbitration(t *testing.T) {
 	if _, err := supervisor.Start(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
-	record = waitTerminal(t, store, "lifetime")
+	record = waitTerminalWithSupervisor(t, supervisor, store, "lifetime")
 	if record.State != processdomain.StateFailed || record.Error != "lifetime exceeded" {
 		t.Fatalf("lifetime result = %+v", record)
 	}
@@ -486,6 +500,20 @@ func TestProcessSupervisorLifetimeDefaultsAndCeiling(t *testing.T) {
 		if _, err := supervisor.Start(context.Background(), request); err == nil {
 			t.Fatalf("accepted lifetime %s", lifetime)
 		}
+	}
+	if _, err := newProcessSupervisor(
+		context.Background(), newMemoryProcessStore(), newMemoryReservationBoundary(),
+		func(processdomain.Process) (io.WriteCloser, error) { return &synchronizedBuffer{}, nil },
+		processSupervisorConfig{MaxLifetime: maxProcessLifetime + time.Second},
+	); err == nil {
+		t.Fatal("configured maximum bypassed the product lifetime ceiling")
+	}
+	if _, err := newProcessSupervisor(
+		context.Background(), newMemoryProcessStore(), newMemoryReservationBoundary(),
+		func(processdomain.Process) (io.WriteCloser, error) { return &synchronizedBuffer{}, nil },
+		processSupervisorConfig{DefaultLifetime: 15 * time.Minute, MaxLifetime: 30 * time.Minute},
+	); err != nil {
+		t.Fatalf("valid lifetime overrides rejected: %v", err)
 	}
 }
 
@@ -605,6 +633,250 @@ func TestProcessSupervisorAbortFailureIsRecoverableEvidence(t *testing.T) {
 	if len(faults) != 1 || faults[0].Stage != "pre_spawn_abort" {
 		t.Fatalf("recovery faults = %#v", faults)
 	}
+}
+
+func TestProcessSupervisorPermanentTerminalFailureRetainsOwnership(t *testing.T) {
+	store := newMemoryProcessStore()
+	store.terminalFailures["permanent"] = 1000
+	supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+		TerminalRetries: 3,
+		TerminalRetry:   time.Millisecond,
+	})
+	if _, err := supervisor.Start(context.Background(), startRequest("permanent", "true", t.TempDir())); err != nil &&
+		!strings.Contains(err.Error(), "terminal state is not durable") {
+		t.Fatalf("permanent terminal failure = %v", err)
+	}
+	waitForRecoveryFault(t, supervisor)
+	supervisor.mu.Lock()
+	retained := supervisor.handles["permanent"]
+	supervisor.mu.Unlock()
+	if retained == nil {
+		t.Fatal("terminal persistence failure released process ownership")
+	}
+	faults := waitForRecoveryCount(t, supervisor, 3)
+	if len(faults) != 1 || faults[0].Count != 3 {
+		t.Fatalf("coalesced recovery faults = %#v", faults)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := supervisor.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown with unresolved terminal state = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("shutdown ignored its deadline: %s", elapsed)
+	}
+}
+
+func TestProcessSupervisorPermanentPreSpawnFailureRetainsReservation(t *testing.T) {
+	store := newMemoryProcessStore()
+	store.terminalFailures["pre-permanent"] = 1000
+	reservations := newMemoryReservationBoundary()
+	supervisor := testSupervisor(t, store, reservations, &synchronizedBuffer{}, processSupervisorConfig{
+		TerminalRetries: 2,
+		TerminalRetry:   time.Millisecond,
+		Fail: func(point processFailpoint) error {
+			if point == processFailLogOpen {
+				return errors.New("pre-spawn failure")
+			}
+			return nil
+		},
+	})
+	request := startRequest("pre-permanent", "true", t.TempDir())
+	if _, err := supervisor.Start(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), "terminal state is not durable") {
+		t.Fatalf("pre-spawn permanent failure = %v", err)
+	}
+	supervisor.mu.Lock()
+	_, retained := supervisor.faulted[request.ID]
+	supervisor.mu.Unlock()
+	if !retained || reservations.aborted[request.ID] {
+		t.Fatalf("faulted ownership=%v aborted=%v", retained, reservations.aborted[request.ID])
+	}
+	if _, err := supervisor.Start(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), "unresolved durable state") {
+		t.Fatalf("duplicate faulted start = %v", err)
+	}
+}
+
+func TestProcessSupervisorRecoveryFaultsAreCoalescedAndBounded(t *testing.T) {
+	supervisor := testSupervisor(
+		t, newMemoryProcessStore(), newMemoryReservationBoundary(), &synchronizedBuffer{},
+		processSupervisorConfig{},
+	)
+	for index := 0; index < 100; index++ {
+		supervisor.recordRecovery("same", "terminal", errors.New("failed"))
+	}
+	faults := supervisor.RecoveryFaults()
+	if len(faults) != 1 || faults[0].Count != 100 {
+		t.Fatalf("coalesced faults = %#v", faults)
+	}
+	for index := 0; index < maxRecoveryFaults+10; index++ {
+		supervisor.recordRecovery(fmt.Sprintf("process-%d", index), "terminal", errors.New("failed"))
+	}
+	if faults = supervisor.RecoveryFaults(); len(faults) != maxRecoveryFaults {
+		t.Fatalf("recovery fault bound = %d", len(faults))
+	}
+}
+
+func TestProcessSupervisorShutdownDeadlineWhileStartIsPersisting(t *testing.T) {
+	store := newMemoryProcessStore()
+	store.terminalFailures["persisting-start"] = 1
+	entered := make(chan struct{})
+	supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+		TerminalRetries: 2,
+		TerminalRetry:   100 * time.Millisecond,
+		Fail: func(point processFailpoint) error {
+			if point == processFailLogOpen {
+				close(entered)
+				return errors.New("pre-spawn failure")
+			}
+			return nil
+		},
+	})
+	startDone := make(chan error, 1)
+	go func() {
+		_, err := supervisor.Start(context.Background(), startRequest("persisting-start", "true", t.TempDir()))
+		startDone <- err
+	}()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := supervisor.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown waiting for Start = %v", err)
+	}
+	if err := <-startDone; err == nil || !strings.Contains(err.Error(), "pre-spawn failure") {
+		t.Fatalf("start result = %v", err)
+	}
+}
+
+type injectedProcessBoundary struct {
+	delegate  processBoundary
+	afterErr  error
+	signalErr error
+	closeErr  error
+	closed    bool
+}
+
+func (boundary *injectedProcessBoundary) AfterStart(cmd *exec.Cmd) error {
+	if boundary.afterErr != nil {
+		return boundary.afterErr
+	}
+	return boundary.delegate.AfterStart(cmd)
+}
+
+func (boundary *injectedProcessBoundary) Signal(signal os.Signal) error {
+	if boundary.signalErr != nil {
+		return boundary.signalErr
+	}
+	return boundary.delegate.Signal(signal)
+}
+
+func (boundary *injectedProcessBoundary) Close() error {
+	boundary.closed = true
+	delegateErr := boundary.delegate.Close()
+	return errors.Join(delegateErr, boundary.closeErr)
+}
+
+func TestProcessSupervisorAfterStartFailureClosesAndKillsGuard(t *testing.T) {
+	var injected *injectedProcessBoundary
+	supervisor := testSupervisor(
+		t, newMemoryProcessStore(), newMemoryReservationBoundary(), &synchronizedBuffer{},
+		processSupervisorConfig{
+			BoundaryFactory: func(cmd *exec.Cmd) (processBoundary, error) {
+				delegate, err := newBackgroundProcessBoundary(cmd)
+				if err != nil {
+					return nil, err
+				}
+				injected = &injectedProcessBoundary{
+					delegate: delegate, afterErr: errors.New("assignment failed"),
+				}
+				return injected, nil
+			},
+			StopGrace: 100 * time.Millisecond,
+		},
+	)
+	start := time.Now()
+	if _, err := supervisor.Start(context.Background(), startRequest("after-start", "sleep 30", t.TempDir())); err == nil ||
+		!strings.Contains(err.Error(), "assignment failed") {
+		t.Fatalf("AfterStart failure = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("AfterStart rollback blocked: %s", elapsed)
+	}
+	if injected == nil || !injected.closed {
+		t.Fatal("failed boundary was not closed")
+	}
+}
+
+func TestProcessSupervisorContainmentFailureRetainsOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		signalErr error
+		closeErr  error
+	}{
+		{name: "signal", signalErr: errors.New("kill failed")},
+		{name: "close", closeErr: errors.New("close failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newMemoryProcessStore()
+			supervisor := testSupervisor(
+				t, store, newMemoryReservationBoundary(), &synchronizedBuffer{},
+				processSupervisorConfig{
+					BoundaryFactory: func(cmd *exec.Cmd) (processBoundary, error) {
+						delegate, err := newBackgroundProcessBoundary(cmd)
+						if err != nil {
+							return nil, err
+						}
+						return &injectedProcessBoundary{
+							delegate: delegate, signalErr: test.signalErr, closeErr: test.closeErr,
+						}, nil
+					},
+				},
+			)
+			_, err := supervisor.Start(context.Background(), startRequest("containment-"+test.name, "true", t.TempDir()))
+			if err != nil && !strings.Contains(err.Error(), "containment failed") {
+				t.Fatalf("containment failure = %v", err)
+			}
+			waitForRecoveryFault(t, supervisor)
+			id := "containment-" + test.name
+			if record := store.get(id); record.State != processdomain.StateRunning {
+				t.Fatalf("containment failure committed terminal state: %+v", record)
+			}
+			supervisor.mu.Lock()
+			retained := supervisor.handles[id]
+			supervisor.mu.Unlock()
+			if retained == nil {
+				t.Fatal("containment failure released ownership")
+			}
+		})
+	}
+}
+
+func waitForRecoveryFault(t *testing.T, supervisor *processSupervisor) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(supervisor.RecoveryFaults()) > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("recovery fault did not surface")
+}
+
+func waitForRecoveryCount(t *testing.T, supervisor *processSupervisor, count uint64) []processRecoveryFault {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		faults := supervisor.RecoveryFaults()
+		if len(faults) > 0 && faults[0].Count >= count {
+			return faults
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("recovery fault count did not reach %d: %#v", count, supervisor.RecoveryFaults())
+	return nil
 }
 
 func TestProcessSupervisorStopExitLifetimeRaceCommitsOnce(t *testing.T) {
@@ -740,15 +1012,28 @@ func waitForFile(t *testing.T, path string) {
 
 func readPID(t *testing.T, path string) int {
 	t.Helper()
-	value, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		value, err := os.ReadFile(path)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(value)))
+			if parseErr == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(value)))
-	if err != nil {
-		t.Fatal(err)
+	t.Fatalf("file %s did not contain a complete positive PID", path)
+	return 0
+}
+
+func TestUnixProcessBoundaryRejectsNonPositivePGID(t *testing.T) {
+	for _, pgid := range []int{0, -1} {
+		boundary := &unixProcessBoundary{pgid: pgid}
+		if err := boundary.Signal(syscall.SIGKILL); err == nil {
+			t.Fatalf("signaled non-positive pgid %d", pgid)
+		}
 	}
-	return pid
 }
 
 func waitProcessGone(t *testing.T, pid int) {

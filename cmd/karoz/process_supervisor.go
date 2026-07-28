@@ -17,6 +17,10 @@ import (
 const (
 	defaultProcessLifetime = time.Hour
 	maxProcessLifetime     = 24 * time.Hour
+	defaultTerminalRetries = 3
+	maxTerminalRetries     = 5
+	maxTerminalRetryDelay  = 250 * time.Millisecond
+	maxRecoveryFaults      = 64
 )
 
 type processKernelStore interface {
@@ -57,9 +61,11 @@ type processSupervisorConfig struct {
 	DefaultLifetime time.Duration
 	MaxLifetime     time.Duration
 	TerminalRetry   time.Duration
+	TerminalRetries int
 	Fail            func(processFailpoint) error
 	GuardExecutable string
 	GuardArgsPrefix []string
+	BoundaryFactory func(*exec.Cmd) (processBoundary, error)
 }
 
 type processStartRequest struct {
@@ -72,6 +78,7 @@ type processRecoveryFault struct {
 	ProcessID string
 	Stage     string
 	Error     string
+	Count     uint64
 }
 
 type processSupervisor struct {
@@ -83,10 +90,11 @@ type processSupervisor struct {
 	openLog      processLogOpener
 	config       processSupervisorConfig
 
-	startMu sync.Mutex
-	mu      sync.Mutex
-	closed  bool
-	handles map[string]*supervisedProcess
+	startGate chan struct{}
+	mu        sync.Mutex
+	closed    bool
+	handles   map[string]*supervisedProcess
+	faulted   map[string]processdomain.Process
 
 	recoveryMu sync.Mutex
 	recovery   []processRecoveryFault
@@ -102,18 +110,21 @@ type supervisedProcess struct {
 	log        io.WriteCloser
 	buffer     *processdomain.OutputBuffer
 
-	gate         chan struct{}
-	registered   bool
-	exitObserved chan struct{}
-	waitDone     chan struct{}
-	terminalDone chan struct{}
-	stdoutDone   chan struct{}
-	stderrDone   chan struct{}
+	gate          chan struct{}
+	registered    bool
+	exitObserved  chan struct{}
+	waitDone      chan struct{}
+	terminalDone  chan struct{}
+	terminalFault chan error
+	stdoutDone    chan struct{}
+	stderrDone    chan struct{}
 
-	collectMu sync.Mutex
-	early     []byte
-	stateMu   sync.Mutex
-	cause     processTerminalCause
+	collectMu          sync.Mutex
+	early              []byte
+	containMu          sync.Mutex
+	hardKillDispatched bool
+	stateMu            sync.Mutex
+	cause              processTerminalCause
 }
 
 type processTerminalCause struct {
@@ -152,16 +163,32 @@ func newProcessSupervisor(
 	if config.MaxLifetime <= 0 {
 		config.MaxLifetime = maxProcessLifetime
 	}
+	if config.MaxLifetime > maxProcessLifetime {
+		return nil, errors.New("maximum process lifetime exceeds product ceiling")
+	}
 	if config.DefaultLifetime > config.MaxLifetime {
 		return nil, errors.New("default process lifetime exceeds maximum")
 	}
 	if config.TerminalRetry <= 0 {
 		config.TerminalRetry = 10 * time.Millisecond
 	}
+	if config.TerminalRetry > maxTerminalRetryDelay {
+		return nil, errors.New("terminal retry delay exceeds maximum")
+	}
+	if config.TerminalRetries <= 0 {
+		config.TerminalRetries = defaultTerminalRetries
+	}
+	if config.TerminalRetries > maxTerminalRetries {
+		return nil, errors.New("terminal retry count exceeds maximum")
+	}
+	if config.BoundaryFactory == nil {
+		config.BoundaryFactory = newBackgroundProcessBoundary
+	}
 	ctx, cancel := context.WithCancel(serverCtx)
 	return &processSupervisor{
 		ctx: ctx, cancel: cancel, store: store, reservations: reservations,
-		openLog: openLog, config: config, handles: make(map[string]*supervisedProcess),
+		openLog: openLog, config: config, startGate: make(chan struct{}, 1),
+		handles: make(map[string]*supervisedProcess), faulted: make(map[string]processdomain.Process),
 	}, nil
 }
 
@@ -175,8 +202,10 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 
 	// Shutdown takes the same lock before closing admission. A spawned process is
 	// therefore either fully registered and signalable, or fully rolled back.
-	supervisor.startMu.Lock()
-	defer supervisor.startMu.Unlock()
+	if err := supervisor.acquireStart(supervisor.ctx); err != nil {
+		return processdomain.Process{}, err
+	}
+	defer supervisor.releaseStart()
 
 	supervisor.mu.Lock()
 	if supervisor.closed {
@@ -186,6 +215,10 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 	if _, exists := supervisor.handles[request.ID]; exists {
 		supervisor.mu.Unlock()
 		return processdomain.Process{}, errors.New("process already exists")
+	}
+	if _, exists := supervisor.faulted[request.ID]; exists {
+		supervisor.mu.Unlock()
+		return processdomain.Process{}, errors.New("process has unresolved durable state")
 	}
 	supervisor.mu.Unlock()
 
@@ -265,11 +298,28 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 	go supervisor.enforceLifetime(handle, lifetime)
 	select {
 	case <-handle.exitObserved:
-		<-handle.terminalDone
-		return handle.snapshot(), nil
+		select {
+		case <-handle.terminalDone:
+			return handle.snapshot(), nil
+		case terminalErr := <-handle.terminalFault:
+			return handle.snapshot(), terminalErr
+		}
 	default:
 		return handle.snapshot(), nil
 	}
+}
+
+func (supervisor *processSupervisor) acquireStart(ctx context.Context) error {
+	select {
+	case supervisor.startGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (supervisor *processSupervisor) releaseStart() {
+	<-supervisor.startGate
 }
 
 func (supervisor *processSupervisor) validateStartRequest(request processStartRequest) (time.Duration, error) {
@@ -302,7 +352,10 @@ func (supervisor *processSupervisor) failBeforeSpawn(record processdomain.Proces
 	record.Error = cause.Error()
 	record.UpdatedAt = time.Now().UTC()
 	record.EndedAt = timePointer(record.UpdatedAt)
-	supervisor.persistTerminal(record, "pre_spawn_terminal")
+	if err := supervisor.persistTerminal(record, "pre_spawn_terminal"); err != nil {
+		supervisor.retainFaulted(record)
+		return record, errors.Join(cause, err)
+	}
 	if err := supervisor.reservations.Abort(record); err != nil {
 		supervisor.recordRecovery(record.ID, "pre_spawn_abort", err)
 		return record, errors.Join(cause, err)
@@ -323,10 +376,11 @@ func (supervisor *processSupervisor) launch(record processdomain.Process, logWri
 		}
 	}
 	args := append([]string(nil), supervisor.config.GuardArgsPrefix...)
-	args = append(args, "process-guard", "--", "bash", "-lc", record.Command)
+	args = append(args, "process-guard", "--")
+	args = append(args, backgroundShellCommand(record.Command)...)
 	cmd := exec.CommandContext(supervisor.ctx, executable, args...)
 	cmd.Dir = record.Workdir
-	boundary, err := newBackgroundProcessBoundary(cmd)
+	boundary, err := supervisor.config.BoundaryFactory(cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -348,12 +402,28 @@ func (supervisor *processSupervisor) launch(record processdomain.Process, logWri
 		return nil, err
 	}
 	if err := boundary.AfterStart(cmd); err != nil {
-		_ = boundary.Signal(os.Kill)
-		_ = cmd.Wait()
-		_ = boundary.Close()
+		// Windows guards remain blocked on their assignment handshake until the
+		// boundary closes. Close first, then directly kill the guard as the
+		// fallback that does not depend on a successfully assigned Job Object.
+		closeErr := boundary.Close()
+		killErr := cmd.Process.Kill()
+		waitDone := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(waitDone)
+		}()
+		timer := time.NewTimer(supervisor.config.StopGrace)
+		select {
+		case <-waitDone:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+			_ = cmd.Process.Kill()
+		}
 		_ = stdout.Close()
 		_ = stderr.Close()
-		return nil, err
+		return nil, errors.Join(err, closeErr, killErr)
 	}
 	return &supervisedProcess{
 		supervisor: supervisor, record: record, cmd: cmd, boundary: boundary,
@@ -361,7 +431,8 @@ func (supervisor *processSupervisor) launch(record processdomain.Process, logWri
 		buffer: processdomain.NewOutputBuffer(supervisor.config.TailLines, supervisor.config.LogBytes),
 		gate:   make(chan struct{}), exitObserved: make(chan struct{}),
 		waitDone: make(chan struct{}), terminalDone: make(chan struct{}),
-		stdoutDone: make(chan struct{}), stderrDone: make(chan struct{}),
+		terminalFault: make(chan error, 1),
+		stdoutDone:    make(chan struct{}), stderrDone: make(chan struct{}),
 	}, nil
 }
 
@@ -396,7 +467,7 @@ func (supervisor *processSupervisor) collect(
 					if err := writeAll(handle.log, chunk[:accepted]); err != nil {
 						handle.collectMu.Unlock()
 						handle.setCause(processdomain.StateFailed, "process log write failed: "+err.Error())
-						_ = handle.boundary.Signal(os.Kill)
+						_ = handle.signal(os.Kill)
 						return
 					}
 				} else {
@@ -434,7 +505,7 @@ func (supervisor *processSupervisor) armWaiter(handle *supervisedProcess) {
 		close(handle.exitObserved)
 		// The guard may die before its command tree. Contain the residual group
 		// before draining pipes or committing the terminal record.
-		_ = handle.boundary.Signal(os.Kill)
+		containErr := handle.residualContain()
 		supervisor.waitForCollectors(handle)
 		<-handle.gate
 		handle.stateMu.Lock()
@@ -448,7 +519,15 @@ func (supervisor *processSupervisor) armWaiter(handle *supervisedProcess) {
 		_, _ = handle.buffer.FlushStream("stderr")
 		_ = handle.log.Close()
 		handle.collectMu.Unlock()
-		_ = handle.boundary.Close()
+		closeErr := handle.boundary.Close()
+		if err := errors.Join(containErr, closeErr); err != nil {
+			supervisor.recordRecovery(handle.record.ID, "containment", err)
+			select {
+			case handle.terminalFault <- fmt.Errorf("process containment failed: %w", err):
+			default:
+			}
+			return
+		}
 		supervisor.finish(handle, waitErr)
 	}()
 	<-armed
@@ -496,7 +575,16 @@ func (supervisor *processSupervisor) finish(handle *supervisedProcess, waitErr e
 	record.UpdatedAt = time.Now().UTC()
 	record.EndedAt = timePointer(record.UpdatedAt)
 	record.LogBytes, record.LogLines, record.LogTruncated = handle.buffer.Stats()
-	supervisor.persistTerminal(record, "live_terminal")
+	if err := supervisor.persistTerminal(record, "live_terminal"); err != nil {
+		handle.stateMu.Lock()
+		handle.record = record
+		handle.stateMu.Unlock()
+		select {
+		case handle.terminalFault <- err:
+		default:
+		}
+		return
+	}
 	handle.stateMu.Lock()
 	handle.record = record
 	handle.stateMu.Unlock()
@@ -516,7 +604,7 @@ func (supervisor *processSupervisor) rollbackSpawn(handle *supervisedProcess, ca
 	default:
 		close(handle.gate)
 	}
-	_ = handle.boundary.Signal(os.Kill)
+	_ = handle.signal(os.Kill)
 	if waiterArmed {
 		<-handle.waitDone
 	} else {
@@ -535,7 +623,10 @@ func (supervisor *processSupervisor) rollbackSpawn(handle *supervisedProcess, ca
 	record.Error = cause.Error()
 	record.UpdatedAt = time.Now().UTC()
 	record.EndedAt = timePointer(record.UpdatedAt)
-	supervisor.persistTerminal(record, "rollback_terminal")
+	if err := supervisor.persistTerminal(record, "rollback_terminal"); err != nil {
+		supervisor.retainFaulted(record)
+		return record, errors.Join(cause, err)
+	}
 	if err := supervisor.reservations.Abort(record); err != nil {
 		supervisor.recordRecovery(record.ID, "rollback_abort", err)
 		return record, errors.Join(cause, err)
@@ -543,26 +634,53 @@ func (supervisor *processSupervisor) rollbackSpawn(handle *supervisedProcess, ca
 	return record, cause
 }
 
-func (supervisor *processSupervisor) persistTerminal(record processdomain.Process, stage string) {
-	for {
+func (supervisor *processSupervisor) persistTerminal(record processdomain.Process, stage string) error {
+	var lastErr error
+	for attempt := 0; attempt < supervisor.config.TerminalRetries; attempt++ {
 		if err := supervisor.store.MarkTerminal(record); err == nil {
-			return
+			return nil
 		} else {
+			lastErr = err
 			supervisor.recordRecovery(record.ID, stage, err)
 		}
-		// Do not claim terminal completion or release the handle while the
-		// durable terminal/outbox transaction remains unavailable. Shutdown
-		// deliberately waits for this retry loop before canceling supervisorCtx.
-		time.Sleep(supervisor.config.TerminalRetry)
+		if attempt+1 < supervisor.config.TerminalRetries {
+			timer := time.NewTimer(supervisor.config.TerminalRetry)
+			select {
+			case <-timer.C:
+			case <-supervisor.ctx.Done():
+				timer.Stop()
+				return fmt.Errorf("terminal state is not durable: %w", lastErr)
+			}
+		}
 	}
+	return fmt.Errorf("terminal state is not durable: %w", lastErr)
 }
 
 func (supervisor *processSupervisor) recordRecovery(id, stage string, err error) {
 	supervisor.recoveryMu.Lock()
+	for index := range supervisor.recovery {
+		fault := &supervisor.recovery[index]
+		if fault.ProcessID == id && fault.Stage == stage {
+			fault.Error = err.Error()
+			fault.Count++
+			supervisor.recoveryMu.Unlock()
+			return
+		}
+	}
+	if len(supervisor.recovery) == maxRecoveryFaults {
+		copy(supervisor.recovery, supervisor.recovery[1:])
+		supervisor.recovery = supervisor.recovery[:maxRecoveryFaults-1]
+	}
 	supervisor.recovery = append(supervisor.recovery, processRecoveryFault{
-		ProcessID: id, Stage: stage, Error: err.Error(),
+		ProcessID: id, Stage: stage, Error: err.Error(), Count: 1,
 	})
 	supervisor.recoveryMu.Unlock()
+}
+
+func (supervisor *processSupervisor) retainFaulted(record processdomain.Process) {
+	supervisor.mu.Lock()
+	supervisor.faulted[record.ID] = record
+	supervisor.mu.Unlock()
 }
 
 func (supervisor *processSupervisor) RecoveryFaults() []processRecoveryFault {
@@ -582,12 +700,16 @@ func (supervisor *processSupervisor) Stop(id string) error {
 	}
 	select {
 	case <-handle.exitObserved:
-		<-handle.terminalDone
-		return nil
+		select {
+		case <-handle.terminalDone:
+			return nil
+		case err := <-handle.terminalFault:
+			return err
+		}
 	default:
 	}
 	handle.setCause(processdomain.StateKilled, "process stopped")
-	if err := handle.boundary.Signal(syscall.SIGTERM); err != nil {
+	if err := handle.signal(syscall.SIGTERM); err != nil {
 		return err
 	}
 	timer := time.NewTimer(supervisor.config.StopGrace)
@@ -595,10 +717,18 @@ func (supervisor *processSupervisor) Stop(id string) error {
 	select {
 	case <-handle.terminalDone:
 		return nil
+	case err := <-handle.terminalFault:
+		return err
 	case <-timer.C:
-		_ = handle.boundary.Signal(os.Kill)
-		<-handle.terminalDone
-		return nil
+		_ = handle.signal(os.Kill)
+		select {
+		case <-handle.terminalDone:
+			return nil
+		case err := <-handle.terminalFault:
+			return err
+		case <-time.After(supervisor.config.StopGrace):
+			return errors.New("process terminal state is unresolved")
+		}
 	}
 }
 
@@ -612,16 +742,24 @@ func (supervisor *processSupervisor) enforceLifetime(handle *supervisedProcess, 
 		return
 	case <-timer.C:
 		handle.setCause(processdomain.StateFailed, "lifetime exceeded")
-		_ = handle.boundary.Signal(os.Kill)
+		if err := handle.signal(os.Kill); err != nil {
+			supervisor.recordRecovery(handle.record.ID, "lifetime_containment", err)
+			select {
+			case handle.terminalFault <- fmt.Errorf("process containment failed: %w", err):
+			default:
+			}
+		}
 	}
 }
 
 func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
-	supervisor.startMu.Lock()
+	if err := supervisor.acquireStart(ctx); err != nil {
+		return err
+	}
 	supervisor.mu.Lock()
 	if supervisor.closed {
 		supervisor.mu.Unlock()
-		supervisor.startMu.Unlock()
+		supervisor.releaseStart()
 		return nil
 	}
 	supervisor.closed = true
@@ -630,7 +768,7 @@ func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
 		handles = append(handles, handle)
 	}
 	supervisor.mu.Unlock()
-	supervisor.startMu.Unlock()
+	supervisor.releaseStart()
 
 	for _, handle := range handles {
 		select {
@@ -639,7 +777,7 @@ func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
 		default:
 		}
 		handle.setCause(processdomain.StateInterrupted, "server shutting down")
-		_ = handle.boundary.Signal(syscall.SIGTERM)
+		_ = handle.signal(syscall.SIGTERM)
 	}
 	for _, handle := range handles {
 		grace := time.NewTimer(supervisor.config.StopGrace)
@@ -649,7 +787,7 @@ func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
 				<-grace.C
 			}
 		case <-grace.C:
-			_ = handle.boundary.Signal(os.Kill)
+			_ = handle.signal(os.Kill)
 			select {
 			case <-handle.terminalDone:
 			case <-ctx.Done():
@@ -660,7 +798,7 @@ func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
 			if !grace.Stop() {
 				<-grace.C
 			}
-			_ = handle.boundary.Signal(os.Kill)
+			_ = handle.signal(os.Kill)
 			supervisor.cancel()
 			return ctx.Err()
 		}
@@ -675,6 +813,36 @@ func (handle *supervisedProcess) setCause(state processdomain.State, message str
 		handle.cause = processTerminalCause{state: state, err: message}
 	}
 	handle.stateMu.Unlock()
+}
+
+func (handle *supervisedProcess) signal(signal os.Signal) error {
+	err := handle.boundary.Signal(signal)
+	if err == nil && signal == os.Kill {
+		handle.containMu.Lock()
+		handle.hardKillDispatched = true
+		handle.containMu.Unlock()
+	}
+	return err
+}
+
+func (handle *supervisedProcess) residualContain() error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		err = handle.signal(os.Kill)
+		if err == nil {
+			return nil
+		}
+		handle.containMu.Lock()
+		alreadyContained := handle.hardKillDispatched
+		handle.containMu.Unlock()
+		if alreadyContained {
+			return nil
+		}
+		if attempt < 2 {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	return err
 }
 
 func (handle *supervisedProcess) snapshot() processdomain.Process {

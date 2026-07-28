@@ -12,6 +12,10 @@ import (
 
 const backgroundProcessSupported = true
 
+func backgroundShellCommand(command string) []string {
+	return []string{"bash", "-lc", command}
+}
+
 type unixProcessBoundary struct {
 	read  *os.File
 	write *os.File
@@ -44,6 +48,9 @@ func (boundary *unixProcessBoundary) AfterStart(cmd *exec.Cmd) error {
 }
 
 func (boundary *unixProcessBoundary) Signal(signal os.Signal) error {
+	if boundary.pgid <= 0 {
+		return errors.New("invalid process group id")
+	}
 	value, ok := signal.(syscall.Signal)
 	if !ok {
 		return errors.New("unsupported process signal")

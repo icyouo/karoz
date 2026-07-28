@@ -31,6 +31,10 @@ var (
 	procOpenProcess              = kernel32.NewProc("OpenProcess")
 )
 
+func backgroundShellCommand(command string) []string {
+	return []string{"cmd.exe", "/d", "/s", "/c", command}
+}
+
 type jobObjectBasicLimitInformation struct {
 	PerProcessUserTimeLimit int64
 	PerJobUserTimeLimit     int64

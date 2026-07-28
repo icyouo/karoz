@@ -9,6 +9,8 @@ import (
 
 const backgroundProcessSupported = false
 
+func backgroundShellCommand(string) []string { return nil }
+
 func newBackgroundProcessBoundary(_ *exec.Cmd) (processBoundary, error) {
 	return nil, errors.New("background processes are unsupported on this platform")
 }
