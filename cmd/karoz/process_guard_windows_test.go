@@ -3,7 +3,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,18 +34,11 @@ func TestWindowsJobOwnerHelper(t *testing.T) {
 		return
 	}
 	dir := os.Getenv("KAROZ_WINDOWS_JOB_DIR")
-	parentPath := filepath.Join(dir, "parent.pid")
-	childPath := filepath.Join(dir, "child.pid")
-	script := fmt.Sprintf(
-		"$p=Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; "+
-			"Set-Content -Path '%s' -Value $PID; Set-Content -Path '%s' -Value $p.Id; Wait-Process -Id $p.Id",
-		strings.ReplaceAll(parentPath, "'", "''"),
-		strings.ReplaceAll(childPath, "'", "''"),
-	)
 	cmd := exec.Command(
 		os.Args[0], "-test.run=TestWindowsProcessGuardEntry", "--",
-		"process-guard", "--", "powershell.exe", "-NoProfile", "-Command", script,
+		"process-guard", "--", os.Args[0], "-test.run=TestWindowsDescendantParentHelper",
 	)
+	cmd.Env = append(os.Environ(), "KAROZ_WINDOWS_DESC_PARENT=1", "KAROZ_WINDOWS_DESC_DIR="+dir)
 	boundary, err := newBackgroundProcessBoundary(cmd)
 	if err != nil {
 		os.Exit(3)
@@ -64,6 +56,41 @@ func TestWindowsJobOwnerHelper(t *testing.T) {
 		os.Exit(6)
 	}
 	select {}
+}
+
+func TestWindowsDescendantParentHelper(t *testing.T) {
+	if os.Getenv("KAROZ_WINDOWS_DESC_PARENT") != "1" {
+		return
+	}
+	dir := os.Getenv("KAROZ_WINDOWS_DESC_DIR")
+	if err := os.WriteFile(
+		filepath.Join(dir, "parent.pid"),
+		[]byte(strconv.Itoa(os.Getpid())),
+		0o600,
+	); err != nil {
+		os.Exit(7)
+	}
+	child := exec.Command(os.Args[0], "-test.run=TestWindowsDescendantSleepHelper")
+	child.Env = append(os.Environ(), "KAROZ_WINDOWS_DESC_SLEEP=1")
+	if err := child.Start(); err != nil {
+		os.Exit(8)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, "child.pid"),
+		[]byte(strconv.Itoa(child.Process.Pid)),
+		0o600,
+	); err != nil {
+		_ = child.Process.Kill()
+		os.Exit(9)
+	}
+	_ = child.Wait()
+}
+
+func TestWindowsDescendantSleepHelper(t *testing.T) {
+	if os.Getenv("KAROZ_WINDOWS_DESC_SLEEP") != "1" {
+		return
+	}
+	time.Sleep(30 * time.Second)
 }
 
 func TestWindowsJobObjectKillsDescendantsWhenOwnerCrashes(t *testing.T) {
