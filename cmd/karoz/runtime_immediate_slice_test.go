@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,14 +97,22 @@ func TestCodexReasoningReplayIsOpaqueOrderedAndTurnLocal(t *testing.T) {
 	if !ok || item["encrypted_content"] != "ciphertext" {
 		t.Fatalf("reasoning item = %#v, %t", item, ok)
 	}
-	call := map[string]any{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "repo_read", "arguments": `{"path":"go.mod"}`}
-	message := map[string]any{"id": "msg_1", "type": "message", "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": "checking"}}}
-	secondReasoning := map[string]any{"id": "rs_2", "type": "reasoning", "encrypted_content": "ciphertext-2"}
+	call := codexToolCall{ID: "fc_1", CallID: "call_1", Name: "repo_read", Arguments: `{"path":"go.mod"}`}
+	outputItems := []codexResponseOutputItem{
+		{Raw: json.RawMessage(`{"id":"rs_1","type":"reasoning","encrypted_content":"ciphertext","summary":[]}`)},
+		{Raw: json.RawMessage(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"checking"}]}`)},
+		{Raw: json.RawMessage(`{"id":"fc_1","type":"function_call","call_id":"call_1","name":"repo_read","arguments":"{\"path\":\"go.mod\"}"}`), ToolCall: &call},
+		{Raw: json.RawMessage(`{"id":"rs_2","type":"reasoning","encrypted_content":"ciphertext-2"}`)},
+	}
 	wire := newCodexStreamWire("/tmp/project", "current", "", "", nil)
-	wire.appendAssistantTurn(residentStepOutput{CompletedItems: []map[string]any{item, message, call, secondReasoning}})
-	wire.appendToolCall(codexToolCall{ID: "fc_1", CallID: "call_1", Name: "repo_read", Arguments: `{"path":"go.mod"}`})
-	if wire.input[1]["type"] != "reasoning" || wire.input[2]["type"] != "message" || wire.input[3]["type"] != "function_call" || wire.input[4]["type"] != "reasoning" || len(wire.input) != 5 {
+	wire.appendAssistantTurn(residentStepOutput{CodexOutputItems: outputItems})
+	wire.appendToolCall(call)
+	wire.appendToolResult(call, "result", true)
+	if codexInputObject(wire.input[1])["type"] != "reasoning" || codexInputObject(wire.input[2])["type"] != "message" || codexInputObject(wire.input[3])["type"] != "function_call" || codexInputObject(wire.input[4])["type"] != "reasoning" || codexInputObject(wire.input[5])["type"] != "function_call_output" || len(wire.input) != 6 {
 		t.Fatalf("same-turn replay order = %#v", wire.input)
+	}
+	if raw, ok := wire.input[1].(json.RawMessage); !ok || !bytes.Equal(raw, outputItems[0].Raw) {
+		t.Fatalf("reasoning raw bytes changed: got=%q want=%q", raw, outputItems[0].Raw)
 	}
 	next := newCodexStreamWire("/tmp/project", "next", "", "", nil)
 	if len(next.input) != 1 {
@@ -114,7 +124,6 @@ func TestCodexCompletedOutputItemsPreserveSSEOrder(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"opaque+/=密文\"}}\n\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"future_1\",\"type\":\"future_output\",\"unknown_field\":{\"keep\":true}}}\n\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"repo_read\",\"arguments\":\"{}\"}}\n\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_2\",\"type\":\"function_call\",\"call_id\":\"call_2\",\"name\":\"repo_search\",\"arguments\":\"{}\"}}\n\n"))
 	}))
@@ -127,40 +136,59 @@ func TestCodexCompletedOutputItemsPreserveSSEOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.CompletedItems) != 4 || result.CompletedItems[0]["id"] != "rs_1" || result.CompletedItems[1]["id"] != "future_1" || result.CompletedItems[2]["id"] != "fc_1" || result.CompletedItems[3]["id"] != "fc_2" {
-		t.Fatalf("completed item order = %#v", result.CompletedItems)
+	if len(result.OutputItems) != 3 || codexInputObject(result.OutputItems[0].Raw)["id"] != "rs_1" || codexInputObject(result.OutputItems[1].Raw)["id"] != "fc_1" || codexInputObject(result.OutputItems[2].Raw)["id"] != "fc_2" {
+		t.Fatalf("completed item order = %#v", result.OutputItems)
 	}
-	if result.CompletedItems[0]["encrypted_content"] != "opaque+/=密文" {
-		t.Fatalf("encrypted_content identity changed: %#v", result.CompletedItems[0])
+	if !bytes.Contains(result.OutputItems[0].Raw, []byte(`"encrypted_content":"opaque+/=密文"`)) {
+		t.Fatalf("encrypted_content raw bytes changed: %s", result.OutputItems[0].Raw)
 	}
-	calls := codexToolCallsFromCompletedItems(result.CompletedItems)
+	calls := codexToolCallsFromOutputItems(result.OutputItems)
 	if len(calls) != 2 || calls[0].CallID != "call_1" || calls[1].CallID != "call_2" {
 		t.Fatalf("derived tool calls = %#v", calls)
+	}
+	wire := newCodexStreamWire("/tmp/project", "current", "", "", nil)
+	wire.appendAssistantTurn(residentStepOutput{CodexOutputItems: result.OutputItems})
+	for _, call := range calls {
+		wire.appendToolCall(call)
+		wire.appendToolResult(call, "output-"+call.CallID, true)
+	}
+	if len(wire.input) != 6 ||
+		codexInputMetadataForCompaction(wire.input[1]).Type != "reasoning" ||
+		codexInputMetadataForCompaction(wire.input[2]).CallID != "call_1" ||
+		codexInputMetadataForCompaction(wire.input[3]).CallID != "call_2" ||
+		codexInputMetadataForCompaction(wire.input[4]).CallID != "call_1" ||
+		codexInputMetadataForCompaction(wire.input[5]).CallID != "call_2" {
+		t.Fatalf("two-call provider group/output ordering = %#v", wire.input)
 	}
 }
 
 func TestCodexUnparseableCompletedItemIsExplicitAndNeverDispatched(t *testing.T) {
-	payload := []byte(`{"type":"response.output_item.done","item":"opaque-unparseable-item"}`)
-	item, ok := codexSSECompletedItem(payload)
-	if !ok || item["type"] != "karoz_unparseable_output_item" || item["raw_item"] != `"opaque-unparseable-item"` {
-		t.Fatalf("unparseable completed item was silently lost: %#v, %t", item, ok)
+	const secret = "encrypted-secret-must-not-leak"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"would-dispatch\",\"name\":\"repo_read\",\"arguments\":\"{}\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"unknown_item\",\"encrypted_content\":\"" + secret + "\"}}\n\n"))
+	}))
+	defer server.Close()
+	request, _ := http.NewRequest(http.MethodPost, server.URL, nil)
+	result, err := streamCodexResponse(request, nil)
+	if err == nil || !errors.Is(err, errCodexCompletedItemInvalid) {
+		t.Fatalf("malformed completed item error = %v", err)
 	}
-	if calls := codexToolCallsFromCompletedItems([]map[string]any{item}); len(calls) != 0 {
-		t.Fatalf("unparseable item produced tool dispatch: %#v", calls)
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "encrypted_content") {
+		t.Fatalf("payload leaked through error: %v", err)
 	}
-	wire := newCodexStreamWire("/workspace", "current", "", "", nil)
-	wire.appendAssistantTurn(residentStepOutput{CompletedItems: []map[string]any{item}})
-	if len(wire.input) != 1 {
-		t.Fatalf("unparseable item was replayed as provider input: %#v", wire.input)
+	if len(result.OutputItems) != 0 || len(codexToolCallsFromOutputItems(result.OutputItems)) != 0 {
+		t.Fatalf("tool dispatch survived malformed round: %#v", result)
 	}
 }
 
 func TestCompactCodexFinalInputKeepsReasoningCallOutputAtomicAtBoundary(t *testing.T) {
-	input := []map[string]any{
+	input := []any{
 		codexMessage("user", "initial"),
-		{"type": "reasoning", "id": "reasoning-boundary", "encrypted_content": strings.Repeat("r", 1200)},
-		{"type": "function_call", "id": "provider-call", "call_id": "boundary-call", "name": "repo_read", "arguments": `{}`},
-		{"type": "function_call_output", "call_id": "boundary-call", "output": strings.Repeat("o", 1200)},
+		map[string]any{"type": "reasoning", "id": "reasoning-boundary", "encrypted_content": strings.Repeat("r", 1200)},
+		map[string]any{"type": "function_call", "id": "provider-call", "call_id": "boundary-call", "name": "repo_read", "arguments": `{}`},
+		map[string]any{"type": "function_call_output", "call_id": "boundary-call", "output": strings.Repeat("o", 1200)},
 		codexMessage("user", "finalize now"),
 	}
 	compacted := compactCodexInputForFinal(input, 800)
@@ -235,22 +263,22 @@ func TestNativeTranscriptPairingRejectsCollisionsAndSupportsMultiCallGrouping(t 
 
 	fallbackCases := map[string][]AgentTranscriptItem{
 		"duplicate id": {
-			{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "x", ToolName: "one"},
+			{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "x", ToolName: "one", ToolArguments: `{}`},
 			{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "x", ToolResult: "first"},
-			{SessionID: "s", RunID: "r", Seq: 3, Kind: "tool_call", ToolCallID: "x", ToolName: "two"},
+			{SessionID: "s", RunID: "r", Seq: 3, Kind: "tool_call", ToolCallID: "x", ToolName: "two", ToolArguments: `{}`},
 			{SessionID: "s", RunID: "r", Seq: 4, Kind: "tool_result", ToolCallID: "x", ToolResult: "second"},
 		},
 		"cross run collision": {
-			{SessionID: "s", RunID: "r1", Seq: 1, Kind: "tool_call", ToolCallID: "x", ToolName: "one"},
+			{SessionID: "s", RunID: "r1", Seq: 1, Kind: "tool_call", ToolCallID: "x", ToolName: "one", ToolArguments: `{}`},
 			{SessionID: "s", RunID: "r2", Seq: 2, Kind: "tool_result", ToolCallID: "x", ToolResult: "result"},
 		},
 		"cross session collision": {
-			{SessionID: "s1", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "x", ToolName: "one"},
+			{SessionID: "s1", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "x", ToolName: "one", ToolArguments: `{}`},
 			{SessionID: "s2", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "x", ToolResult: "result"},
 		},
 		"orphan call and result": {
 			{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_result", ToolCallID: "before", ToolResult: "result"},
-			{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_call", ToolCallID: "after", ToolName: "one"},
+			{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_call", ToolCallID: "after", ToolName: "one", ToolArguments: `{}`},
 		},
 		"malformed arguments": {
 			{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "bad-args", ToolName: "one", ToolArguments: `{"broken":`},
@@ -287,18 +315,23 @@ func TestMalformedNativeArgumentsFallbackForCodexAndClaude(t *testing.T) {
 	}
 }
 
-func TestNativeTranscriptPayloadUsesContextBounds(t *testing.T) {
+func TestOversizedNativeArgumentsDegradeAtomicallyForBothProviders(t *testing.T) {
 	success := true
 	items := []AgentTranscriptItem{
 		{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "large", ToolName: "repo_read", ToolArguments: `{"data":"` + strings.Repeat("a", 9000) + `"}`},
 		{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "large", ToolResult: strings.Repeat("b", 9000), ToolSuccess: &success},
 	}
-	input := codexTranscriptInput(items)
-	if arguments := input[0]["arguments"].(string); len(arguments) > 1400 || !json.Valid([]byte(arguments)) {
-		t.Fatalf("native arguments exceeded context bound or became invalid JSON: %d %q", len(arguments), arguments)
+	for _, input := range codexTranscriptInput(items) {
+		if input["type"] != "message" {
+			t.Fatalf("oversized Codex arguments remained native: %#v", input)
+		}
 	}
-	if result := input[1]["output"].(string); len(result) > 2200 {
-		t.Fatalf("native result exceeded context bound: %d", len(result))
+	for _, message := range claudeTranscriptMessages(items) {
+		for _, content := range message["content"].([]map[string]any) {
+			if content["type"] == "tool_use" || content["type"] == "tool_result" {
+				t.Fatalf("oversized Claude arguments remained native: %#v", message)
+			}
+		}
 	}
 }
 
@@ -312,7 +345,11 @@ func TestProviderTranscriptBoundsToolPairsAtomically(t *testing.T) {
 	for i := 0; i < residentTranscriptPromptMaxItems-1; i++ {
 		items = append(items, AgentTranscriptItem{Role: "assistant", Kind: "message", Body: "newer"})
 	}
-	bounded := boundedProviderTranscript(items, "", "")
+	items = append(items, AgentTranscriptItem{ID: "current", Seq: 1000, RunID: "current-run", Role: "user", Kind: "message", Body: "current"})
+	bounded, err := boundedProviderTranscript(items, "current-run", "current", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(bounded) > residentTranscriptPromptMaxItems {
 		t.Fatalf("item bound exceeded: %d", len(bounded))
 	}
@@ -336,8 +373,12 @@ func TestDuplicateIDOutsideProviderCutoffInvalidatesRetainedOccurrence(t *testin
 	items = append(items,
 		AgentTranscriptItem{SessionID: "s", RunID: "r", Seq: 100, Kind: "tool_call", ToolCallID: "duplicate", ToolName: "repo_read", ToolArguments: `{}`},
 		AgentTranscriptItem{SessionID: "s", RunID: "r", Seq: 101, Kind: "tool_result", ToolCallID: "duplicate", ToolResult: "new", ToolSuccess: &success},
+		AgentTranscriptItem{ID: "current", SessionID: "s", RunID: "current-run", Seq: 102, Role: "user", Kind: "message", Body: "current"},
 	)
-	bounded := boundedProviderTranscript(items, "", "")
+	bounded, err := boundedProviderTranscript(items, "current-run", "current", 102)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(bounded) != residentTranscriptPromptMaxItems {
 		t.Fatalf("bounded item count = %d", len(bounded))
 	}
@@ -379,23 +420,27 @@ func TestCurrentUserInputRemovedOnceWithOrWithoutRunID(t *testing.T) {
 		{
 			name: "scheduled current item has run id",
 			items: []AgentTranscriptItem{
-				{Role: "user", Kind: "message", Body: "older"},
-				{Role: "user", Kind: "message", Intent: "scheduled_plan_event_input", Body: "repeat", RunID: "run-1"},
+				{ID: "older", Seq: 1, Role: "user", Kind: "message", Body: "older"},
+				{ID: "scheduled", Seq: 2, Role: "user", Kind: "message", Intent: "scheduled_plan_event_input", Body: "repeat", RunID: "run-1"},
 			},
 			runID: "run-1",
 		},
 		{
 			name: "direct visible item lacks run id",
 			items: []AgentTranscriptItem{
-				{Role: "assistant", Kind: "message", Body: "prior"},
-				{Role: "user", Kind: "message", Body: "current"},
+				{ID: "prior", Seq: 1, Role: "assistant", Kind: "message", Body: "prior"},
+				{ID: "direct", Seq: 2, Role: "user", Kind: "message", Body: "current"},
 			},
 			runID: "run-2",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			history := boundedProviderTranscript(tt.items, tt.runID, tt.items[len(tt.items)-1].Body)
+			current := tt.items[len(tt.items)-1]
+			history, err := boundedProviderTranscript(tt.items, tt.runID, current.ID, current.Seq)
+			if err != nil {
+				t.Fatal(err)
+			}
 			wire := newCodexStreamWire("/workspace", tt.items[len(tt.items)-1].Body, "", "", history)
 			raw, err := json.Marshal(wire.input)
 			if err != nil {
@@ -434,6 +479,9 @@ func TestResidentPromptStablePrefixAndSingleToolContract(t *testing.T) {
 	plan := a.buildResidentAgentPrompt(project, agent, "use $some-skill", "plan")
 	if prefix(ask) != prefix(plan) {
 		t.Fatal("stable prefix changed across turn type or user skill text")
+	}
+	if !strings.Contains(prefix(ask), "### Resident identity and durable role") || !strings.Contains(prefix(ask), agent.Role) {
+		t.Fatalf("stable prefix omitted durable identity/role:\n%s", prefix(ask))
 	}
 	if strings.Count(ask, "### Provider-neutral tool contract") != 1 || strings.Contains(ask, "allowed_tools:") {
 		t.Fatalf("tool contract duplicated schema material:\n%s", ask)

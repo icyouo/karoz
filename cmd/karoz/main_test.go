@@ -624,7 +624,7 @@ func TestStreamCodexResponseUsesCompletedTextWithoutDeltas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls := codexToolCallsFromCompletedItems(streamed.CompletedItems); len(calls) != 0 {
+	if calls := codexToolCallsFromOutputItems(streamed.OutputItems); len(calls) != 0 {
 		t.Fatalf("tool calls = %d", len(calls))
 	}
 	if out.String() != "最终回复" {
@@ -737,11 +737,15 @@ func TestCompactCodexInputForFinalKeepsInitialPromptAndRecentEvidence(t *testing
 		input = append(input, map[string]any{"type": "function_call_output", "call_id": fmt.Sprintf("c%d", i), "output": strings.Repeat("x", 1000)})
 	}
 	input = append(input, codexMessage("user", "finalize"))
-	got := compactCodexInputForFinal(input, 5000)
-	if len(got) >= len(input) || fmt.Sprint(got[0]["content"]) == "" {
+	wireInput := make([]any, len(input))
+	for i := range input {
+		wireInput[i] = input[i]
+	}
+	got := compactCodexInputForFinal(wireInput, 5000)
+	if len(got) >= len(input) || fmt.Sprint(codexInputObject(got[0])["content"]) == "" {
 		t.Fatalf("final input was not compacted correctly: len=%d", len(got))
 	}
-	last := got[len(got)-1]
+	last := codexInputObject(got[len(got)-1])
 	if !strings.Contains(fmt.Sprint(last), "finalize") {
 		t.Fatalf("final instruction was dropped: %+v", last)
 	}

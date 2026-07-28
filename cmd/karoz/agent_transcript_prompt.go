@@ -122,25 +122,27 @@ func compactTranscriptForModelContext(items []AgentTranscriptItem, maxItems, max
 	return out
 }
 
-func boundedProviderTranscript(items []AgentTranscriptItem, currentRunID, userText string) []AgentTranscriptItem {
+func boundedProviderTranscript(items []AgentTranscriptItem, currentRunID, currentInputID string, currentInputSeq int64) ([]AgentTranscriptItem, error) {
+	if strings.TrimSpace(currentRunID) == "" || strings.TrimSpace(currentInputID) == "" || currentInputSeq <= 0 {
+		return nil, fmt.Errorf("resident current input identity is required")
+	}
 	filtered := make([]AgentTranscriptItem, 0, len(items))
-	removedCurrentInput := false
+	foundCurrentInput := false
 	for _, item := range items {
-		if currentRunID != "" && item.RunID == currentRunID {
-			if strings.EqualFold(item.Role, "user") && strings.TrimSpace(item.Body) == strings.TrimSpace(userText) {
-				removedCurrentInput = true
+		if item.ID == currentInputID && item.Seq == currentInputSeq {
+			if foundCurrentInput {
+				return nil, fmt.Errorf("resident current input identity is ambiguous")
 			}
+			foundCurrentInput = true
+			continue
+		}
+		if currentRunID != "" && item.RunID == currentRunID {
 			continue
 		}
 		filtered = append(filtered, item)
 	}
-	if !removedCurrentInput {
-		for i := len(filtered) - 1; i >= 0; i-- {
-			if strings.EqualFold(filtered[i].Role, "user") && strings.TrimSpace(filtered[i].Body) == strings.TrimSpace(userText) {
-				filtered = append(filtered[:i], filtered[i+1:]...)
-				break
-			}
-		}
+	if !foundCurrentInput {
+		return nil, fmt.Errorf("resident current input identity was not found")
 	}
 	units := projectResidentHistoryUnits(filtered)
 	selected := make([]bool, len(units))
@@ -173,7 +175,7 @@ func boundedProviderTranscript(items []AgentTranscriptItem, currentRunID, userTe
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 func residentHistoryTextFallback(item AgentTranscriptItem) AgentTranscriptItem {

@@ -52,7 +52,7 @@ func invokeCodexDirectStreamWithBudget(ctx context.Context, workdir, prompt, mod
 // codexStreamWire adapts the Codex responses SSE protocol to the shared
 // resident tool loop. It owns the responses API input items.
 type codexStreamWire struct {
-	input          []map[string]any
+	input          []any
 	model          string
 	thinkingEffort string
 	replayedCalls  map[string]int
@@ -60,9 +60,13 @@ type codexStreamWire struct {
 
 func newCodexStreamWire(workdir, prompt, model, thinkingEffort string, transcript []AgentTranscriptItem) *codexStreamWire {
 	input := codexTranscriptInput(transcript)
-	input = append(input, codexMessage("user", prompt+"\n\nProject workspace: "+workdir))
+	wireInput := make([]any, 0, len(input)+1)
+	for _, item := range input {
+		wireInput = append(wireInput, item)
+	}
+	wireInput = append(wireInput, codexMessage("user", prompt+"\n\nProject workspace: "+workdir))
 	return &codexStreamWire{
-		input:          input,
+		input:          wireInput,
 		model:          model,
 		thinkingEffort: thinkingEffort,
 		replayedCalls:  map[string]int{},
@@ -133,8 +137,12 @@ func residentHistoryPairValid(call, result AgentTranscriptItem, occurrences map[
 }
 
 func residentToolArgumentsValid(arguments string) bool {
+	arguments = strings.TrimSpace(arguments)
+	if arguments == "" || len([]rune(arguments)) > 1400 {
+		return false
+	}
 	var object map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(arguments)), &object); err != nil {
+	if err := json.Unmarshal([]byte(arguments), &object); err != nil {
 		return false
 	}
 	return object != nil
@@ -177,25 +185,14 @@ func transcriptTextRole(item AgentTranscriptItem) string {
 
 func (w *codexStreamWire) step(ctx context.Context, tools []map[string]any, callbacks AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {
 	streamed, interrupts, err := streamCodexStep(ctx, w.input, w.model, w.thinkingEffort, tools, callbacks)
-	return residentStepOutput{Text: streamed.Text, ToolCalls: codexToolCallsFromCompletedItems(streamed.CompletedItems), CompletedItems: streamed.CompletedItems}, interrupts, err
+	return residentStepOutput{Text: streamed.Text, ToolCalls: codexToolCallsFromOutputItems(streamed.OutputItems), CodexOutputItems: streamed.OutputItems}, interrupts, err
 }
 
 func (w *codexStreamWire) appendAssistantTurn(streamed residentStepOutput) {
-	for _, item := range streamed.CompletedItems {
-		itemType, _ := item["type"].(string)
-		if itemType != "reasoning" && itemType != "function_call" && itemType != "tool_call" && itemType != "message" {
-			continue
-		}
-		w.input = append(w.input, item)
-		if itemType == "function_call" || itemType == "tool_call" {
-			callID, _ := item["call_id"].(string)
-			if strings.TrimSpace(callID) == "" {
-				callID, _ = item["tool_call_id"].(string)
-			}
-			if strings.TrimSpace(callID) == "" {
-				callID, _ = item["id"].(string)
-			}
-			w.replayedCalls[callID]++
+	for _, item := range streamed.CodexOutputItems {
+		w.input = append(w.input, item.Raw)
+		if item.ToolCall != nil {
+			w.replayedCalls[item.ToolCall.CallID]++
 		}
 	}
 }
@@ -251,7 +248,7 @@ func (w *codexStreamWire) finalize(parentCtx, finalCtx context.Context, callback
 	return nil
 }
 
-func compactCodexInputForFinal(input []map[string]any, maxChars int) []map[string]any {
+func compactCodexInputForFinal(input []any, maxChars int) []any {
 	if len(input) <= 2 || maxChars <= 0 {
 		return input
 	}
@@ -275,13 +272,12 @@ func compactCodexInputForFinal(input []map[string]any, maxChars int) []map[strin
 	callIndexes := map[string][]int{}
 	outputIndexes := map[string][]int{}
 	for i := 1; i < len(input); i++ {
-		itemType, _ := input[i]["type"].(string)
-		callID, _ := input[i]["call_id"].(string)
-		switch itemType {
+		item := codexInputMetadataForCompaction(input[i])
+		switch item.Type {
 		case "function_call", "tool_call":
-			callIndexes[callID] = append(callIndexes[callID], i)
+			callIndexes[item.CallID] = append(callIndexes[item.CallID], i)
 		case "function_call_output":
-			outputIndexes[callID] = append(outputIndexes[callID], i)
+			outputIndexes[item.CallID] = append(outputIndexes[item.CallID], i)
 		}
 	}
 	invalid := map[int]bool{}
@@ -306,7 +302,7 @@ func compactCodexInputForFinal(input []map[string]any, maxChars int) []map[strin
 	// multiple calls before their outputs. Keep the whole batch connected so
 	// tail compaction cannot retain a result while dropping its predecessor.
 	for i := 1; i < len(input); {
-		itemType, _ := input[i]["type"].(string)
+		itemType := codexInputMetadataForCompaction(input[i]).Type
 		if itemType != "reasoning" && itemType != "function_call" && itemType != "tool_call" {
 			i++
 			continue
@@ -315,8 +311,9 @@ func compactCodexInputForFinal(input []map[string]any, maxChars int) []map[strin
 		j := i + 1
 		seenOutput := false
 		for ; j < len(input); j++ {
-			nextType, _ := input[j]["type"].(string)
-			role, _ := input[j]["role"].(string)
+			next := codexInputMetadataForCompaction(input[j])
+			nextType := next.Type
+			role := next.Role
 			if nextType == "reasoning" || nextType == "message" && (role == "user" || role == "developer") {
 				break
 			}
@@ -381,7 +378,7 @@ func compactCodexInputForFinal(input []map[string]any, maxChars int) []map[strin
 		}
 		used += group.cost
 	}
-	out := make([]map[string]any, 0, len(input))
+	out := make([]any, 0, len(input))
 	out = append(out, input[0])
 	if omitted {
 		out = append(out, codexMessage("user", "[Earlier provider reasoning and tool evidence was omitted atomically to fit the final response context.]"))
@@ -394,32 +391,82 @@ func compactCodexInputForFinal(input []map[string]any, maxChars int) []map[strin
 	return out
 }
 
-type codexStreamResult struct {
-	CompletedItems []map[string]any
-	Text           string
+type codexInputMetadata struct {
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
+	Role   string `json:"role"`
 }
 
-func codexToolCallsFromCompletedItems(items []map[string]any) []codexToolCall {
+func codexInputMetadataForCompaction(item any) codexInputMetadata {
+	var raw []byte
+	switch typed := item.(type) {
+	case map[string]any:
+		return codexInputMetadata{
+			Type:   stringMapValue(typed, "type"),
+			CallID: stringMapValue(typed, "call_id"),
+			Role:   stringMapValue(typed, "role"),
+		}
+	case json.RawMessage:
+		raw = typed
+	case []byte:
+		raw = typed
+	default:
+		return codexInputMetadata{}
+	}
+	var value codexInputMetadata
+	_ = json.Unmarshal(raw, &value)
+	return value
+}
+
+func stringMapValue(item map[string]any, key string) string {
+	value, _ := item[key].(string)
+	return value
+}
+
+func codexInputObject(item any) map[string]any {
+	switch typed := item.(type) {
+	case map[string]any:
+		return typed
+	case json.RawMessage:
+		var decoded map[string]any
+		if json.Unmarshal(typed, &decoded) == nil {
+			return decoded
+		}
+	case []byte:
+		var decoded map[string]any
+		if json.Unmarshal(typed, &decoded) == nil {
+			return decoded
+		}
+	}
+	return map[string]any{}
+}
+
+type codexStreamResult struct {
+	OutputItems []codexResponseOutputItem
+	Text        string
+}
+
+func codexToolCallsFromOutputItems(items []codexResponseOutputItem) []codexToolCall {
 	calls := make([]codexToolCall, 0)
 	for _, item := range items {
-		if call, ok := codexToolCallFromCompletedItem(item); ok {
-			calls = append(calls, call)
+		if item.ToolCall != nil {
+			calls = append(calls, *item.ToolCall)
 		}
 	}
 	return calls
 }
 
-func streamCodexStep(ctx context.Context, input []map[string]any, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks) (codexStreamResult, []AgentInterrupt, error) {
+func streamCodexStep(ctx context.Context, input []any, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks) (codexStreamResult, []AgentInterrupt, error) {
 	return runResidentStep(ctx, callbacks, func(stepCtx context.Context) (*http.Request, error) {
 		return newCodexDirectRequestWithInput(stepCtx, input, model, thinkingEffort, tools)
 	}, streamCodexResponse)
 }
 
 func newCodexDirectRequest(ctx context.Context, workdir, prompt string) (*http.Request, error) {
-	return newCodexDirectRequestWithInput(ctx, []map[string]any{codexMessage("user", prompt+"\n\nProject workspace: "+workdir)}, "", "", nil)
+	return newCodexDirectRequestWithInput(ctx, []any{codexMessage("user", prompt+"\n\nProject workspace: "+workdir)}, "", "", nil)
 }
 
-func newCodexDirectRequestWithInput(ctx context.Context, input []map[string]any, model, thinkingEffort string, tools []map[string]any) (*http.Request, error) {
+func newCodexDirectRequestWithInput(ctx context.Context, input []any, model, thinkingEffort string, tools []map[string]any) (*http.Request, error) {
 	credential, err := resolveCodexCredential(ctx)
 	if err != nil {
 		return nil, err
@@ -503,7 +550,7 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) (codexStre
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		return codexStreamResult{}, fmt.Errorf("codex direct status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
-	var completedItems []map[string]any
+	var outputItems []codexResponseOutputItem
 	var streamed strings.Builder
 	var finalText string
 	scanner := bufio.NewScanner(resp.Body)
@@ -529,12 +576,14 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) (codexStre
 				finalText = text
 			}
 		}
-		if item, ok := codexSSECompletedItem([]byte(payload)); ok {
-			completedItems = append(completedItems, item)
+		if item, ok, itemErr := codexSSECompletedOutputItem([]byte(payload)); itemErr != nil {
+			return codexStreamResult{}, fmt.Errorf("codex completed output item rejected: %w", itemErr)
+		} else if ok {
+			outputItems = append(outputItems, item)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return codexStreamResult{CompletedItems: completedItems, Text: streamed.String()}, err
+		return codexStreamResult{OutputItems: outputItems, Text: streamed.String()}, err
 	}
 	if streamed.Len() == 0 && strings.TrimSpace(finalText) != "" && onDelta != nil {
 		onDelta(finalText)
@@ -543,5 +592,5 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) (codexStre
 	if strings.TrimSpace(text) == "" {
 		text = finalText
 	}
-	return codexStreamResult{CompletedItems: completedItems, Text: text}, nil
+	return codexStreamResult{OutputItems: outputItems, Text: text}, nil
 }

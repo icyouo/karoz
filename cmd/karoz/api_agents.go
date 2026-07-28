@@ -156,6 +156,7 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 		}
 		run, started := a.beginAgentRun(AgentRunInput{ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: turnType})
 		messageStored := false
+		currentInput := AgentMessage{}
 		if !started {
 			if isResidentBashChoice(req.ChoiceID) {
 				writeError(w, http.StatusConflict, errors.New("wait for the active agent run to finish before resolving a bash approval"))
@@ -166,6 +167,7 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 				msg = a.appendAgentMessage(project.ID, agent.ID, "user", "interrupt", userText)
 			}
 			messageStored = true
+			currentInput = msg
 			item, queued := a.enqueueAgentInterrupt(project.ID, agent.ID, msg, turnType)
 			if queued {
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -192,11 +194,13 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 			return
 		}
 		if !messageStored {
-			if _, appended := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", turnType, userText); !appended {
-				a.appendAgentMessage(project.ID, agent.ID, "user", turnType, userText)
+			var appended bool
+			currentInput, appended = a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", turnType, userText)
+			if !appended {
+				currentInput = a.appendAgentMessage(project.ID, agent.ID, "user", turnType, userText)
 			}
 		}
-		a.startAgentRunWorker(project, agent, run, userText, turnType)
+		a.startAgentRunWorker(project, agent, run, userText, turnType, AgentTranscriptItem{ID: currentInput.ID, Seq: currentInput.Seq})
 		a.streamRunLedger(w, r, run.ID, 0)
 		return
 	}

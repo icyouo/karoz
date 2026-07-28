@@ -2,8 +2,16 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 )
+
+var errCodexCompletedItemInvalid = errors.New("codex_completed_output_item_invalid")
+
+type codexResponseOutputItem struct {
+	Raw      json.RawMessage
+	ToolCall *codexToolCall
+}
 
 func parseCodexSSEText(raw []byte) string {
 	var out strings.Builder
@@ -140,11 +148,11 @@ func codexSSETextSnapshot(payload []byte) string {
 }
 
 func codexSSEToolCall(payload []byte) (codexToolCall, bool) {
-	item, ok := codexSSECompletedItem(payload)
-	if !ok {
+	item, ok, err := codexSSECompletedOutputItem(payload)
+	if err != nil || !ok || item.ToolCall == nil {
 		return codexToolCall{}, false
 	}
-	return codexToolCallFromCompletedItem(item)
+	return *item.ToolCall, true
 }
 
 func codexToolCallFromCompletedItem(item map[string]any) (codexToolCall, bool) {
@@ -152,6 +160,10 @@ func codexToolCallFromCompletedItem(item map[string]any) (codexToolCall, bool) {
 	if err != nil {
 		return codexToolCall{}, false
 	}
+	return codexToolCallFromRawCompletedItem(raw)
+}
+
+func codexToolCallFromRawCompletedItem(raw json.RawMessage) (codexToolCall, bool) {
 	var parsed struct {
 		ID        string          `json:"id"`
 		Type      string          `json:"type"`
@@ -181,39 +193,58 @@ func codexToolCallFromCompletedItem(item map[string]any) (codexToolCall, bool) {
 }
 
 func codexSSEReasoningItem(payload []byte) (map[string]any, bool) {
-	item, ok := codexSSECompletedItem(payload)
-	if !ok {
+	item, ok, err := codexSSECompletedOutputItem(payload)
+	if err != nil || !ok {
 		return nil, false
 	}
-	if itemType, _ := item["type"].(string); itemType != "reasoning" {
+	var outer struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(item.Raw, &outer) != nil || outer.Type != "reasoning" {
 		return nil, false
 	}
-	return item, true
+	var decoded map[string]any
+	if json.Unmarshal(item.Raw, &decoded) != nil {
+		return nil, false
+	}
+	return decoded, true
 }
 
-func codexSSECompletedItem(payload []byte) (map[string]any, bool) {
+func codexSSECompletedOutputItem(payload []byte) (codexResponseOutputItem, bool, error) {
 	var event struct {
 		Type string          `json:"type"`
 		Item json.RawMessage `json:"item"`
 	}
 	if err := json.Unmarshal(payload, &event); err != nil {
-		return nil, false
+		return codexResponseOutputItem{}, false, nil
 	}
 	if event.Type != "response.output_item.done" && event.Type != "item.completed" {
-		return nil, false
+		return codexResponseOutputItem{}, false, nil
 	}
-	if len(event.Item) == 0 {
-		event.Item = json.RawMessage("null")
+	raw := append(json.RawMessage(nil), event.Item...)
+	if len(raw) == 0 || !json.Valid(raw) {
+		return codexResponseOutputItem{}, true, errCodexCompletedItemInvalid
 	}
-	var item map[string]any
-	if err := json.Unmarshal(event.Item, &item); err != nil || len(item) == 0 {
-		return map[string]any{
-			"type":       "karoz_unparseable_output_item",
-			"raw_item":   string(event.Item),
-			"replayable": false,
-		}, true
+	var outer struct {
+		Type string `json:"type"`
 	}
-	return item, true
+	if err := json.Unmarshal(raw, &outer); err != nil || strings.TrimSpace(outer.Type) == "" {
+		return codexResponseOutputItem{}, true, errCodexCompletedItemInvalid
+	}
+	item := codexResponseOutputItem{Raw: raw}
+	switch outer.Type {
+	case "reasoning", "message":
+		return item, true, nil
+	case "function_call", "tool_call":
+		call, ok := codexToolCallFromRawCompletedItem(raw)
+		if !ok || strings.TrimSpace(call.CallID) == "" {
+			return codexResponseOutputItem{}, true, errCodexCompletedItemInvalid
+		}
+		item.ToolCall = &call
+		return item, true, nil
+	default:
+		return codexResponseOutputItem{}, true, errCodexCompletedItemInvalid
+	}
 }
 
 func decodeRawJSONText(raw json.RawMessage) string {

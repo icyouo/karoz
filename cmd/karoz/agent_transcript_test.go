@@ -113,7 +113,12 @@ func TestStructuredTranscriptPairsToolEventsAcrossTheNextTurn(t *testing.T) {
 	if strings.Contains(prompt, "### Recent structured resident transcript") || strings.Contains(prompt, "tool_call id=call-checkout") {
 		t.Fatalf("provider-native history was duplicated into prompt prose:\n%s", prompt)
 	}
-	history := boundedProviderTranscript(a.agentTranscriptDeltaForModel(project.ID, agent.ID), "", "What did the search find?")
+	delta := a.agentTranscriptDeltaForModel(project.ID, agent.ID)
+	current := delta[len(delta)-1]
+	history, err := boundedProviderTranscript(delta, "next-run", current.ID, current.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
 	input := codexTranscriptInput(history)
 	if len(input) < 4 || input[1]["type"] != "function_call" || input[2]["type"] != "function_call_output" {
 		t.Fatalf("structured next-turn provider history = %#v", input)
@@ -250,7 +255,7 @@ func TestScheduledPlanTranscriptPersistsInputBeforeToolsAndSurvivesReload(t *tes
 	if strings.Contains(nextPrompt, "tool_call id=scheduled-tool") {
 		t.Fatalf("scheduled provider history was duplicated into prompt prose:\n%s", nextPrompt)
 	}
-	history := boundedProviderTranscript(reloaded.agentTranscriptDeltaForModel(project.ID, agent.ID), "", "What plan event was processed?")
+	history := reloaded.agentTranscriptDeltaForModel(project.ID, agent.ID)
 	wireJSON, err := json.Marshal(codexTranscriptInput(history))
 	if err != nil {
 		t.Fatal(err)

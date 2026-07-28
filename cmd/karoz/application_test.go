@@ -50,6 +50,13 @@ func TestResidentRuntimeUsesProviderAndDynamicToolPorts(t *testing.T) {
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
 	agent := Agent{ID: "designer", ProjectID: project.ID, Name: "Designer", Role: "design"}
 	a.agents[project.ID] = []Agent{agent}
+	run, started := a.beginAgentRun(AgentRunInput{RunID: "runtime-port-test", ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: "ask"})
+	if !started {
+		t.Fatal("could not begin run")
+	}
+	if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", "ask", "hello"); !ok {
+		t.Fatal("could not persist current input")
+	}
 
 	output, err := a.runResidentAgentTurn(context.Background(), project, agent, "hello", "ask", nil)
 	if err != nil || output != "provider output" {

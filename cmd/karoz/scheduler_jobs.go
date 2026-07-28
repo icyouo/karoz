@@ -21,11 +21,12 @@ func scheduledRunTranscriptIntent(job ScheduledRun) string {
 // visible user message to seed its transcript. Persist its actual model input
 // first so a reload keeps one complete Run trajectory: input, tools, result.
 func (a *app) runScheduledResidentAgentTurn(ctx context.Context, job ScheduledRun, project Project, agent Agent, input, turnType string) (string, error) {
-	if _, _, err := a.appendAgentModelOnlyTranscriptForRun(project.ID, agent.ID, job.ID, scheduledRunTranscriptIntent(job), input); err != nil {
+	currentInput, _, err := a.appendAgentModelOnlyTranscriptForRun(project.ID, agent.ID, job.ID, scheduledRunTranscriptIntent(job), input)
+	if err != nil {
 		return "", fmt.Errorf("persist scheduled model input: %w", err)
 	}
 	turnType = normalizeChatTurnType(firstNonEmpty(turnType, job.TurnType))
-	return a.runResidentAgentTurn(ctx, project, agent, input, turnType, a.agentRunLedgerCallbacks(project, agent, job.ID))
+	return a.runResidentAgentTurnWithCurrentInput(ctx, project, agent, input, turnType, currentInput, a.agentRunLedgerCallbacks(project, agent, job.ID))
 }
 
 func (a *app) executeHandoffScheduledRun(ctx context.Context, job ScheduledRun) error {

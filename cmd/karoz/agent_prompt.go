@@ -54,6 +54,7 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 		b.WriteString("- For multi-agent product/design/architecture coordination, send concise requests to the responsible agents and tell the user which agents were queued. Use the visible Resident teammates list as the routing source.\n")
 		b.WriteString("- Do not infer Karoz resident template IDs from repository files; the list_agent_templates tool is authoritative.\n\n")
 	}
+	a.renderResidentDurableIdentity(&b, project, agent)
 	a.renderProviderNeutralToolContract(&b)
 	stablePrefixChars := b.Len()
 	b.WriteString("## Current chat turn type: " + turnType + "\n")
@@ -82,42 +83,6 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 	b.WriteString("- path: " + project.Path + "\n")
 	b.WriteString("- branch: " + project.DefaultBranch + "\n")
 	b.WriteString("- resident_agent: " + agentID + "\n")
-	b.WriteString("\n### Resident identity\n")
-	b.WriteString("- nickname: " + firstNonEmpty(agent.Nickname, agent.DisplayName, agent.Name) + "\n")
-	b.WriteString("- template: " + agent.Name + "\n")
-	b.WriteString("- display_name: " + agent.DisplayName + "\n")
-	b.WriteString("- role: " + agent.Role + "\n")
-	if strings.TrimSpace(agent.GroupID) != "" {
-		b.WriteString("- group_id: " + agent.GroupID + "\n")
-		b.WriteString("- group_name: " + agent.GroupName + "\n")
-		b.WriteString("- group_role: " + agent.GroupRole + "\n")
-		b.WriteString("- group_order: " + fmt.Sprintf("%d", agent.GroupOrder) + "\n")
-		if group, ok := a.groupForAgent(project.ID, agent.ID); ok {
-			b.WriteString("- group_coordinator_agent_id: " + group.CoordinatorAgentID + "\n")
-			if group.CoordinatorAgentID == agent.ID {
-				b.WriteString("- You are this group's coordinator: own its WorkPlans, triage its group inbox, assign internal work, verify results directly or via reviewers, and represent the group in all cross-group communication.\n")
-			} else {
-				b.WriteString("- You are a group member, not its diplomat. Route cross-group needs through your coordinator; internal group handoffs may still target the responsible member directly.\n")
-			}
-		}
-		b.WriteString("- Group contract: use direct send_to only inside this group. Cross-group work goes through send_to_group and the destination coordinator.\n")
-		switch strings.ToLower(strings.TrimSpace(agent.GroupRole)) {
-		case "architect":
-			b.WriteString("- Role handoff: send execution-ready plans and risk hotspots to downstream builder/reviewer nicknames. When review or discussion is requested, perform a real send_to and wait for peer evidence before claiming alignment.\n")
-		case "builder":
-			b.WriteString("- Role handoff: send changed areas, verification evidence, and known risks to the downstream reviewer nickname. Send requested fixes back through a new concrete handoff only when another owner is required.\n")
-		case "reviewer":
-			b.WriteString("- Role handoff: send must-fix findings and user-visible risks directly to downstream builder/architect nicknames. Review a revised peer result before declaring approval; ack only when no further action is needed.\n")
-		}
-	}
-	if strings.TrimSpace(agent.Summary) != "" {
-		b.WriteString("- summary: " + limitString(agent.Summary, 800) + "\n")
-	}
-	if strings.TrimSpace(agent.SystemPrompt) != "" {
-		b.WriteString("- Template instructions:\n")
-		b.WriteString(indentPrompt(limitString(strings.TrimSpace(agent.SystemPrompt), 2400), "  "))
-		b.WriteString("\n")
-	}
 	if skillPrompt := a.renderSkillsPrompt(project); skillPrompt != "" {
 		b.WriteString(limitString(skillPrompt, 6000))
 		b.WriteString("\n")
@@ -126,15 +91,6 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 		b.WriteString("\n### Selected skill instructions\n")
 		b.WriteString(limitString(skillInjection, 6000))
 		b.WriteString("\n")
-	}
-	if residentAgentIsDesign(agent) {
-		b.WriteString(residentDesignAgentPrompt())
-	}
-	if residentAgentIsReviewer(agent) {
-		b.WriteString(residentReviewerAgentPrompt())
-	}
-	if residentAgentIsBuilder(agent) {
-		b.WriteString(residentBuilderAgentPrompt())
 	}
 	if peers := a.projectAgents(project); len(peers) > 1 {
 		b.WriteString("\n### Resident teammates (address by unique nickname)\n")
@@ -263,10 +219,56 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 	b.WriteString(limitString(userText, residentTranscriptMessageMaxChars))
 	b.WriteString("\n")
 	prompt := b.String()
-	providerTranscript := boundedProviderTranscript(delta, "", userText)
-	totalTokens, stableTokens, transcriptTokens, dynamicTokens := residentPromptTokenAccounting(prompt, stablePrefixChars, providerTranscript)
-	log.Printf("resident prompt build project=%s agent=%s turn=%s total_estimated_tokens=%d stable_prefix_tokens=%d transcript_tokens=%d dynamic_tokens=%d transcript_context_tokens=%d build_duration=%s", project.ID, agent.ID, turnType, totalTokens, stableTokens, transcriptTokens, dynamicTokens, estimateModelBoundTranscriptTokens(delta), time.Since(promptStarted).Round(time.Millisecond))
+	log.Printf("resident prompt build project=%s agent=%s turn=%s stable_prefix_chars=%d transcript_context_tokens=%d build_duration=%s", project.ID, agent.ID, turnType, stablePrefixChars, estimateModelBoundTranscriptTokens(delta), time.Since(promptStarted).Round(time.Millisecond))
 	return prompt
+}
+
+func (a *app) renderResidentDurableIdentity(b *strings.Builder, project Project, agent Agent) {
+	b.WriteString("\n### Resident identity and durable role\n")
+	b.WriteString("- nickname: " + firstNonEmpty(agent.Nickname, agent.DisplayName, agent.Name) + "\n")
+	b.WriteString("- template: " + agent.Name + "\n")
+	b.WriteString("- display_name: " + agent.DisplayName + "\n")
+	b.WriteString("- role: " + agent.Role + "\n")
+	if strings.TrimSpace(agent.GroupID) != "" {
+		b.WriteString("- group_id: " + agent.GroupID + "\n")
+		b.WriteString("- group_name: " + agent.GroupName + "\n")
+		b.WriteString("- group_role: " + agent.GroupRole + "\n")
+		b.WriteString("- group_order: " + fmt.Sprintf("%d", agent.GroupOrder) + "\n")
+		if group, ok := a.groupForAgent(project.ID, agent.ID); ok {
+			b.WriteString("- group_coordinator_agent_id: " + group.CoordinatorAgentID + "\n")
+			if group.CoordinatorAgentID == agent.ID {
+				b.WriteString("- You are this group's coordinator: own its WorkPlans, triage its group inbox, assign internal work, verify results directly or via reviewers, and represent the group in all cross-group communication.\n")
+			} else {
+				b.WriteString("- You are a group member, not its diplomat. Route cross-group needs through your coordinator; internal group handoffs may still target the responsible member directly.\n")
+			}
+		}
+		b.WriteString("- Group contract: use direct send_to only inside this group. Cross-group work goes through send_to_group and the destination coordinator.\n")
+		switch strings.ToLower(strings.TrimSpace(agent.GroupRole)) {
+		case "architect":
+			b.WriteString("- Role handoff: send execution-ready plans and risk hotspots to downstream builder/reviewer nicknames. When review or discussion is requested, perform a real send_to and wait for peer evidence before claiming alignment.\n")
+		case "builder":
+			b.WriteString("- Role handoff: send changed areas, verification evidence, and known risks to the downstream reviewer nickname. Send requested fixes back through a new concrete handoff only when another owner is required.\n")
+		case "reviewer":
+			b.WriteString("- Role handoff: send must-fix findings and user-visible risks directly to downstream builder/architect nicknames. Review a revised peer result before declaring approval; ack only when no further action is needed.\n")
+		}
+	}
+	if strings.TrimSpace(agent.Summary) != "" {
+		b.WriteString("- summary: " + limitString(agent.Summary, 800) + "\n")
+	}
+	if strings.TrimSpace(agent.SystemPrompt) != "" {
+		b.WriteString("- Template instructions:\n")
+		b.WriteString(indentPrompt(limitString(strings.TrimSpace(agent.SystemPrompt), 2400), "  "))
+		b.WriteString("\n")
+	}
+	if residentAgentIsDesign(agent) {
+		b.WriteString(residentDesignAgentPrompt())
+	}
+	if residentAgentIsReviewer(agent) {
+		b.WriteString(residentReviewerAgentPrompt())
+	}
+	if residentAgentIsBuilder(agent) {
+		b.WriteString(residentBuilderAgentPrompt())
+	}
 }
 
 func residentPromptTokenAccounting(prompt string, stablePrefixChars int, providerTranscript []AgentTranscriptItem) (total, stable, transcript, dynamic int) {

@@ -120,6 +120,9 @@ func TestRunWorkerExecutesOncePublishesOrderedToolEventsAndPersistsOneResult(t *
 	if !started {
 		t.Fatal("could not begin run")
 	}
+	if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", "dev", "implement"); !ok {
+		t.Fatal("could not persist current input")
+	}
 	a.startAgentRunWorker(project, agent, run, "implement", "dev")
 	// A stale second start for the same Run must not replace the first
 	// worker's cancellation ownership or execute the provider twice.
@@ -195,6 +198,9 @@ func TestCancelAfterProviderReturnBeforeResultCommitPersistsNoResult(t *testing.
 	if !started {
 		t.Fatal("could not begin run")
 	}
+	if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", "ask", "hello"); !ok {
+		t.Fatal("could not persist current input")
+	}
 	a.startAgentRunWorker(project, agent, run, "hello", "ask")
 	select {
 	case <-provider.started:
@@ -263,6 +269,9 @@ func TestSuccessClaimRejectsLaterCancelWithOneDoneResult(t *testing.T) {
 	run, started := a.beginAgentRun(AgentRunInput{RunID: "success-before-cancel", ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: "ask"})
 	if !started {
 		t.Fatal("could not begin run")
+	}
+	if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", "ask", "hello"); !ok {
+		t.Fatal("could not persist current input")
 	}
 	a.startAgentRunWorker(project, agent, run, "hello", "ask")
 	<-provider.started

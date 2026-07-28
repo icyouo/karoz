@@ -8,7 +8,7 @@ import (
 
 // startAgentRunWorker deliberately roots execution in Background: observers may
 // leave, but only explicit cancelAgentRun cancels this context.
-func (a *app) startAgentRunWorker(project Project, agent Agent, run AgentRun, userText, turnType string) {
+func (a *app) startAgentRunWorker(project Project, agent Agent, run AgentRun, userText, turnType string, inputIdentity ...AgentTranscriptItem) {
 	ctx, claimed := a.claimAndBindAgentRunWorkerContext(context.Background(), project.ID, agent.ID, run.ID)
 	if !claimed {
 		// Another worker (or a terminal transition) already owns this immutable
@@ -18,7 +18,11 @@ func (a *app) startAgentRunWorker(project Project, agent Agent, run AgentRun, us
 	ledger := a.createRunLedger(run.ID)
 	ledger.publish("meta", map[string]any{"run_id": run.ID, "type": normalizeChatTurnType(turnType), "agent": a.agentWithRuntimeState(project, agent)})
 	go func() {
-		message, err := a.runResidentAgentTurn(ctx, project, agent, userText, turnType, a.agentRunLedgerCallbacks(project, agent, run.ID))
+		currentInput := AgentTranscriptItem{}
+		if len(inputIdentity) > 0 {
+			currentInput = inputIdentity[0]
+		}
+		message, err := a.runResidentAgentTurnWithCurrentInput(ctx, project, agent, userText, turnType, currentInput, a.agentRunLedgerCallbacks(project, agent, run.ID))
 		if err != nil {
 			if ctx.Err() != nil {
 				a.finishAgentRunWithLedger(project, agent, run.ID, RunStateCancelled, err, "Agent run cancelled.")

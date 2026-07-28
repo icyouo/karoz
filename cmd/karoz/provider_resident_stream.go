@@ -17,7 +17,7 @@ type residentStepOutput struct {
 	Text             string
 	ToolCalls        []codexToolCall
 	AssistantContent []map[string]any
-	CompletedItems   []map[string]any
+	CodexOutputItems []codexResponseOutputItem
 }
 
 // residentStreamWire adapts one resident provider protocol (Codex responses
