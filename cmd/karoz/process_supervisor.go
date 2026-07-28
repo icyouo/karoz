@@ -70,6 +70,7 @@ type processSupervisorConfig struct {
 	ProcessKill     func(*os.Process) error
 	ProcessWait     func(*exec.Cmd) error
 	BeforeFinalize  func()
+	PrepareRecord   func(processdomain.Process) (processdomain.Process, error)
 }
 
 type processStartRequest struct {
@@ -266,6 +267,12 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 		RunID: request.RunID, Command: request.Command, Workdir: request.Workdir,
 		Description: request.Description, State: processdomain.StateStarting,
 		LifetimeMS: lifetime.Milliseconds(), StartedAt: now, UpdatedAt: now,
+	}
+	if supervisor.config.PrepareRecord != nil {
+		record, err = supervisor.config.PrepareRecord(record)
+		if err != nil {
+			return processdomain.Process{}, err
+		}
 	}
 	if err := supervisor.reservations.Reserve(record); err != nil {
 		return processdomain.Process{}, err

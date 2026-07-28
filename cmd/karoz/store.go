@@ -18,6 +18,9 @@ func (a *app) bootstrap() error {
 	if err := os.MkdirAll(a.settings.ProjectsRoot, 0755); err != nil {
 		return err
 	}
+	if err := a.bootstrapProcessRuntime(); err != nil {
+		return err
+	}
 	if err := a.loadTasks(); err != nil {
 		return err
 	}

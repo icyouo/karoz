@@ -19,6 +19,9 @@ type app struct {
 	mu                                 sync.Mutex
 	supervisorCtx                      context.Context
 	supervisorCancel                   context.CancelFunc
+	processRuntime                     *processRuntimePersistence
+	processSupervisor                  *processSupervisor
+	processPersistenceFail             func(processPersistenceFailpoint) error
 	taskRunMu                          sync.Mutex
 	taskRunCancels                     map[string]taskRun
 	taskIntegrationLocksMu             sync.Mutex

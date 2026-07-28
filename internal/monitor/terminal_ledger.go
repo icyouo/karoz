@@ -269,6 +269,28 @@ func (ledger TerminalReservationLedger) Release(
 	return result, nil
 }
 
+// RollbackAllocation removes only a reservation that never crossed the
+// authority admission boundary. Runtime recovery must prove the matching
+// authority record is absent before invoking it.
+func (ledger TerminalReservationLedger) RollbackAllocation(
+	project RuntimeProjectIdentity,
+	expected TerminalReservation,
+) (TerminalReservationLedger, error) {
+	if err := ledger.Validate(project); err != nil {
+		return ledger, err
+	}
+	current, exists := ledger.Slots[expected.Slot]
+	if !exists || !SameTerminalReservation(project, current, expected) {
+		return ledger, errors.New("terminal reservation comparison failed")
+	}
+	if current.State != ReservationAllocating {
+		return ledger, errors.New("terminal reservation allocation is not rollback-safe")
+	}
+	result := cloneTerminalLedger(ledger)
+	delete(result.Slots, current.Slot)
+	return result, nil
+}
+
 func canTransitionTerminalReservation(from, to TerminalReservationState) bool {
 	if from == to {
 		return true

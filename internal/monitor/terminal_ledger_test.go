@@ -216,3 +216,30 @@ func TestTerminalLedgerRejectsSchemaLossAndDuplicateBijection(t *testing.T) {
 		t.Fatal("duplicate authority/entity reservation accepted")
 	}
 }
+
+func TestTerminalReservationLedgerRollbackAllocation(t *testing.T) {
+	project := testProjectIdentity("rollback")
+	ledger, err := NewTerminalReservationLedger(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation := testReservation(project, 7, "rollback")
+	ledger, err = ledger.Allocate(project, reservation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err := ledger.RollbackAllocation(project, reservation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rolledBack.Slots) != 0 || len(ledger.Slots) != 1 {
+		t.Fatalf("rollback mutated input or retained allocation: before=%d after=%d", len(ledger.Slots), len(rolledBack.Slots))
+	}
+	active, err := ledger.Transition(project, reservation, ReservationActive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := active.RollbackAllocation(project, active.Slots[reservation.Slot]); err == nil {
+		t.Fatal("active reservation was rollback-released")
+	}
+}
