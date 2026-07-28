@@ -1,7 +1,11 @@
 # Agent Runtime Remediation Plan
 
-Status: approved for phased implementation (2026-07-28); amended 2026-07-28 with
-the review supplement (M6 amendment, M7, M8)
+> Historical M1–M6 execution plan. New runtime findings are split into
+> `docs/agent-runtime-immediate-remediation.md` (implementation-ready) and
+> `docs/agent-runtime-candidate-designs.md` (not approved or scheduled).
+
+Status: historical. M1–M6 were approved for phased implementation on
+2026-07-28. The later M7/M8 amendment is superseded by the two documents above.
 
 Owner: `builder`
 
@@ -24,11 +28,7 @@ In scope:
 - checkable runtime policy enforcement;
 - non-blocking memory retrieval;
 - structured cross-turn model history and prompt-size control;
-- small loopback/local-request hardening that does not introduce login;
-- memory retrieval that works for the project's primary input languages, and a
-  write path that does not accumulate duplicate or superseded knowledge (M7);
-- a tool surface whose boundaries are expressed in shape rather than in
-  description prose (M8).
+- small loopback/local-request hardening that does not introduce login.
 
 Out of scope:
 
@@ -37,9 +37,7 @@ Out of scope:
 - database migration solely for scale;
 - a general rewrite of the `app` object or `internal/` packages;
 - parsing model prose to decide whether the model made an unsupported claim;
-- embedding-based or vector memory retrieval, and the automatic
-  extraction/consolidation pipeline in `docs/memory-write-path.md`; M7 makes
-  lexical retrieval correct first, and both remain candidates afterwards.
+- embedding-based or vector memory retrieval.
 
 ## 2. Review finding disposition
 
@@ -55,24 +53,6 @@ Out of scope:
 | S3-3 nominal package layering | Defer; reuse is not a current product goal | — |
 | S3-4 unbounded scheduler wait | Required | M4 |
 | S3-5 blocking memory gate | Required latency fix | M5 |
-
-Supplement findings (2026-07-28). M1–M5 have landed; S2-1 is half addressed and
-its remaining wire-format half is re-filed as S2-4.
-
-| Finding | Disposition | Milestone |
-|---|---|---|
-| S1-3 Chinese memory retrieval returns nothing | Required; schedule ahead of M6 | M7 |
-| S2-4 transcript flattened to prose at the wire | Required; completes M6 | M6 amendment |
-| S2-5 reasoning content billed and discarded | Required; completes M6 | M6 amendment |
-| S2-6 no memory dedup/supersede/decay | Required | M7 |
-| S2-7 checkpoint truncation composes with S1-3 | Required; archive fix first | M7 |
-| S2-8 tool surface has no owner; prose boundaries | Required; new milestone | M8 |
-| S3-6 shared memory retrieval budget; dead `Priority` | Required | M7 |
-| S3-7 no project memory tier | Required | M7 |
-| S3-8 stable prefix not byte-stable | Required regression guard | M6 amendment |
-| S3-9 tool contract billed twice | Required | M8 |
-| S3-10 per-turn-only tool output budget | Required; completes M4 | M8 |
-| S3-11 no uniform tool result envelope | Required | M8 |
 
 ## 3. Target task lifecycle
 
@@ -550,246 +530,7 @@ Do not promise provider prompt caching as a correctness requirement. Measure:
 - existing context counter matches the model-bound transcript estimate within
   the documented estimator tolerance.
 
-### M6 amendment (2026-07-28)
-
-The storage half of M6 has landed: `AgentTranscriptItem` carries tool identity,
-arguments, result, and success, and legacy `AgentMessage` records merge in
-lazily without rewriting `agent-messages.json`. The remaining work is the wire
-half, which is where the capability and the cost saving actually are.
-
-1. Stop rendering transcript items as prose. `promptAgentTranscriptBody`
-   currently emits `tool_call id=… name=… arguments=…` text that the model must
-   re-parse, and only the current turn reaches the provider as native items.
-   `agentTranscriptForModel` must feed a provider-neutral item list, and each
-   wire adapter maps it to native items:
-
-   - Codex: `function_call` / `function_output` entries in the `input` array;
-   - Claude: `tool_use` / `tool_result` content blocks.
-
-   Legacy items lacking a `ToolCallID` must degrade to plain message items
-   rather than emitting an unpaired native tool item that a provider rejects.
-
-2. Capture reasoning items from the provider stream and replay them, in order,
-   in subsequent requests *within the same turn*. `include:
-   ["reasoning.encrypted_content"]` is already requested and paid for, but
-   `provider_codex_sse.go` has no reasoning branch and nothing replays it, so a
-   multi-step turn re-derives its plan every round. Encrypted payloads are
-   passed through opaquely and never logged or persisted. Dropping reasoning at
-   turn boundaries is intended.
-
-3. Remove the duplicate tool contract (S3-9). The `tools` array is the single
-   schema source; `renderProviderNeutralToolContract` retains only orchestration
-   rules that a schema cannot express.
-
-4. Make the stable prefix byte-stable (S3-8). Move every per-turn-varying field,
-   including the current chat turn type, after `stablePrefixChars`. The prefix
-   may vary by agent identity and role; it must not vary by turn type or by
-   wall-clock time.
-
-### M6 amendment required tests
-
-- a turn following a tool call sends native tool items for the *previous* turn,
-  not prose, on both providers;
-- a legacy transcript item without a tool call ID never produces an unpaired
-  native tool item;
-- reasoning items captured in round one are replayed in round two of the same
-  turn, and are absent from the next turn;
-- reasoning payloads never appear in logs or persisted state;
-- two prompt builds for the same `(agent, turn type)` produce byte-identical
-  stable prefixes, and a turn-type change alters only bytes after the boundary;
-- the tool contract appears once per request; every tool in the `tools` array is
-  absent from the prose preamble.
-
-## 10. M7 — Memory retrieval and write-path correctness
-
-M7 addresses the only supplement finding that is a functional failure today.
-S1-3 must land before M6, independently of the rest of this milestone: it is
-small, it repairs live behavior, and M6's archive fallback is not trustworthy
-without it.
-
-### M7.1 CJK-aware scoring (S1-3)
-
-1. `memoryMatchScore` derives terms from `strings.Fields`, so a Chinese question
-   becomes one term and scoring degrades to verbatim-substring containment.
-   Replace term derivation with a segmenter that splits ASCII runs on whitespace
-   and CJK runs into rune bigrams.
-
-2. Weight a bigram hit below a whole-word hit, and keep full-phrase containment
-   ranked above both, so fragment noise cannot outrank a real match.
-
-3. Apply the same segmentation to indexing and querying. `relevantMemoriesFor`
-   and `searchArchive` must not diverge.
-
-4. `memoryWordCount` is already CJK-aware; the pre-filter and the scorer must
-   agree on what a term is.
-
-5. Retrieval currently scans every entry on every turn. Once terms are
-   well-defined, add an inverted index from term to entry so retrieval is a set
-   intersection. This is a correctness-neutral optimization and may be deferred
-   within M7 if measurements do not justify it.
-
-### M7.2 Write path (S2-6)
-
-1. Detect near-duplicates on write and update the existing entry instead of
-   appending. Duplicates are a recall problem, not a storage problem: they
-   consume the bounded injection budget and evict relevant entries.
-
-2. Add `supersedes` / `superseded_by`. `record_decision` accepts an optional
-   `supersedes_id`, archives the predecessor, and retrieval excludes anything
-   superseded.
-
-3. Add explicit recency decay to the score. `UpdatedAt` currently breaks ties
-   only when scores are equal, so a longer stale entry can outrank its own
-   correction.
-
-4. Do not start the `docs/memory-write-path.md` extraction/consolidation
-   pipeline in this milestone. It is correct in direction but depends on items
-   1–3; automatic extraction without them fills the store with duplicates
-   faster.
-
-### M7.3 Layering and scope (S3-6, S3-7)
-
-1. Replace the single `limit=6` retrieval budget with per-layer budgets:
-   `decision` small and near-resident, `fact` relevance-ranked, `done`
-   reachable through `search_archive` rather than unconditional injection.
-
-2. Either wire `Priority` into ranking or remove the field. Today only
-   `add_pending` sets it and no ranking path reads it.
-
-3. Add a project-scoped `fact` tier with agent attribution, so an established
-   fact does not have to be re-narrated between agents over the inbox. Existing
-   per-agent entries keep their current scope; no destructive migration.
-
-### M7.4 Checkpoint summary (S2-7)
-
-1. Land M7.1 first. A searchable archive is the safety net for anything the
-   summary drops.
-
-2. Replace `compactAgentSummaryLine`'s fixed 280-character truncation, and
-   `normalizeResidentSummary`'s keep-the-tail eviction, with one cheap model
-   call producing a real summary.
-
-3. Run it off the first-token path, following the pattern M5 applied to the
-   memory gate. Summarizer failure or slowness must not delay the current turn;
-   on failure, fall back to the current mechanical behavior rather than blocking.
-
-### M7 required tests
-
-- the S1-3 evidence table becomes a test: Chinese non-verbatim queries retrieve
-  the matching decision, and the previously passing English case still passes;
-- explicit cues (`记得`, `之前`, `上次`) retrieve through the same path;
-- bigram fragments do not outrank whole-word or full-phrase matches;
-- writing the same fact repeatedly yields one entry and does not consume more
-  than one injection slot;
-- a superseded decision is never returned alongside its replacement;
-- a stale entry with greater literal overlap does not outrank a newer correction;
-- per-layer budgets hold under a fixture where `done` entries outnumber
-  `decision` entries;
-- a project-tier fact is visible to a second agent in the same project and not
-  to another project;
-- a decision evicted from the rolling summary is still retrievable from the
-  archive by a Chinese query;
-- summarizer failure or timeout adds no current-turn latency and degrades to the
-  mechanical summary.
-
-### M7 review gate
-
-Reviewer must run retrieval against Chinese fixtures directly, not only assert
-that a scoring helper returns a non-zero integer.
-
-## 11. M8 — Tool surface consolidation
-
-The original disposition table had no tool-system entry, so this area had no
-owner. Scope: 45 static resident tools with 12 gated names, overlapping verbs
-disambiguated by description prose, and no per-call output accounting.
-
-### M8.1 Collapse overlapping verbs (S2-8)
-
-1. Demote "pick the right tool" to "fill the right enum". Models select a
-   required enum value more reliably than they choose among similarly described
-   tool names.
-
-2. Consolidate the collaboration cluster. `reply_to`, `decline_handoff`, and
-   `ack_inbox` become one `inbox_resolve(message_id, outcome:
-   reply|decline|ack, body?)`. `send_to`, `send_to_group`, `report_activity`,
-   and `mark_activity` keep distinct effects and stay separate.
-
-3. Consolidate the memory cluster. `remember_fact`, `record_decision`,
-   `mark_done`, and `add_pending` all call `createMemory` and differ only by
-   layer; they become `memory_write(layer, summary, detail, priority?,
-   supersedes?)`, with `drop_pending` generalized to `memory_update(id, state)`.
-   This is also where M7.2's `supersedes` argument lands.
-
-4. Keep the old names accepted as aliases for one review cycle so a stale
-   provider transcript replayed from history does not fail. Aliases are not
-   advertised in the `tools` array.
-
-5. Description prose that exists to explain what a tool does *not* do is a
-   symptom of a bad boundary. Remove it as the boundary improves rather than
-   rewriting it.
-
-### M8.2 State-conditional availability (S2-8)
-
-1. Extend `residentToolAllowed` with runtime-state predicates alongside turn
-   type. The prompt builder already knows the facts required.
-
-2. Minimum set: inbox tools only with an unresolved inbox item; plan submit and
-   advance only with an existing draft; artifact review only with a pending
-   artifact.
-
-3. Availability is a hint, not the enforcement boundary. Handlers keep rejecting
-   invalid calls, because a replayed or hallucinated call can still arrive for a
-   tool that is not currently advertised.
-
-### M8.3 Per-call output budget (S3-10)
-
-1. Add a per-call output cap beneath the existing per-turn `MaxToolOutputChars`,
-   so one large `repo_read` or verbose `bash` cannot consume the whole turn.
-
-2. Report the remaining allowance in truncated results, for example
-   `{"truncated": true, "remaining_output_chars": N}`, so the model can narrow
-   its next query instead of retrying blindly.
-
-3. Derive both caps from the M4 budget rather than introducing a parallel
-   mechanism.
-
-### M8.4 Uniform result envelope (S3-11)
-
-1. Standardize handler results on `{ok, data?, error?{code, message,
-   retryable}}`. `retryable` states whether to retry or change approach.
-
-2. Enforce through one helper, not per-handler convention.
-
-3. `createMemory` currently returns a Go `error` whose model-visible form
-   depends on its caller; it must return a typed envelope like every other
-   handler.
-
-4. Envelope changes alter model-visible tool output, so land M8.4 with the
-   provider contract tests, not before them.
-
-### M8 required tests
-
-- the consolidated tools cover every effect the replaced tools could produce;
-- retired tool names still dispatch as aliases and are absent from the `tools`
-  array;
-- an empty inbox does not advertise inbox tools, and a handler still rejects an
-  inbox call that arrives anyway;
-- no plan draft does not advertise submit/advance, with the same handler-level
-  rejection;
-- a single oversized tool result is capped per call and leaves later calls in the
-  same turn a usable allowance;
-- a truncated result reports the remaining allowance;
-- every registered handler returns a schema-valid envelope, asserted by walking
-  the registry;
-- `retryable` is set correctly for a validation error versus a transient failure;
-- Codex and Claude receive identical consolidated tool contracts.
-
-### M8 review gate
-
-Reviewer must confirm the per-turn spec payload shrank and that no consolidated
-tool lost a previously reachable effect.
-
-## 12. Cross-cutting observability
+## 10. Cross-cutting observability
 
 Use structured logs with identifiers, not new external infrastructure.
 
@@ -820,27 +561,7 @@ Scheduler fields:
 - attempt/effects-started;
 - terminal reason.
 
-Memory fields (M7):
-
-- retrieval duration;
-- term count and whether CJK segmentation applied;
-- candidates scanned, candidates matched, entries injected per layer;
-- writes deduplicated and entries superseded;
-- summarizer outcome and whether the mechanical fallback was used.
-
-Tool fields (M8):
-
-- tool name, advertised tool count, and why a tool was withheld;
-- per-call and per-turn output allowance consumed and remaining;
-- truncation events;
-- envelope error code and `retryable`;
-- alias dispatches, so alias removal is scheduled from evidence.
-
-Never log prompts, attachment contents, tool secrets, memory bodies, memory
-summaries, reasoning payloads, or provider credentials by default. Memory and
-tool observability records counts and durations, never content.
-
-## 13. Persistence and compatibility
+## 11. Persistence and compatibility
 
 - New JSON fields use `omitempty` where absence has an unambiguous legacy
   meaning.
@@ -854,15 +575,8 @@ tool observability records counts and durations, never content.
   the whole file at startup.
 - HTTP additions are backward-compatible; existing message POST streaming
   remains available through M3.
-- M7 memory fields (`supersedes`, `superseded_by`, project scope) use
-  `omitempty`; an absent value keeps its current meaning, so existing
-  `memories.json` loads unchanged and no startup rewrite is required.
-- M7.1 changes scoring only. It must not rewrite stored entries; any index is
-  derived state, rebuilt at load and safe to discard.
-- M8 tool renames are additive at the dispatch layer. A persisted transcript
-  naming a retired tool must still load and replay through its alias.
 
-## 14. Rollback
+## 12. Rollback
 
 - Each milestone is a separate commit/review unit.
 - M1 rollback preserves task branches and commits; never reset or delete the
@@ -873,19 +587,8 @@ tool observability records counts and durations, never content.
 - M5 can restore lexical-only retrieval immediately without data migration.
 - M6 keeps legacy visible messages authoritative until both provider contract
   suites and migration fixtures pass.
-- The M6 amendment keeps the prose transcript renderer behind a switch for one
-  review cycle, so a provider rejecting native item replay degrades to the
-  current behavior rather than failing the turn.
-- M7.1 is scoring-only and reverts without data migration. M7.2 and M7.3 add
-  fields; absence of `supersedes`/`superseded_by` and of a project tier must keep
-  their current meaning, so reverting leaves existing entries readable.
-- M7.4 falls back to the mechanical summary whenever the summarizer fails, so
-  rollback is the default failure path rather than a separate procedure.
-- M8.1 retains retired tool names as aliases for one review cycle; rollback
-  re-advertises them. M8.4 changes model-visible output and reverts with the
-  provider contract suites.
 
-## 15. Execution and review order
+## 13. Execution and review order
 
 ```text
 M1 safe integration
@@ -898,20 +601,9 @@ M4 budgets + scheduler + local HTTP boundary
   -> reviewer timing/HTTP gate
 M5 policy + memory latency
   -> reviewer contract/latency gate
-M7.1 CJK-aware memory scoring        (out of order by design: small, live defect)
-  -> reviewer Chinese-fixture retrieval gate
-M6 structured history + M6 amendment
+M6 structured history
   -> reviewer provider/migration/context gate
-M7.2-M7.4 memory write path, layering, real summary
-  -> reviewer memory-correctness gate
-M8 tool surface consolidation
-  -> reviewer tool-contract gate
 ```
-
-M7.1 precedes M6 deliberately. It is a half-day scoring fix for a failure that is
-live today, and M6's "fall back to the archive" contract is not trustworthy while
-archive search cannot serve a Chinese query. M7.4 must not start before M7.1 is
-accepted, for the same reason.
 
 Builder must:
 
