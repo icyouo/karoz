@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -42,4 +45,4 @@ jobs:
           cache: false
 
       - name: Test Windows Job Object crash containment
-        run: go test ./cmd/karoz -run TestWindowsJobObjectKillsDescendantsWhenOwnerCrashes -count=5
+        run: go test ./cmd/karoz -run TestWindows -count=5

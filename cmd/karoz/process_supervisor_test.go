@@ -660,7 +660,7 @@ func TestProcessSupervisorPermanentTerminalFailureRetainsOwnership(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if err := supervisor.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	if err := supervisor.Shutdown(ctx); err == nil || !strings.Contains(err.Error(), "terminal state is not durable") {
 		t.Fatalf("shutdown with unresolved terminal state = %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
@@ -809,7 +809,114 @@ func TestProcessSupervisorAfterStartFailureClosesAndKillsGuard(t *testing.T) {
 	}
 }
 
-func TestProcessSupervisorContainmentFailureRetainsOwnership(t *testing.T) {
+func TestProcessSupervisorAfterStartUnresolvedCleanupRetainsOwnership(t *testing.T) {
+	store := newMemoryProcessStore()
+	reservations := newMemoryReservationBoundary()
+	supervisor := testSupervisor(
+		t, store, reservations, &synchronizedBuffer{},
+		processSupervisorConfig{
+			BoundaryFactory: func(cmd *exec.Cmd) (processBoundary, error) {
+				delegate, err := newBackgroundProcessBoundary(cmd)
+				if err != nil {
+					return nil, err
+				}
+				return &injectedProcessBoundary{
+					delegate:  delegate,
+					afterErr:  errors.New("assignment failed"),
+					signalErr: errors.New("signal failed"),
+					closeErr:  errors.New("close failed"),
+				}, nil
+			},
+			ProcessKill: func(*os.Process) error { return errors.New("direct kill failed") },
+			ProcessWait: func(cmd *exec.Cmd) error {
+				_ = cmd.Wait()
+				return errors.New("wait failed")
+			},
+		},
+	)
+	request := startRequest("after-start-unresolved", "sleep 30", t.TempDir())
+	if _, err := supervisor.Start(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), "assignment failed") {
+		t.Fatalf("AfterStart unresolved cleanup = %v", err)
+	}
+	supervisor.mu.Lock()
+	_, retained := supervisor.faulted[request.ID]
+	supervisor.mu.Unlock()
+	if !retained || reservations.aborted[request.ID] {
+		t.Fatalf("unresolved ownership=%v aborted=%v", retained, reservations.aborted[request.ID])
+	}
+	if record := store.get(request.ID); record.State != processdomain.StateStarting {
+		t.Fatalf("unresolved cleanup terminalized record: %+v", record)
+	}
+}
+
+func TestProcessSupervisorRollbackCleanupFailuresRetainOwnership(t *testing.T) {
+	cases := []struct {
+		name  string
+		point processFailpoint
+		mode  string
+	}{
+		{name: "collector-signal", point: processFailCollectorArm, mode: "signal"},
+		{name: "collector-close", point: processFailCollectorArm, mode: "close"},
+		{name: "waiter-kill", point: processFailWaiterArm, mode: "kill"},
+		{name: "waiter-wait", point: processFailWaiterArm, mode: "wait"},
+		{name: "registration-close", point: processFailRegistration, mode: "close"},
+		{name: "registration-wait", point: processFailRegistration, mode: "wait"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			store := newMemoryProcessStore()
+			reservations := newMemoryReservationBoundary()
+			config := processSupervisorConfig{
+				Fail: func(point processFailpoint) error {
+					if point == test.point {
+						return errors.New("transaction failed")
+					}
+					return nil
+				},
+				BoundaryFactory: func(cmd *exec.Cmd) (processBoundary, error) {
+					delegate, err := newBackgroundProcessBoundary(cmd)
+					if err != nil {
+						return nil, err
+					}
+					injected := &injectedProcessBoundary{delegate: delegate}
+					if test.mode == "signal" || test.mode == "kill" {
+						injected.signalErr = errors.New("signal failed")
+					}
+					if test.mode == "signal" || test.mode == "close" {
+						injected.closeErr = errors.New("close failed")
+					}
+					return injected, nil
+				},
+			}
+			if test.mode == "kill" {
+				config.ProcessKill = func(*os.Process) error { return errors.New("direct kill failed") }
+			}
+			if test.mode == "wait" {
+				config.ProcessWait = func(cmd *exec.Cmd) error {
+					_ = cmd.Wait()
+					return errors.New("wait failed")
+				}
+			}
+			supervisor := testSupervisor(t, store, reservations, &synchronizedBuffer{}, config)
+			request := startRequest(test.name, "sleep 30", t.TempDir())
+			if _, err := supervisor.Start(context.Background(), request); err == nil {
+				t.Fatal("cleanup failure was not returned")
+			}
+			supervisor.mu.Lock()
+			_, retained := supervisor.faulted[request.ID]
+			supervisor.mu.Unlock()
+			if !retained || reservations.aborted[request.ID] {
+				t.Fatalf("retained=%v aborted=%v", retained, reservations.aborted[request.ID])
+			}
+			if record := store.get(request.ID); record.State.Terminal() {
+				t.Fatalf("cleanup failure terminalized record: %+v", record)
+			}
+		})
+	}
+}
+
+func TestProcessSupervisorContainmentFallbackAndFailure(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		signalErr error
@@ -838,16 +945,18 @@ func TestProcessSupervisorContainmentFailureRetainsOwnership(t *testing.T) {
 			if err != nil && !strings.Contains(err.Error(), "containment failed") {
 				t.Fatalf("containment failure = %v", err)
 			}
-			waitForRecoveryFault(t, supervisor)
 			id := "containment-" + test.name
-			if record := store.get(id); record.State != processdomain.StateRunning {
-				t.Fatalf("containment failure committed terminal state: %+v", record)
-			}
+			waitForRecoveryFault(t, supervisor)
+			record := store.get(id)
 			supervisor.mu.Lock()
 			retained := supervisor.handles[id]
 			supervisor.mu.Unlock()
-			if retained == nil {
-				t.Fatal("containment failure released ownership")
+			if test.name == "signal" {
+				if record.State != processdomain.StateSucceeded || retained != nil {
+					t.Fatalf("signal fallback record=%+v retained=%v", record, retained != nil)
+				}
+			} else if record.State != processdomain.StateRunning || retained == nil {
+				t.Fatalf("close failure record=%+v retained=%v", record, retained != nil)
 			}
 		})
 	}
@@ -877,6 +986,66 @@ func waitForRecoveryCount(t *testing.T, supervisor *processSupervisor, count uin
 	}
 	t.Fatalf("recovery fault count did not reach %d: %#v", count, supervisor.RecoveryFaults())
 	return nil
+}
+
+func TestProcessSupervisorTerminalErrorBroadcastsToRepeatedStops(t *testing.T) {
+	store := newMemoryProcessStore()
+	store.terminalFailures["broadcast"] = 1000
+	supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+		TerminalRetries: 2,
+		TerminalRetry:   time.Millisecond,
+	})
+	if _, err := supervisor.Start(context.Background(), startRequest("broadcast", "sleep 30", t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
+	firstErr := supervisor.Stop("broadcast")
+	if firstErr == nil || !strings.Contains(firstErr.Error(), "terminal state is not durable") {
+		t.Fatalf("first stop = %v", firstErr)
+	}
+	results := make(chan error, 8)
+	for index := 0; index < cap(results); index++ {
+		go func() { results <- supervisor.Stop("broadcast") }()
+	}
+	for index := 0; index < cap(results); index++ {
+		select {
+		case err := <-results:
+			if err == nil || err.Error() != firstErr.Error() {
+				t.Fatalf("broadcast stop = %v, want %v", err, firstErr)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("repeated Stop blocked after terminal error")
+		}
+	}
+}
+
+func TestProcessSupervisorShutdownTimeoutCanBeRetried(t *testing.T) {
+	releaseWait := make(chan struct{})
+	store := newMemoryProcessStore()
+	supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+		ProcessWait: func(cmd *exec.Cmd) error {
+			err := cmd.Wait()
+			<-releaseWait
+			return err
+		},
+		StopGrace: 20 * time.Millisecond,
+	})
+	if _, err := supervisor.Start(context.Background(), startRequest("shutdown-retry", "sleep 30", t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		err := supervisor.Shutdown(ctx)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("shutdown attempt %d = %v", attempt+1, err)
+		}
+	}
+	close(releaseWait)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := supervisor.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown retry after recovery = %v", err)
+	}
 }
 
 func TestProcessSupervisorStopExitLifetimeRaceCommitsOnce(t *testing.T) {

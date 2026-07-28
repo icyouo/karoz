@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 )
 
@@ -17,9 +18,11 @@ func backgroundShellCommand(command string) []string {
 }
 
 type unixProcessBoundary struct {
-	read  *os.File
-	write *os.File
-	pgid  int
+	read      *os.File
+	write     *os.File
+	pgid      int
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func newBackgroundProcessBoundary(cmd *exec.Cmd) (processBoundary, error) {
@@ -63,8 +66,11 @@ func (boundary *unixProcessBoundary) Signal(signal os.Signal) error {
 }
 
 func (boundary *unixProcessBoundary) Close() error {
-	_ = boundary.read.Close()
-	return boundary.write.Close()
+	boundary.closeOnce.Do(func() {
+		_ = boundary.read.Close()
+		boundary.closeErr = boundary.write.Close()
+	})
+	return boundary.closeErr
 }
 
 func runBackgroundProcessGuard(args []string) int {

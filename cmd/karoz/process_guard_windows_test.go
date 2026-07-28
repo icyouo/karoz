@@ -3,6 +3,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	processdomain "github.com/karoz/karoz/internal/process"
 )
 
 var procGetExitCodeProcess = kernel32.NewProc("GetExitCodeProcess")
@@ -113,6 +116,78 @@ func TestWindowsJobObjectKillsDescendantsWhenOwnerCrashes(t *testing.T) {
 	waitForWindowsProcessGone(t, childPID)
 }
 
+type windowsDiscardLog struct{}
+
+func (windowsDiscardLog) Write(value []byte) (int, error) { return io.Discard.Write(value) }
+func (windowsDiscardLog) Close() error                    { return nil }
+
+func TestWindowsAssignmentFailureUnblocksAndReapsGuard(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestWindowsProcessGuardEntry")
+	cmd.Env = append(
+		os.Environ(),
+		"KAROZ_WINDOWS_GUARD=1",
+		"KAROZ_WINDOWS_DESC_PARENT=1",
+		"KAROZ_WINDOWS_DESC_DIR="+dir,
+	)
+	boundaryValue, err := newBackgroundProcessBoundary(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := boundaryValue.(*windowsProcessBoundary)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	guardPID := cmd.Process.Pid
+	boundary.mu.Lock()
+	if err := syscall.CloseHandle(boundary.job); err != nil {
+		boundary.mu.Unlock()
+		t.Fatal(err)
+	}
+	boundary.job = 0
+	boundary.mu.Unlock()
+	if err := boundary.AfterStart(cmd); err == nil {
+		t.Fatal("invalid Job Object assignment unexpectedly succeeded")
+	}
+	supervisor := &processSupervisor{
+		config: processSupervisorConfig{
+			StopGrace:   100 * time.Millisecond,
+			ProcessKill: func(process *os.Process) error { return process.Kill() },
+			ProcessWait: func(command *exec.Cmd) error { return command.Wait() },
+		},
+	}
+	handle := &supervisedProcess{
+		supervisor: supervisor,
+		record:     processdomain.Process{ID: "windows-assignment-failure"},
+		cmd:        cmd,
+		boundary:   boundary,
+		stdout:     stdout,
+		stderr:     stderr,
+		log:        windowsDiscardLog{},
+		gate:       make(chan struct{}),
+		waitDone:   make(chan struct{}),
+	}
+	start := time.Now()
+	if err := supervisor.cleanupUnregistered(handle, false); err != nil {
+		t.Fatalf("assignment cleanup failed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("assignment cleanup was not bounded: %s", elapsed)
+	}
+	waitForWindowsProcessGone(t, guardPID)
+	if _, err := os.Stat(filepath.Join(dir, "parent.pid")); !os.IsNotExist(err) {
+		t.Fatalf("guard dispatched child after failed assignment: %v", err)
+	}
+}
+
 func waitForWindowsFile(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -127,15 +202,19 @@ func waitForWindowsFile(t *testing.T, path string) {
 
 func readWindowsPID(t *testing.T, path string) int {
 	t.Helper()
-	value, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		value, err := os.ReadFile(path)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(value)))
+			if parseErr == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(value)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pid
+	t.Fatalf("file %s did not contain a complete positive PID", path)
+	return 0
 }
 
 func waitForWindowsProcessGone(t *testing.T, pid int) {

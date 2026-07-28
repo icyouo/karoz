@@ -69,6 +69,7 @@ type windowsProcessBoundary struct {
 	mu        sync.Mutex
 	job       syscall.Handle
 	handshake io.WriteCloser
+	contained bool
 }
 
 func newBackgroundProcessBoundary(cmd *exec.Cmd) (processBoundary, error) {
@@ -123,12 +124,16 @@ func (boundary *windowsProcessBoundary) Signal(os.Signal) error {
 	boundary.mu.Lock()
 	defer boundary.mu.Unlock()
 	if boundary.job == 0 {
-		return nil
+		if boundary.contained {
+			return nil
+		}
+		return errors.New("process job is not available")
 	}
 	ok, _, callErr := procTerminateJobObject.Call(uintptr(boundary.job), 1)
 	if ok == 0 {
 		return windowsCallError("TerminateJobObject", callErr)
 	}
+	boundary.contained = true
 	return nil
 }
 
@@ -140,7 +145,10 @@ func (boundary *windowsProcessBoundary) Close() error {
 		return nil
 	}
 	err := syscall.CloseHandle(boundary.job)
-	boundary.job = 0
+	if err == nil {
+		boundary.contained = true
+		boundary.job = 0
+	}
 	return err
 }
 

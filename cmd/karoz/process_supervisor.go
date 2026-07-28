@@ -66,6 +66,8 @@ type processSupervisorConfig struct {
 	GuardExecutable string
 	GuardArgsPrefix []string
 	BoundaryFactory func(*exec.Cmd) (processBoundary, error)
+	ProcessKill     func(*os.Process) error
+	ProcessWait     func(*exec.Cmd) error
 }
 
 type processStartRequest struct {
@@ -90,11 +92,14 @@ type processSupervisor struct {
 	openLog      processLogOpener
 	config       processSupervisorConfig
 
-	startGate chan struct{}
-	mu        sync.Mutex
-	closed    bool
-	handles   map[string]*supervisedProcess
-	faulted   map[string]processdomain.Process
+	startGate        chan struct{}
+	shutdownMu       sync.Mutex
+	mu               sync.Mutex
+	closed           bool
+	shutdownComplete bool
+	shutdownErr      error
+	handles          map[string]*supervisedProcess
+	faulted          map[string]processdomain.Process
 
 	recoveryMu sync.Mutex
 	recovery   []processRecoveryFault
@@ -110,14 +115,16 @@ type supervisedProcess struct {
 	log        io.WriteCloser
 	buffer     *processdomain.OutputBuffer
 
-	gate          chan struct{}
-	registered    bool
-	exitObserved  chan struct{}
-	waitDone      chan struct{}
-	terminalDone  chan struct{}
-	terminalFault chan error
-	stdoutDone    chan struct{}
-	stderrDone    chan struct{}
+	gate           chan struct{}
+	registered     bool
+	exitObserved   chan struct{}
+	waitDone       chan struct{}
+	waitErr        error
+	terminalResult chan struct{}
+	terminalOnce   sync.Once
+	terminalErr    error
+	stdoutDone     chan struct{}
+	stderrDone     chan struct{}
 
 	collectMu          sync.Mutex
 	early              []byte
@@ -130,6 +137,18 @@ type supervisedProcess struct {
 type processTerminalCause struct {
 	state processdomain.State
 	err   string
+}
+
+type processCleanupError struct {
+	err error
+}
+
+func (failure *processCleanupError) Error() string {
+	return failure.err.Error()
+}
+
+func (failure *processCleanupError) Unwrap() error {
+	return failure.err
 }
 
 func newProcessSupervisor(
@@ -183,6 +202,12 @@ func newProcessSupervisor(
 	}
 	if config.BoundaryFactory == nil {
 		config.BoundaryFactory = newBackgroundProcessBoundary
+	}
+	if config.ProcessKill == nil {
+		config.ProcessKill = func(process *os.Process) error { return process.Kill() }
+	}
+	if config.ProcessWait == nil {
+		config.ProcessWait = func(cmd *exec.Cmd) error { return cmd.Wait() }
 	}
 	ctx, cancel := context.WithCancel(serverCtx)
 	return &processSupervisor{
@@ -254,6 +279,12 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 	handle, err := supervisor.launch(record, logWriter)
 	if err != nil {
 		_ = logWriter.Close()
+		var cleanupFailure *processCleanupError
+		if errors.As(err, &cleanupFailure) {
+			supervisor.recordRecovery(record.ID, "post_spawn_cleanup", cleanupFailure)
+			supervisor.retainFaulted(record)
+			return record, err
+		}
 		return supervisor.failBeforeSpawn(record, err)
 	}
 	supervisor.armCollectors(handle)
@@ -298,12 +329,7 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 	go supervisor.enforceLifetime(handle, lifetime)
 	select {
 	case <-handle.exitObserved:
-		select {
-		case <-handle.terminalDone:
-			return handle.snapshot(), nil
-		case terminalErr := <-handle.terminalFault:
-			return handle.snapshot(), terminalErr
-		}
+		return handle.snapshot(), handle.waitTerminalResult()
 	default:
 		return handle.snapshot(), nil
 	}
@@ -401,39 +427,22 @@ func (supervisor *processSupervisor) launch(record processdomain.Process, logWri
 		_ = stderr.Close()
 		return nil, err
 	}
-	if err := boundary.AfterStart(cmd); err != nil {
-		// Windows guards remain blocked on their assignment handshake until the
-		// boundary closes. Close first, then directly kill the guard as the
-		// fallback that does not depend on a successfully assigned Job Object.
-		closeErr := boundary.Close()
-		killErr := cmd.Process.Kill()
-		waitDone := make(chan struct{})
-		go func() {
-			_ = cmd.Wait()
-			close(waitDone)
-		}()
-		timer := time.NewTimer(supervisor.config.StopGrace)
-		select {
-		case <-waitDone:
-			if !timer.Stop() {
-				<-timer.C
-			}
-		case <-timer.C:
-			_ = cmd.Process.Kill()
-		}
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return nil, errors.Join(err, closeErr, killErr)
-	}
-	return &supervisedProcess{
+	handle := &supervisedProcess{
 		supervisor: supervisor, record: record, cmd: cmd, boundary: boundary,
 		stdout: stdout, stderr: stderr, log: logWriter,
 		buffer: processdomain.NewOutputBuffer(supervisor.config.TailLines, supervisor.config.LogBytes),
 		gate:   make(chan struct{}), exitObserved: make(chan struct{}),
-		waitDone: make(chan struct{}), terminalDone: make(chan struct{}),
-		terminalFault: make(chan error, 1),
-		stdoutDone:    make(chan struct{}), stderrDone: make(chan struct{}),
-	}, nil
+		waitDone: make(chan struct{}), terminalResult: make(chan struct{}),
+		stdoutDone: make(chan struct{}), stderrDone: make(chan struct{}),
+	}
+	if err := boundary.AfterStart(cmd); err != nil {
+		cleanupErr := supervisor.cleanupUnregistered(handle, false)
+		if cleanupErr != nil {
+			return nil, &processCleanupError{err: errors.Join(err, cleanupErr)}
+		}
+		return nil, err
+	}
+	return handle, nil
 }
 
 func (supervisor *processSupervisor) armCollectors(handle *supervisedProcess) {
@@ -501,11 +510,11 @@ func (supervisor *processSupervisor) armWaiter(handle *supervisedProcess) {
 	go func() {
 		defer close(handle.waitDone)
 		close(armed)
-		waitErr := handle.cmd.Wait()
+		waitErr := supervisor.config.ProcessWait(handle.cmd)
+		handle.stateMu.Lock()
+		handle.waitErr = waitErr
+		handle.stateMu.Unlock()
 		close(handle.exitObserved)
-		// The guard may die before its command tree. Contain the residual group
-		// before draining pipes or committing the terminal record.
-		containErr := handle.residualContain()
 		supervisor.waitForCollectors(handle)
 		<-handle.gate
 		handle.stateMu.Lock()
@@ -514,18 +523,17 @@ func (supervisor *processSupervisor) armWaiter(handle *supervisedProcess) {
 		if !registered {
 			return
 		}
+		// The guard may die before its command tree. Contain the residual group
+		// before committing the terminal record.
+		containErr := supervisor.containAfterWait(handle)
 		handle.collectMu.Lock()
 		_, _ = handle.buffer.FlushStream("stdout")
 		_, _ = handle.buffer.FlushStream("stderr")
-		_ = handle.log.Close()
+		logErr := handle.log.Close()
 		handle.collectMu.Unlock()
-		closeErr := handle.boundary.Close()
-		if err := errors.Join(containErr, closeErr); err != nil {
+		if err := errors.Join(containErr, logErr, cleanupWaitError(waitErr)); err != nil {
 			supervisor.recordRecovery(handle.record.ID, "containment", err)
-			select {
-			case handle.terminalFault <- fmt.Errorf("process containment failed: %w", err):
-			default:
-			}
+			handle.setTerminalResult(fmt.Errorf("process containment failed: %w", err))
 			return
 		}
 		supervisor.finish(handle, waitErr)
@@ -579,10 +587,7 @@ func (supervisor *processSupervisor) finish(handle *supervisedProcess, waitErr e
 		handle.stateMu.Lock()
 		handle.record = record
 		handle.stateMu.Unlock()
-		select {
-		case handle.terminalFault <- err:
-		default:
-		}
+		handle.setTerminalResult(err)
 		return
 	}
 	handle.stateMu.Lock()
@@ -591,7 +596,7 @@ func (supervisor *processSupervisor) finish(handle *supervisedProcess, waitErr e
 	supervisor.mu.Lock()
 	delete(supervisor.handles, record.ID)
 	supervisor.mu.Unlock()
-	close(handle.terminalDone)
+	handle.setTerminalResult(nil)
 }
 
 func (supervisor *processSupervisor) rollbackSpawn(handle *supervisedProcess, cause error, waiterArmed bool) (processdomain.Process, error) {
@@ -599,26 +604,12 @@ func (supervisor *processSupervisor) rollbackSpawn(handle *supervisedProcess, ca
 	handle.stateMu.Lock()
 	handle.registered = false
 	handle.stateMu.Unlock()
-	select {
-	case <-handle.gate:
-	default:
-		close(handle.gate)
-	}
-	_ = handle.signal(os.Kill)
-	if waiterArmed {
-		<-handle.waitDone
-	} else {
-		_ = handle.cmd.Wait()
-		supervisor.waitForCollectors(handle)
-	}
-	_ = handle.stdout.Close()
-	_ = handle.stderr.Close()
-	_ = handle.boundary.Close()
-	handle.collectMu.Lock()
-	handle.early = nil
-	_ = handle.log.Close()
-	handle.collectMu.Unlock()
 	record := handle.snapshot()
+	if cleanupErr := supervisor.cleanupUnregistered(handle, waiterArmed); cleanupErr != nil {
+		supervisor.recordRecovery(record.ID, "rollback_cleanup", cleanupErr)
+		supervisor.retainFaulted(record)
+		return record, errors.Join(cause, cleanupErr)
+	}
 	record.State = processdomain.StateFailed
 	record.Error = cause.Error()
 	record.UpdatedAt = time.Now().UTC()
@@ -632,6 +623,108 @@ func (supervisor *processSupervisor) rollbackSpawn(handle *supervisedProcess, ca
 		return record, errors.Join(cause, err)
 	}
 	return record, cause
+}
+
+func (supervisor *processSupervisor) cleanupUnregistered(handle *supervisedProcess, waiterArmed bool) error {
+	select {
+	case <-handle.gate:
+	default:
+		close(handle.gate)
+	}
+
+	signalErr := handle.retryHardSignal()
+	closeErr := handle.boundary.Close()
+	var killErr error
+	if signalErr != nil {
+		killErr = normalizeProcessDone(supervisor.config.ProcessKill(handle.cmd.Process))
+	}
+	_ = handle.stdout.Close()
+	_ = handle.stderr.Close()
+	waitErr := supervisor.boundedReap(handle, waiterArmed)
+
+	handle.collectMu.Lock()
+	handle.early = nil
+	logErr := handle.log.Close()
+	handle.collectMu.Unlock()
+
+	// A failed group/job signal is recoverable only when closing the watchdog
+	// boundary, directly killing the guard, and reaping it all succeeded.
+	if signalErr != nil && closeErr == nil && killErr == nil && waitErr == nil {
+		supervisor.recordRecovery(handle.record.ID, "signal_fallback", signalErr)
+		signalErr = nil
+	}
+	return errors.Join(signalErr, closeErr, killErr, waitErr, logErr)
+}
+
+func (supervisor *processSupervisor) boundedReap(handle *supervisedProcess, waiterArmed bool) error {
+	done := handle.waitDone
+	if !waiterArmed {
+		done = make(chan struct{})
+		go func() {
+			waitErr := supervisor.config.ProcessWait(handle.cmd)
+			handle.stateMu.Lock()
+			handle.waitErr = waitErr
+			handle.stateMu.Unlock()
+			close(done)
+		}()
+	}
+	if waitForChannel(done, supervisor.config.StopGrace) {
+		handle.stateMu.Lock()
+		waitErr := handle.waitErr
+		handle.stateMu.Unlock()
+		return cleanupWaitError(waitErr)
+	}
+	killErr := normalizeProcessDone(supervisor.config.ProcessKill(handle.cmd.Process))
+	if !waitForChannel(done, supervisor.config.StopGrace) {
+		return errors.Join(killErr, errors.New("process reap timed out"))
+	}
+	handle.stateMu.Lock()
+	waitErr := handle.waitErr
+	handle.stateMu.Unlock()
+	return errors.Join(killErr, cleanupWaitError(waitErr))
+}
+
+func waitForChannel(done <-chan struct{}, limit time.Duration) bool {
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func cleanupWaitError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return nil
+	}
+	return fmt.Errorf("process wait was not proven: %w", err)
+}
+
+func normalizeProcessDone(err error) error {
+	if err == nil || errors.Is(err, os.ErrProcessDone) {
+		return nil
+	}
+	return err
+}
+
+func (supervisor *processSupervisor) containAfterWait(handle *supervisedProcess) error {
+	signalErr := handle.retryHardSignal()
+	closeErr := handle.boundary.Close()
+	var killErr error
+	if signalErr != nil {
+		killErr = normalizeProcessDone(supervisor.config.ProcessKill(handle.cmd.Process))
+	}
+	if signalErr != nil && closeErr == nil && killErr == nil {
+		supervisor.recordRecovery(handle.record.ID, "signal_fallback", signalErr)
+		signalErr = nil
+	}
+	return errors.Join(signalErr, closeErr, killErr)
 }
 
 func (supervisor *processSupervisor) persistTerminal(record processdomain.Process, stage string) error {
@@ -700,32 +793,27 @@ func (supervisor *processSupervisor) Stop(id string) error {
 	}
 	select {
 	case <-handle.exitObserved:
-		select {
-		case <-handle.terminalDone:
-			return nil
-		case err := <-handle.terminalFault:
-			return err
-		}
+		return handle.waitTerminalResult()
 	default:
 	}
 	handle.setCause(processdomain.StateKilled, "process stopped")
 	if err := handle.signal(syscall.SIGTERM); err != nil {
-		return err
+		if containErr := supervisor.hardContainLive(handle); containErr != nil {
+			return containErr
+		}
 	}
 	timer := time.NewTimer(supervisor.config.StopGrace)
 	defer timer.Stop()
 	select {
-	case <-handle.terminalDone:
-		return nil
-	case err := <-handle.terminalFault:
-		return err
+	case <-handle.terminalResult:
+		return handle.terminalResultError()
 	case <-timer.C:
-		_ = handle.signal(os.Kill)
-		select {
-		case <-handle.terminalDone:
-			return nil
-		case err := <-handle.terminalFault:
+		if err := supervisor.hardContainLive(handle); err != nil {
 			return err
+		}
+		select {
+		case <-handle.terminalResult:
+			return handle.terminalResultError()
 		case <-time.After(supervisor.config.StopGrace):
 			return errors.New("process terminal state is unresolved")
 		}
@@ -736,31 +824,31 @@ func (supervisor *processSupervisor) enforceLifetime(handle *supervisedProcess, 
 	timer := time.NewTimer(lifetime)
 	defer timer.Stop()
 	select {
-	case <-handle.terminalDone:
+	case <-handle.terminalResult:
 		return
 	case <-handle.exitObserved:
 		return
 	case <-timer.C:
 		handle.setCause(processdomain.StateFailed, "lifetime exceeded")
-		if err := handle.signal(os.Kill); err != nil {
+		if err := supervisor.hardContainLive(handle); err != nil {
 			supervisor.recordRecovery(handle.record.ID, "lifetime_containment", err)
-			select {
-			case handle.terminalFault <- fmt.Errorf("process containment failed: %w", err):
-			default:
-			}
+			handle.setTerminalResult(fmt.Errorf("process containment failed: %w", err))
 		}
 	}
 }
 
 func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
+	supervisor.shutdownMu.Lock()
+	defer supervisor.shutdownMu.Unlock()
 	if err := supervisor.acquireStart(ctx); err != nil {
 		return err
 	}
 	supervisor.mu.Lock()
-	if supervisor.closed {
+	if supervisor.shutdownComplete {
+		err := supervisor.shutdownErr
 		supervisor.mu.Unlock()
 		supervisor.releaseStart()
-		return nil
+		return err
 	}
 	supervisor.closed = true
 	handles := make([]*supervisedProcess, 0, len(supervisor.handles))
@@ -777,32 +865,50 @@ func (supervisor *processSupervisor) Shutdown(ctx context.Context) error {
 		default:
 		}
 		handle.setCause(processdomain.StateInterrupted, "server shutting down")
-		_ = handle.signal(syscall.SIGTERM)
+		if err := handle.signal(syscall.SIGTERM); err != nil {
+			if containErr := supervisor.hardContainLive(handle); containErr != nil {
+				supervisor.recordRecovery(handle.record.ID, "shutdown_containment", containErr)
+			}
+		}
 	}
 	for _, handle := range handles {
 		grace := time.NewTimer(supervisor.config.StopGrace)
 		select {
-		case <-handle.terminalDone:
+		case <-handle.terminalResult:
 			if !grace.Stop() {
 				<-grace.C
 			}
+			if err := handle.terminalResultError(); err != nil {
+				return err
+			}
 		case <-grace.C:
-			_ = handle.signal(os.Kill)
+			if err := supervisor.hardContainLive(handle); err != nil {
+				return err
+			}
 			select {
-			case <-handle.terminalDone:
+			case <-handle.terminalResult:
+				if err := handle.terminalResultError(); err != nil {
+					return err
+				}
 			case <-ctx.Done():
-				supervisor.cancel()
 				return ctx.Err()
 			}
 		case <-ctx.Done():
 			if !grace.Stop() {
 				<-grace.C
 			}
-			_ = handle.signal(os.Kill)
-			supervisor.cancel()
+			_ = supervisor.hardContainLive(handle)
 			return ctx.Err()
 		}
 	}
+	supervisor.mu.Lock()
+	if len(supervisor.handles) != 0 || len(supervisor.faulted) != 0 {
+		supervisor.mu.Unlock()
+		return errors.New("process supervisor has unresolved ownership")
+	}
+	supervisor.shutdownComplete = true
+	supervisor.shutdownErr = nil
+	supervisor.mu.Unlock()
 	supervisor.cancel()
 	return nil
 }
@@ -825,7 +931,7 @@ func (handle *supervisedProcess) signal(signal os.Signal) error {
 	return err
 }
 
-func (handle *supervisedProcess) residualContain() error {
+func (handle *supervisedProcess) retryHardSignal() error {
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
 		err = handle.signal(os.Kill)
@@ -843,6 +949,46 @@ func (handle *supervisedProcess) residualContain() error {
 		}
 	}
 	return err
+}
+
+func (supervisor *processSupervisor) hardContainLive(handle *supervisedProcess) error {
+	signalErr := handle.retryHardSignal()
+	if signalErr == nil {
+		return nil
+	}
+	closeErr := handle.boundary.Close()
+	killErr := normalizeProcessDone(supervisor.config.ProcessKill(handle.cmd.Process))
+	if closeErr == nil && killErr == nil {
+		handle.containMu.Lock()
+		handle.hardKillDispatched = true
+		handle.containMu.Unlock()
+		supervisor.recordRecovery(handle.record.ID, "signal_fallback", signalErr)
+		return nil
+	}
+	err := errors.Join(signalErr, closeErr, killErr)
+	supervisor.recordRecovery(handle.record.ID, "containment", err)
+	handle.setTerminalResult(fmt.Errorf("process containment failed: %w", err))
+	return err
+}
+
+func (handle *supervisedProcess) setTerminalResult(err error) {
+	handle.terminalOnce.Do(func() {
+		handle.stateMu.Lock()
+		handle.terminalErr = err
+		handle.stateMu.Unlock()
+		close(handle.terminalResult)
+	})
+}
+
+func (handle *supervisedProcess) terminalResultError() error {
+	handle.stateMu.Lock()
+	defer handle.stateMu.Unlock()
+	return handle.terminalErr
+}
+
+func (handle *supervisedProcess) waitTerminalResult() error {
+	<-handle.terminalResult
+	return handle.terminalResultError()
 }
 
 func (handle *supervisedProcess) snapshot() processdomain.Process {
