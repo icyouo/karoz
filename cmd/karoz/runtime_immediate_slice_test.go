@@ -148,6 +148,57 @@ func TestClaudeHistoryNormalizesRolesAndCurrentUserOnce(t *testing.T) {
 	}
 }
 
+func TestCurrentUserInputRemovedOnceWithOrWithoutRunID(t *testing.T) {
+	tests := []struct {
+		name  string
+		items []AgentTranscriptItem
+		runID string
+	}{
+		{
+			name: "current item has run id",
+			items: []AgentTranscriptItem{
+				{Role: "user", Kind: "message", Body: "older"},
+				{Role: "user", Kind: "message", Body: "repeat", RunID: "run-1"},
+			},
+			runID: "run-1",
+		},
+		{
+			name: "visible item lacks run id",
+			items: []AgentTranscriptItem{
+				{Role: "assistant", Kind: "message", Body: "prior"},
+				{Role: "user", Kind: "message", Body: "current"},
+			},
+			runID: "run-2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			history := boundedProviderTranscript(tt.items, tt.runID, tt.items[len(tt.items)-1].Body)
+			wire := newCodexStreamWire("/workspace", tt.items[len(tt.items)-1].Body, "", "", history)
+			raw, err := json.Marshal(wire.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count := strings.Count(string(raw), tt.items[len(tt.items)-1].Body); count != 1 {
+				t.Fatalf("current input count = %d, want 1: %s", count, raw)
+			}
+		})
+	}
+}
+
+func TestPromptTokenAccountingIncludesNativeTranscriptWithoutSubtractingItFromDynamic(t *testing.T) {
+	transcript := []AgentTranscriptItem{{Role: "assistant", Kind: "message", Body: strings.Repeat("history ", 40)}}
+	prompt := "stable-prefix\ndynamic suffix"
+	total, stable, history, dynamic := residentPromptTokenAccounting(prompt, len("stable-prefix\n"), transcript)
+	promptTokens := estimateResidentContextTextTokens(prompt)
+	if history == 0 || total != promptTokens+history {
+		t.Fatalf("total=%d prompt=%d history=%d", total, promptTokens, history)
+	}
+	if dynamic != promptTokens-stable {
+		t.Fatalf("dynamic=%d, want prompt(%d)-stable(%d)", dynamic, promptTokens, stable)
+	}
+}
+
 func TestResidentPromptStablePrefixAndSingleToolContract(t *testing.T) {
 	a, project, agent := newMemoryGateTestApp(t)
 	prefix := func(prompt string) string {

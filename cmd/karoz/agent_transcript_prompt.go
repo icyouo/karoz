@@ -124,13 +124,17 @@ func compactTranscriptForModelContext(items []AgentTranscriptItem, maxItems, max
 
 func boundedProviderTranscript(items []AgentTranscriptItem, currentRunID, userText string) []AgentTranscriptItem {
 	filtered := make([]AgentTranscriptItem, 0, len(items))
+	removedCurrentInput := false
 	for _, item := range items {
 		if currentRunID != "" && item.RunID == currentRunID {
+			if strings.EqualFold(item.Role, "user") && strings.TrimSpace(item.Body) == strings.TrimSpace(userText) {
+				removedCurrentInput = true
+			}
 			continue
 		}
 		filtered = append(filtered, item)
 	}
-	if currentRunID == "" {
+	if !removedCurrentInput {
 		for i := len(filtered) - 1; i >= 0; i-- {
 			if strings.EqualFold(filtered[i].Role, "user") && strings.TrimSpace(filtered[i].Body) == strings.TrimSpace(userText) {
 				filtered = append(filtered[:i], filtered[i+1:]...)

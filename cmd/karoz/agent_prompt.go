@@ -263,18 +263,28 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 	b.WriteString(limitString(userText, residentTranscriptMessageMaxChars))
 	b.WriteString("\n")
 	prompt := b.String()
-	totalTokens := estimateResidentContextTextTokens(prompt)
+	providerTranscript := boundedProviderTranscript(delta, "", userText)
+	totalTokens, stableTokens, transcriptTokens, dynamicTokens := residentPromptTokenAccounting(prompt, stablePrefixChars, providerTranscript)
+	log.Printf("resident prompt build project=%s agent=%s turn=%s total_estimated_tokens=%d stable_prefix_tokens=%d transcript_tokens=%d dynamic_tokens=%d transcript_context_tokens=%d build_duration=%s", project.ID, agent.ID, turnType, totalTokens, stableTokens, transcriptTokens, dynamicTokens, estimateModelBoundTranscriptTokens(delta), time.Since(promptStarted).Round(time.Millisecond))
+	return prompt
+}
+
+func residentPromptTokenAccounting(prompt string, stablePrefixChars int, providerTranscript []AgentTranscriptItem) (total, stable, transcript, dynamic int) {
 	if stablePrefixChars > len(prompt) {
 		stablePrefixChars = len(prompt)
 	}
-	stableTokens := estimateResidentContextTextTokens(prompt[:stablePrefixChars])
-	transcriptTokens := estimateModelBoundTranscriptTokens(delta)
-	dynamicTokens := totalTokens - stableTokens - transcriptTokens
-	if dynamicTokens < 0 {
-		dynamicTokens = 0
+	if stablePrefixChars < 0 {
+		stablePrefixChars = 0
 	}
-	log.Printf("resident prompt build project=%s agent=%s turn=%s total_estimated_tokens=%d stable_prefix_tokens=%d transcript_tokens=%d dynamic_tokens=%d transcript_context_tokens=%d build_duration=%s", project.ID, agent.ID, turnType, totalTokens, stableTokens, transcriptTokens, dynamicTokens, estimateModelBoundTranscriptTokens(delta), time.Since(promptStarted).Round(time.Millisecond))
-	return prompt
+	promptTokens := estimateResidentContextTextTokens(prompt)
+	stable = estimateResidentContextTextTokens(prompt[:stablePrefixChars])
+	transcript = estimateModelBoundTranscriptTokens(providerTranscript)
+	total = promptTokens + transcript
+	dynamic = promptTokens - stable
+	if dynamic < 0 {
+		dynamic = 0
+	}
+	return total, stable, transcript, dynamic
 }
 
 func (a *app) renderProviderNeutralToolContract(b *strings.Builder) {
