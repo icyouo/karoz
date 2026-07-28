@@ -29,10 +29,9 @@ func TestWindowsJobOwnerHelper(t *testing.T) {
 		return
 	}
 	dir := os.Getenv("KAROZ_WINDOWS_JOB_DIR")
-	cmd := exec.Command(os.Args[0], "-test.run=TestWindowsProcessGuardEntry")
+	cmd := exec.Command(os.Args[0], "-test.run=TestWindowsDescendantParentHelper")
 	cmd.Env = append(
 		os.Environ(),
-		"KAROZ_WINDOWS_GUARD=1",
 		"KAROZ_WINDOWS_DESC_PARENT=1",
 		"KAROZ_WINDOWS_DESC_DIR="+dir,
 	)
