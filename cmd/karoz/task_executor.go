@@ -216,7 +216,21 @@ func (a *app) retryTaskMerge(project Project, task Task) (Task, error) {
 	if latest.Status != "waiting_merge" {
 		return latest, fmt.Errorf("task status %q cannot be merged; only waiting_merge tasks may be retried", latest.Status)
 	}
-	return a.integrateTaskLocked(context.Background(), project, latest), nil
+	updated := a.integrateTaskLocked(context.Background(), project, latest)
+	if taskStatusIsTerminal(updated.Status) {
+		a.notifyTaskRuntimeHooks(project, updated)
+		a.emitRuntimeStateChanged(RuntimeEvent{
+			ID:        randomID(),
+			ProjectID: project.ID,
+			Kind:      "task_changed",
+			EntityID:  updated.ID,
+			From:      latest.Status,
+			To:        updated.Status,
+			Reason:    "task_merge_retried",
+			CreatedAt: time.Now().UTC(),
+		})
+	}
+	return updated, nil
 }
 
 func (a *app) integrateTask(project Project, task Task, waitForLock bool) Task {

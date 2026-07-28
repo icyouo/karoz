@@ -191,6 +191,143 @@ func TestTaskIntegrationSerializesAndMergeRetryIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestRetryTaskMergePublishesTerminalSideEffectsExactlyOnce(t *testing.T) {
+	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "1")
+	a, project, task := newIntegrationFixture(t, "task-retry-effects", "retry.txt", "retry effects")
+	task.PlanID = "plan-1"
+	task.PlanStepID = "step-1"
+	a.updateTask(project.ID, task)
+	a.taskHooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{
+		ID: "hook-1", TaskID: task.ID, ProjectID: project.ID, AgentID: "agent-1",
+		HookType: "resident_task_completion", Status: "pending",
+	}}
+	a.plans[project.ID] = []WorkPlan{{
+		ID: "plan-1", ProjectID: project.ID, OwnerAgentID: "owner-1", Status: PlanActive,
+		Steps: []PlanStep{{
+			ID: "step-1", Status: PlanStepRunning,
+			TaskAttempts: []PlanTaskAttempt{{TaskID: task.ID, Status: "running"}},
+		}},
+	}}
+
+	blocker := ScheduledRun{
+		ID: "plan-worker-blocker", ProjectID: project.ID, AgentID: "owner-1",
+		Kind: ScheduledRunPlanEvent, Status: ScheduledRunQueued, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if enqueued := a.ensureSchedulerQueue().Enqueue(blocker); !enqueued.Accepted || !enqueued.StartWorker {
+		t.Fatalf("failed to reserve plan scheduler worker: %+v", enqueued)
+	}
+	runtimeEvents := make(chan RuntimeEvent, 64)
+	a.addRuntimeWatcher(project.ID, runtimeEvents)
+	defer a.removeRuntimeWatcher(project.ID, runtimeEvents)
+
+	updated, err := a.retryTaskMerge(project, task)
+	if err != nil {
+		t.Fatalf("retry merge failed: %v", err)
+	}
+	if updated.Status != "done" || updated.MergedAt == nil {
+		t.Fatalf("retry merge result = %+v", updated)
+	}
+	duplicate, err := a.retryTaskMerge(project, updated)
+	if err != nil || duplicate.Status != "done" {
+		t.Fatalf("duplicate retry result = %+v err=%v", duplicate, err)
+	}
+
+	hooks := a.taskHooks[project.ID+"/"+task.ID]
+	if len(hooks) != 1 || hooks[0].Status != "delivered" || hooks[0].DeliveredAt == nil {
+		t.Fatalf("completion hooks = %+v", hooks)
+	}
+	var hookMessages int
+	for _, message := range a.agentMessagesFor(project.ID, "agent-1") {
+		if message.Intent == "task_hook" {
+			hookMessages++
+		}
+	}
+	if hookMessages != 1 {
+		t.Fatalf("task hook delivery messages = %d, want 1", hookMessages)
+	}
+	plan, ok := a.planByID(project.ID, "plan-1")
+	if !ok {
+		t.Fatal("plan disappeared after retry merge")
+	}
+	step := plan.Steps[0]
+	if step.Status != PlanStepAwaitingDecision {
+		t.Fatalf("plan step status = %s, want %s", step.Status, PlanStepAwaitingDecision)
+	}
+	if len(step.TaskAttempts) != 1 || step.TaskAttempts[0].Status != "done" {
+		t.Fatalf("plan task attempts = %+v", step.TaskAttempts)
+	}
+
+	var planJobs []ScheduledRun
+	for _, job := range a.ensureSchedulerQueue().Jobs() {
+		if job.Kind == ScheduledRunPlanEvent && job.SourceID == task.PlanID {
+			planJobs = append(planJobs, job)
+		}
+	}
+	if len(planJobs) != 1 {
+		t.Fatalf("task-terminal plan jobs = %+v all_jobs=%+v", planJobs, a.ensureSchedulerQueue().Jobs())
+	}
+	scheduled := planJobs[0]
+	if scheduled.Status != ScheduledRunQueued && scheduled.Status != ScheduledRunRunning {
+		t.Fatalf("task-terminal plan job status = %s", scheduled.Status)
+	}
+	if scheduled.AgentID != "owner-1" {
+		t.Fatalf("task-terminal plan job agent = %s", scheduled.AgentID)
+	}
+	var payload PlanEventRunPayload
+	if err := json.Unmarshal(scheduled.Payload, &payload); err != nil {
+		t.Fatalf("decode plan event payload: %v", err)
+	}
+	if payload.Event != "task_terminal" || payload.TaskID != task.ID || payload.StepID != task.PlanStepID {
+		t.Fatalf("plan event payload = %+v", payload)
+	}
+	for _, job := range a.ensureSchedulerQueue().Jobs() {
+		if job.Kind == ScheduledRunPlanEvent && job.SourceID == task.PlanID && job.ID != scheduled.ID {
+			t.Fatalf("duplicate retry scheduled another plan event: %+v", job)
+		}
+	}
+
+	taskChanged := 0
+	timer := time.NewTimer(150 * time.Millisecond)
+	defer timer.Stop()
+collectEvents:
+	for {
+		select {
+		case event := <-runtimeEvents:
+			if event.Kind == "task_changed" && event.EntityID == task.ID {
+				taskChanged++
+				if event.From != "waiting_merge" || event.To != "done" || event.Reason != "task_merge_retried" {
+					t.Fatalf("retry task event = %+v", event)
+				}
+			}
+		case <-timer.C:
+			break collectEvents
+		}
+	}
+	if taskChanged != 1 {
+		t.Fatalf("retry task_changed events = %d, want 1", taskChanged)
+	}
+}
+
+func TestRetryTaskMergeDoesNotRepeatTerminalPlanMutation(t *testing.T) {
+	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	project := Project{ID: "p1", Name: "project"}
+	task := Task{ID: "t1", ProjectID: project.ID, Status: "done", PlanID: "plan-1", PlanStepID: "step-1"}
+	a.plans[project.ID] = []WorkPlan{{
+		ID: "plan-1", ProjectID: project.ID, Status: PlanActive,
+		Steps: []PlanStep{{
+			ID: "step-1", Status: PlanStepAwaitingDecision, Version: 2,
+			TaskAttempts: []PlanTaskAttempt{{TaskID: task.ID, Status: "done"}},
+		}},
+	}}
+	before, _ := a.planByID(project.ID, task.PlanID)
+	a.notifyTaskRuntimeHooks(project, task)
+	after, _ := a.planByID(project.ID, task.PlanID)
+	if after.Version != before.Version || after.Steps[0].Version != before.Steps[0].Version {
+		t.Fatalf("repeated terminal notification mutated plan\nbefore=%+v\nafter=%+v", before, after)
+	}
+}
+
 func TestTaskIntegrationBusyWaitsWithoutTouchingPrimary(t *testing.T) {
 	a, project, task := newIntegrationFixture(t, "task-busy", "task.txt", "task change")
 	lock := a.projectIntegrationLock(project.ID)
@@ -302,9 +439,10 @@ func newIntegrationFixture(t *testing.T, taskID, filename, contents string) (*ap
 	gitTest(t, repo, "add", "base.txt")
 	gitTest(t, repo, "commit", "-m", "base")
 	base := strings.TrimSpace(gitTest(t, repo, "rev-parse", "HEAD"))
-	project := Project{ID: "project-" + taskID, Name: "test", Path: repo, DefaultBranch: "main"}
+	project := projectFromPath(repo, repo, "main")
+	project.Name = "test"
 	task := createTaskBranch(t, project, taskID, filename, contents, base)
-	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: repo})
 	a.tasks[project.ID] = []Task{task}
 	return a, project, task
 }

@@ -575,17 +575,32 @@ func (a *app) markPlanTaskTerminal(projectID string, task Task) (WorkPlan, bool)
 	if idx < 0 {
 		return WorkPlan{}, false
 	}
+	changed := false
 	for i := range plan.Steps[idx].TaskAttempts {
 		if plan.Steps[idx].TaskAttempts[i].TaskID == task.ID {
-			plan.Steps[idx].TaskAttempts[i].Status = task.Status
-			plan.Steps[idx].TaskAttempts[i].UpdatedAt = time.Now().UTC()
+			if plan.Steps[idx].TaskAttempts[i].Status != task.Status {
+				plan.Steps[idx].TaskAttempts[i].Status = task.Status
+				plan.Steps[idx].TaskAttempts[i].UpdatedAt = time.Now().UTC()
+				changed = true
+			}
 		}
 	}
+	targetStatus := PlanStepChangesRequested
 	if task.Status == "done" {
-		plan.Steps[idx].Status = PlanStepAwaitingDecision
+		targetStatus = PlanStepAwaitingDecision
 	} else {
-		plan.Steps[idx].Status = PlanStepChangesRequested
-		plan.Steps[idx].Blocker = firstNonEmpty(task.FailureSummary, "task ended with status "+task.Status)
+		blocker := firstNonEmpty(task.FailureSummary, "task ended with status "+task.Status)
+		if plan.Steps[idx].Blocker != blocker {
+			plan.Steps[idx].Blocker = blocker
+			changed = true
+		}
+	}
+	if plan.Steps[idx].Status != targetStatus {
+		plan.Steps[idx].Status = targetStatus
+		changed = true
+	}
+	if !changed {
+		return plan, false
 	}
 	plan.Steps[idx].Version++
 	updated, err := a.replacePlan(plan, 0)

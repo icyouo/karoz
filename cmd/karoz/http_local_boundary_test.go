@@ -5,20 +5,49 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
 
 func TestLoopbackListenAddressValidation(t *testing.T) {
 	for _, addr := range []string{"127.0.0.1:8088", "localhost:8088", "[::1]:8088"} {
-		if err := validateLoopbackListenAddr(addr); err != nil {
+		if err := validateStudioListenAddr(addr, false); err != nil {
 			t.Fatalf("%s rejected: %v", addr, err)
 		}
 	}
 	for _, addr := range []string{":8088", "0.0.0.0:8088", "192.168.1.20:8088", "not-an-address"} {
-		if err := validateLoopbackListenAddr(addr); err == nil {
+		if err := validateStudioListenAddr(addr, false); err == nil {
 			t.Fatalf("%s unexpectedly accepted", addr)
 		}
+	}
+}
+
+func TestDockerComposeStartupListenContract(t *testing.T) {
+	compose, err := os.ReadFile("../../docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(compose)
+	for _, required := range []string{
+		`- "127.0.0.1:${KAROZ_PORT:-8088}:8088"`,
+		`KAROZ_ADDR: ":8088"`,
+		`KAROZ_CONTAINER: "1"`,
+	} {
+		if !strings.Contains(config, required) {
+			t.Fatalf("docker-compose.yml is missing startup contract %q", required)
+		}
+	}
+	if err := validateStudioListenAddr(":8088", true); err != nil {
+		t.Fatalf("compose container address rejected at startup: %v", err)
+	}
+	for _, addr := range []string{"0.0.0.0:8088", "[::]:8088"} {
+		if err := validateStudioListenAddr(addr, true); err != nil {
+			t.Fatalf("container wildcard %s rejected: %v", addr, err)
+		}
+	}
+	if err := validateStudioListenAddr("192.168.1.20:8088", true); err == nil {
+		t.Fatal("container mode unexpectedly accepted a concrete non-loopback address")
 	}
 }
 

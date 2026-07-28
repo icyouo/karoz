@@ -18,11 +18,12 @@ func main() {
 		return
 	}
 	addr := getenv("KAROZ_ADDR", "127.0.0.1:8088")
+	containerMode := envFlagEnabled("KAROZ_CONTAINER")
 	// Validate before opening persistence files, recovering tasks, or making
 	// project directories. A rejected network binding must be a true failed
 	// startup, not a partially initialized Studio.
-	if err := validateLoopbackListenAddr(addr); err != nil {
-		log.Fatalf("KAROZ_ADDR must be a loopback listen address: %v", err)
+	if err := validateStudioListenAddr(addr, containerMode); err != nil {
+		log.Fatalf("invalid KAROZ_ADDR: %v", err)
 	}
 	projectsRootFromEnv := strings.TrimSpace(os.Getenv("KAROZ_PROJECTS_ROOT")) != ""
 	settings := Settings{
@@ -66,10 +67,17 @@ func main() {
 	}
 }
 
-// validateLoopbackListenAddr keeps the unauthenticated Studio private to the
-// local machine. Binding an empty host (for example :8088) means all network
-// interfaces and is intentionally rejected.
-func validateLoopbackListenAddr(addr string) error {
+func envFlagEnabled(name string) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
+// validateStudioListenAddr keeps a host-run unauthenticated Studio private to
+// the local machine. Containers must listen on their network interface for a
+// loopback-only published port to reach them, so KAROZ_CONTAINER explicitly
+// permits only wildcard addresses; concrete non-loopback addresses stay
+// rejected in every mode.
+func validateStudioListenAddr(addr string, containerMode bool) error {
 	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
 	if err != nil {
 		return fmt.Errorf("invalid listen address %q: %w", addr, err)
@@ -80,6 +88,17 @@ func validateLoopbackListenAddr(addr string) error {
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return nil
+	}
+	if containerMode {
+		if host == "" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+			return nil
+		}
+	}
+	if host == "" || (net.ParseIP(host) != nil && net.ParseIP(host).IsUnspecified()) {
+		return fmt.Errorf("%q is a wildcard address; set KAROZ_CONTAINER=1 only inside a container with a loopback-only published port", addr)
 	}
 	return fmt.Errorf("%q is not localhost or a loopback IP", addr)
 }

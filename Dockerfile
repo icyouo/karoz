@@ -12,5 +12,6 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /out/karoz /app/karoz
 ENV KAROZ_ADDR=:8088
+ENV KAROZ_CONTAINER=1
 EXPOSE 8088
 ENTRYPOINT ["/app/karoz"]
