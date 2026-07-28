@@ -17,15 +17,10 @@ import (
 var procGetExitCodeProcess = kernel32.NewProc("GetExitCodeProcess")
 
 func TestWindowsProcessGuardEntry(t *testing.T) {
-	index := -1
-	for i, arg := range os.Args {
-		if arg == "process-guard" {
-			index = i
-			break
-		}
-	}
-	if index >= 0 {
-		os.Exit(runBackgroundProcessGuard(os.Args[index+1:]))
+	if os.Getenv("KAROZ_WINDOWS_GUARD") == "1" {
+		os.Exit(runBackgroundProcessGuard([]string{
+			"--", os.Args[0], "-test.run=TestWindowsDescendantParentHelper",
+		}))
 	}
 }
 
@@ -34,11 +29,13 @@ func TestWindowsJobOwnerHelper(t *testing.T) {
 		return
 	}
 	dir := os.Getenv("KAROZ_WINDOWS_JOB_DIR")
-	cmd := exec.Command(
-		os.Args[0], "-test.run=TestWindowsProcessGuardEntry", "--",
-		"process-guard", "--", os.Args[0], "-test.run=TestWindowsDescendantParentHelper",
+	cmd := exec.Command(os.Args[0], "-test.run=TestWindowsProcessGuardEntry")
+	cmd.Env = append(
+		os.Environ(),
+		"KAROZ_WINDOWS_GUARD=1",
+		"KAROZ_WINDOWS_DESC_PARENT=1",
+		"KAROZ_WINDOWS_DESC_DIR="+dir,
 	)
-	cmd.Env = append(os.Environ(), "KAROZ_WINDOWS_DESC_PARENT=1", "KAROZ_WINDOWS_DESC_DIR="+dir)
 	boundary, err := newBackgroundProcessBoundary(cmd)
 	if err != nil {
 		os.Exit(3)
