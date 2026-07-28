@@ -462,8 +462,12 @@ func TestProcessRuntimeStrictMissingCorruptAndSymlinkRejection(t *testing.T) {
 			if err := os.Remove(filepath.Join(dataDir, "project-runtime", key, name)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil); err == nil {
-				t.Fatalf("missing established %s loaded as empty", name)
+			reloaded, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.projectErrs[project.ID] == nil || reloaded.projects[project.ID] != nil {
+				t.Fatalf("missing established %s did not disable its project", name)
 			}
 		})
 	}
@@ -492,8 +496,12 @@ func TestProcessRuntimeStrictMissingCorruptAndSymlinkRejection(t *testing.T) {
 		if err := os.WriteFile(path, []byte("{broken"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil); err == nil {
-			t.Fatal("corrupt project journal loaded as empty")
+		reloaded, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reloaded.projectErrs[project.ID] == nil || reloaded.projects[project.ID] != nil {
+			t.Fatal("corrupt project journal did not disable its project")
 		}
 	})
 	t.Run("symlink-ledger", func(t *testing.T) {
@@ -515,8 +523,12 @@ func TestProcessRuntimeStrictMissingCorruptAndSymlinkRejection(t *testing.T) {
 		if err := os.Symlink(target, ledgerPath); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil); err == nil {
-			t.Fatal("symlinked ledger was followed")
+		reloaded, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reloaded.projectErrs[project.ID] == nil || reloaded.projects[project.ID] != nil {
+			t.Fatal("symlinked ledger did not disable its project")
 		}
 		content, err := os.ReadFile(target)
 		if err != nil || string(content) != "{}" {
@@ -575,6 +587,206 @@ func TestRuntimeProjectIdentityRejectsCollisionsAndNestedData(t *testing.T) {
 	nestedData := filepath.Join(project.Path, ".runtime")
 	if _, err := resolveRuntimeProjectIdentities(nestedData, []Project{project}); err == nil {
 		t.Fatal("runtime data nested under project was accepted")
+	}
+}
+
+func TestProcessRuntimeReadyPartitionDeletionDisablesOnlyAffectedProject(t *testing.T) {
+	dataDir := t.TempDir()
+	projectA := runtimeTestProject(t, "partition-a")
+	projectB := runtimeTestProject(t, "partition-b")
+	runtime, err := newProcessRuntimePersistence(dataDir, []Project{projectA, projectB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyA := runtime.projects[projectA.ID].identity.SafeProjectKey
+	runtime.authorityMu.Lock()
+	delete(runtime.authority.Projects, keyA)
+	runtime.authority.Generation++
+	if err := runtime.store.saveJSON("processes.json", runtime.authority); err != nil {
+		runtime.authorityMu.Unlock()
+		t.Fatal(err)
+	}
+	runtime.authorityMu.Unlock()
+
+	reloaded, err := newProcessRuntimePersistence(dataDir, []Project{projectA, projectB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.projectErrs[projectA.ID] == nil || reloaded.projects[projectA.ID] != nil {
+		t.Fatal("missing ready authority partition was silently recreated")
+	}
+	if reloaded.projects[projectB.ID] == nil {
+		t.Fatal("healthy project was disabled with the missing partition")
+	}
+}
+
+func TestProcessRuntimeRejectsOrphanStoresWithoutGlobalSentinels(t *testing.T) {
+	dataDir := t.TempDir()
+	project := runtimeTestProject(t, "orphan-store")
+	if _, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dataDir, "project-runtime", "index.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dataDir, "processes.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil); err == nil {
+		t.Fatal("orphan ledger/journal were adopted without global sentinels")
+	}
+}
+
+func TestProcessRuntimeExactAdmissionOperationAndProjectIsolation(t *testing.T) {
+	for _, mutation := range []string{"missing-operation", "token-mismatch"} {
+		t.Run(mutation, func(t *testing.T) {
+			dataDir := t.TempDir()
+			projectA := runtimeTestProject(t, "exact-a-"+mutation)
+			projectB := runtimeTestProject(t, "exact-b-"+mutation)
+			runtime, err := newProcessRuntimePersistence(
+				dataDir, []Project{projectA, projectB}, nil,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := runtimeStartingRecord(t, runtime, projectA.ID, "active")
+			admitRuntimeRecord(t, runtime, record)
+			stateA := runtime.projects[projectA.ID]
+			operationID := "process/" + record.ID + "/admit"
+			stateA.journalMu.Lock()
+			if mutation == "missing-operation" {
+				delete(stateA.journal.Operations, operationID)
+			} else {
+				operation := stateA.journal.Operations[operationID]
+				operation.ReservationToken = "mismatched-token"
+				stateA.journal.Operations[operationID] = operation
+			}
+			stateA.journal.Generation++
+			if err := runtime.store.saveJSON(
+				filepath.Join(
+					"project-runtime",
+					stateA.identity.SafeProjectKey,
+					"runtime-mutations.json",
+				),
+				stateA.journal,
+			); err != nil {
+				stateA.journalMu.Unlock()
+				t.Fatal(err)
+			}
+			stateA.journalMu.Unlock()
+
+			reloaded, err := newProcessRuntimePersistence(
+				dataDir, []Project{projectA, projectB}, nil,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.projectErrs[projectA.ID] == nil || reloaded.projects[projectA.ID] != nil {
+				t.Fatalf("%s did not fail closed for affected project", mutation)
+			}
+			if reloaded.projects[projectB.ID] == nil {
+				t.Fatalf("%s disabled healthy project", mutation)
+			}
+			recordB := runtimeStartingRecord(t, reloaded, projectB.ID, "healthy")
+			admitRuntimeRecord(t, reloaded, recordB)
+		})
+	}
+}
+
+func TestProcessRuntimeCorruptProjectStoreDoesNotDisableHealthyProject(t *testing.T) {
+	dataDir := t.TempDir()
+	projectA := runtimeTestProject(t, "corrupt-a")
+	projectB := runtimeTestProject(t, "corrupt-b")
+	runtime, err := newProcessRuntimePersistence(dataDir, []Project{projectA, projectB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyA := runtime.projects[projectA.ID].identity.SafeProjectKey
+	path := filepath.Join(dataDir, "project-runtime", keyA, "terminal-reservations.json")
+	if err := os.WriteFile(path, []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := newProcessRuntimePersistence(dataDir, []Project{projectA, projectB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.projectErrs[projectA.ID] == nil || reloaded.projects[projectA.ID] != nil {
+		t.Fatal("corrupt project ledger did not disable its project")
+	}
+	if reloaded.projects[projectB.ID] == nil {
+		t.Fatal("corrupt project ledger disabled healthy project")
+	}
+	recordB := runtimeStartingRecord(t, reloaded, projectB.ID, "healthy-after-corruption")
+	admitRuntimeRecord(t, reloaded, recordB)
+}
+
+func TestProcessRuntimeStoredPathIdentityMismatchIsProjectScoped(t *testing.T) {
+	dataDir := t.TempDir()
+	projectA := runtimeTestProject(t, "path-a")
+	projectB := runtimeTestProject(t, "path-b")
+	if _, err := newProcessRuntimePersistence(dataDir, []Project{projectA, projectB}, nil); err != nil {
+		t.Fatal(err)
+	}
+	reboundPath := t.TempDir()
+	projectA.Path = reboundPath
+	reloaded, err := newProcessRuntimePersistence(dataDir, []Project{projectA, projectB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.ProjectError(projectA.ID) == nil || reloaded.projectRuntime(projectA.ID) != nil {
+		t.Fatal("stored canonical path mismatch did not disable affected project")
+	}
+	if reloaded.projectRuntime(projectB.ID) == nil {
+		t.Fatal("stored canonical path mismatch disabled healthy project")
+	}
+}
+
+func TestApplicationBootstrapKeepsHealthyProjectWhenPeerStoreIsCorrupt(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"project-a", "project-b"} {
+		if err := os.MkdirAll(filepath.Join(root, name, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dataDir := t.TempDir()
+	first := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := first.bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := first.scanProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectA, projectB := projects[0], projects[1]
+	keyA := first.processRuntime.projectRuntime(projectA.ID).identity.SafeProjectKey
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := first.shutdownProcessRuntime(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	if err := os.WriteFile(
+		filepath.Join(dataDir, "project-runtime", keyA, "runtime-mutations.json"),
+		[]byte("{broken"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := second.bootstrap(); err != nil {
+		t.Fatalf("healthy project did not survive peer corruption: %v", err)
+	}
+	if second.processRuntime.ProjectError(projectA.ID) == nil {
+		t.Fatal("corrupt project was not disabled")
+	}
+	if second.processRuntime.projectRuntime(projectB.ID) == nil {
+		t.Fatal("healthy project runtime is unavailable")
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutdownCancel()
+	if err := second.shutdownProcessRuntime(shutdownCtx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -720,6 +932,87 @@ func TestApplicationBootstrapsDormantProcessRuntime(t *testing.T) {
 	defer cancel()
 	if err := a.shutdownProcessRuntime(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestApplicationRegistersNewProjectWithoutRebuildingLiveSupervisor(t *testing.T) {
+	root := t.TempDir()
+	existingPath := filepath.Join(root, "existing")
+	if err := os.MkdirAll(filepath.Join(existingPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := projectFromPath(existingPath, root, "main")
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
+	if err := a.bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := a.processSupervisor
+	request := startRequest("live-during-registration", "sleep 30", existingPath)
+	request.ProjectID = existing.ID
+	if _, err := supervisor.Start(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := a.createProject(ProjectCreateRequest{Name: "new-runtime-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.processSupervisor != supervisor {
+		t.Fatal("project registration rebuilt the live supervisor")
+	}
+	if a.processRuntime.projectRuntime(created.ID) == nil {
+		t.Fatal("new project was not added to the live process runtime")
+	}
+	supervisor.mu.Lock()
+	live := supervisor.handles[request.ID]
+	supervisor.mu.Unlock()
+	if live == nil || live.snapshot().State != processdomain.StateRunning {
+		t.Fatalf("existing live handle was interrupted by registration: %+v", live)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.shutdownProcessRuntime(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProcessRuntimeProjectRegistrationCrashRecovery(t *testing.T) {
+	for _, point := range []processPersistenceFailpoint{
+		processPersistAfterIndexInitializing,
+		processPersistAfterAuthorityInitialize,
+		processPersistAfterLedgerInitialize,
+		processPersistAfterJournalInitialize,
+		processPersistAfterIndexReady,
+	} {
+		t.Run(string(point), func(t *testing.T) {
+			dataDir := t.TempDir()
+			projectA := runtimeTestProject(t, "register-base-"+string(point))
+			projectB := runtimeTestProject(t, "register-new-"+string(point))
+			runtime, err := newProcessRuntimePersistence(dataDir, []Project{projectA}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fired atomic.Bool
+			runtime.fail = func(candidate processPersistenceFailpoint) error {
+				if candidate == point && fired.CompareAndSwap(false, true) {
+					return errors.New("registration crash")
+				}
+				return nil
+			}
+			if err := runtime.RegisterProject(projectB); err == nil {
+				t.Fatal("registration failpoint did not fire")
+			}
+			recovered, err := newProcessRuntimePersistence(
+				dataDir, []Project{projectA, projectB}, nil,
+			)
+			if err != nil {
+				t.Fatalf("recover project registration %s: %v", point, err)
+			}
+			if recovered.projectRuntime(projectA.ID) == nil ||
+				recovered.projectRuntime(projectB.ID) == nil {
+				t.Fatalf("project registration recovery %s lost a project", point)
+			}
+		})
 	}
 }
 

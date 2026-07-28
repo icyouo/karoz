@@ -17,7 +17,7 @@ func (runtime *processRuntimePersistence) PrepareRecord(
 	record processdomain.Process,
 ) (processdomain.Process, error) {
 	record = cloneDurableProcess(record)
-	project := runtime.projects[record.ProjectID]
+	project := runtime.projectRuntime(record.ProjectID)
 	if project == nil {
 		return record, errors.New("process project runtime is unavailable")
 	}
@@ -45,7 +45,7 @@ func safeProcessID(id string) bool {
 }
 
 func (runtime *processRuntimePersistence) Reserve(record processdomain.Process) error {
-	project := runtime.projects[record.ProjectID]
+	project := runtime.projectRuntime(record.ProjectID)
 	if project == nil {
 		return errors.New("process project runtime is unavailable")
 	}
@@ -168,7 +168,7 @@ func (runtime *processRuntimePersistence) admitProcessLocked(
 }
 
 func (runtime *processRuntimePersistence) CreateStarting(record processdomain.Process) error {
-	project := runtime.projects[record.ProjectID]
+	project := runtime.projectRuntime(record.ProjectID)
 	if project == nil {
 		return errors.New("process project runtime is unavailable")
 	}
@@ -194,7 +194,7 @@ func (runtime *processRuntimePersistence) MarkTerminal(record processdomain.Proc
 	if !record.State.Terminal() {
 		return errors.New("durable terminal process has invalid state")
 	}
-	project := runtime.projects[record.ProjectID]
+	project := runtime.projectRuntime(record.ProjectID)
 	if project == nil {
 		return errors.New("process project runtime is unavailable")
 	}
@@ -222,7 +222,7 @@ func (runtime *processRuntimePersistence) MarkTerminal(record processdomain.Proc
 // Abort is intentionally an internal admission boundary. Once MarkTerminal
 // has installed a terminal event, acknowledgement owns token release.
 func (runtime *processRuntimePersistence) Abort(record processdomain.Process) error {
-	project := runtime.projects[record.ProjectID]
+	project := runtime.projectRuntime(record.ProjectID)
 	if project == nil {
 		return errors.New("process project runtime is unavailable")
 	}
@@ -252,7 +252,7 @@ func (runtime *processRuntimePersistence) updateProcessRecord(
 	record processdomain.Process,
 	allowTerminal bool,
 ) error {
-	project := runtime.projects[record.ProjectID]
+	project := runtime.projectRuntime(record.ProjectID)
 	if project == nil {
 		return errors.New("process project runtime is unavailable")
 	}
@@ -370,8 +370,16 @@ func (runtime *processRuntimePersistence) updateAuthorityReservation(
 }
 
 func (runtime *processRuntimePersistence) saveAuthorityLocked() error {
-	if err := validateProcessAuthoritySnapshot(runtime.authority); err != nil {
+	if err := validateProcessAuthorityHeader(runtime.authority); err != nil {
 		return err
+	}
+	for key, partition := range runtime.authority.Projects {
+		if runtime.projectDisabled(key) {
+			continue
+		}
+		if err := validateProcessAuthorityProject(key, partition); err != nil {
+			return err
+		}
 	}
 	return runtime.store.saveJSON("processes.json", runtime.authority)
 }
@@ -514,7 +522,7 @@ func reservationByOperation(
 }
 
 func (runtime *processRuntimePersistence) List(projectID string) []processdomain.Process {
-	project := runtime.projects[projectID]
+	project := runtime.projectRuntime(projectID)
 	if project == nil {
 		return nil
 	}

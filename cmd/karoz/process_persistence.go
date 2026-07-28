@@ -26,6 +26,19 @@ const (
 
 type processPersistenceFailpoint string
 
+type processPersistenceInjectedFailure struct {
+	point processPersistenceFailpoint
+	err   error
+}
+
+func (failure *processPersistenceInjectedFailure) Error() string {
+	return fmt.Sprintf("persistence failpoint %s: %v", failure.point, failure.err)
+}
+
+func (failure *processPersistenceInjectedFailure) Unwrap() error {
+	return failure.err
+}
+
 const (
 	processPersistAfterIndexInitializing   processPersistenceFailpoint = "after_index_initializing"
 	processPersistAfterLedgerInitialize    processPersistenceFailpoint = "after_ledger_initialize"
@@ -118,13 +131,19 @@ type processProjectRuntime struct {
 }
 
 type processRuntimePersistence struct {
-	store       *secureRuntimeStore
-	authorityMu sync.Mutex
-	authority   processAuthoritySnapshot
-	projects    map[string]*processProjectRuntime
-	fail        func(processPersistenceFailpoint) error
-	now         func() time.Time
-	retention   processdomain.RetentionPolicy
+	store        *secureRuntimeStore
+	registryMu   sync.RWMutex
+	indexMu      sync.Mutex
+	index        runtimeProjectIndex
+	authorityMu  sync.Mutex
+	authority    processAuthoritySnapshot
+	projects     map[string]*processProjectRuntime
+	healthMu     sync.RWMutex
+	projectErrs  map[string]error
+	disabledKeys map[string]bool
+	fail         func(processPersistenceFailpoint) error
+	now          func() time.Time
+	retention    processdomain.RetentionPolicy
 }
 
 func newProcessRuntimePersistence(
@@ -142,6 +161,7 @@ func newProcessRuntimePersistence(
 	}
 	runtime := &processRuntimePersistence{
 		store: store, projects: make(map[string]*processProjectRuntime),
+		projectErrs: make(map[string]error), disabledKeys: make(map[string]bool),
 		fail: fail, now: func() time.Time { return time.Now().UTC() },
 		retention: defaultProcessRetentionPolicy(),
 	}
@@ -251,10 +271,8 @@ func (runtime *processRuntimePersistence) bootstrap(
 			SchemaVersion: processSnapshotSchemaVersion,
 			Projects:      make(map[string]processAuthorityProject),
 		}
-	} else {
-		if err := validateProcessAuthoritySnapshot(authority); err != nil {
-			return err
-		}
+	} else if err := validateProcessAuthorityHeader(authority); err != nil {
+		return err
 	}
 	identityKeys := make(map[string]bool, len(identities))
 	for _, identity := range identities {
@@ -270,7 +288,39 @@ func (runtime *processRuntimePersistence) bootstrap(
 			return errors.New("process authority references a missing canonical project")
 		}
 	}
+	if !indexFound && !authorityFound {
+		for _, identity := range identities {
+			dir := filepath.Join("project-runtime", identity.SafeProjectKey)
+			var ledger monitordomain.TerminalReservationLedger
+			ledgerFound, ledgerErr := runtime.store.loadJSON(
+				filepath.Join(dir, "terminal-reservations.json"), &ledger,
+			)
+			if ledgerErr != nil {
+				return ledgerErr
+			}
+			var journal runtimeMutationSnapshot
+			journalFound, journalErr := runtime.store.loadJSON(
+				filepath.Join(dir, "runtime-mutations.json"), &journal,
+			)
+			if journalErr != nil {
+				return journalErr
+			}
+			if ledgerFound || journalFound {
+				return errors.New("runtime project store exists without the global sentinel/authority")
+			}
+		}
+	}
+	invalidAuthority := make(map[string]error)
+	for key, partition := range authority.Projects {
+		if err := validateProcessAuthorityProject(key, partition); err != nil {
+			invalidAuthority[key] = err
+		}
+	}
 	indexNeedsSave := !indexFound
+	establishedKeys := make(map[string]bool, len(index.Projects))
+	for key := range index.Projects {
+		establishedKeys[key] = true
+	}
 	for _, identity := range identities {
 		if _, exists := index.Projects[identity.SafeProjectKey]; !exists {
 			index.Projects[identity.SafeProjectKey] = runtimeProjectIndexEntry{
@@ -287,45 +337,67 @@ func (runtime *processRuntimePersistence) bootstrap(
 			return err
 		}
 	}
+	authorityChanged := !authorityFound
+	initializedKeys := make(map[string]bool)
 	for _, identity := range identities {
 		entry, exists := index.Projects[identity.SafeProjectKey]
-		newProject := !exists
 		if exists {
-			if entry.Project != identity ||
-				(entry.State != "ready" && entry.State != "initializing") ||
+			if entry.Project != identity {
+				runtime.disableProject(identity, errors.New("runtime project index identity mismatch"))
+				continue
+			}
+			if (entry.State != "ready" && entry.State != "initializing") ||
 				entry.Generation == 0 {
 				return errors.New("runtime project index identity/state mismatch")
 			}
 		}
+		if partitionErr := invalidAuthority[identity.SafeProjectKey]; partitionErr != nil {
+			runtime.disableProject(identity, partitionErr)
+			continue
+		}
 		projectAuthority, authorityExists := authority.Projects[identity.SafeProjectKey]
 		if authorityExists {
 			if projectAuthority.Project != identity {
-				return errors.New("process authority project identity mismatch")
+				runtime.disableProject(identity, errors.New("process authority project identity mismatch"))
+				continue
 			}
+		} else if entry.State == "ready" {
+			runtime.disableProject(identity, errors.New("ready runtime project authority partition is missing"))
+			continue
 		} else {
 			projectAuthority = processAuthorityProject{
 				Project: identity, Records: map[string]durableProcessRecord{},
 				Tombstones: map[string]processTombstone{},
 			}
 			authority.Projects[identity.SafeProjectKey] = projectAuthority
+			authorityChanged = true
 		}
 		projectRuntime, err := runtime.loadOrInitializeProject(
-			identity, entry.State == "initializing" || !indexFound || newProject,
+			identity, entry.State == "initializing", establishedKeys[identity.SafeProjectKey],
 		)
 		if err != nil {
-			return err
+			var injected *processPersistenceInjectedFailure
+			if errors.As(err, &injected) {
+				return err
+			}
+			runtime.disableProject(identity, err)
+			continue
 		}
 		runtime.projects[identity.ProjectID] = projectRuntime
+		initializedKeys[identity.SafeProjectKey] = true
 	}
+	runtime.index = index
 	runtime.authority = authority
-	if err := runtime.store.saveJSON("processes.json", authority); err != nil {
-		return err
+	if authorityChanged {
+		if err := runtime.saveAuthorityLocked(); err != nil {
+			return err
+		}
 	}
 	if err := runtime.persistenceFail(processPersistAfterAuthorityInitialize); err != nil {
 		return err
 	}
 	for key, entry := range index.Projects {
-		if entry.State == "initializing" {
+		if entry.State == "initializing" && initializedKeys[key] {
 			entry.State = "ready"
 			entry.Generation++
 			index.Projects[key] = entry
@@ -334,15 +406,17 @@ func (runtime *processRuntimePersistence) bootstrap(
 	if err := runtime.store.saveJSON(filepath.Join("project-runtime", "index.json"), index); err != nil {
 		return err
 	}
+	runtime.index = index
 	if err := runtime.persistenceFail(processPersistAfterIndexReady); err != nil {
 		return err
 	}
-	for _, project := range runtime.projects {
+	for projectID, project := range runtime.projects {
 		project.lane.Lock()
 		err := runtime.recoverProjectLocked(project)
 		project.lane.Unlock()
 		if err != nil {
-			return err
+			runtime.disableProject(project.identity, err)
+			delete(runtime.projects, projectID)
 		}
 	}
 	if err := runtime.recoverInterruptedProcesses(); err != nil {
@@ -365,10 +439,13 @@ func (runtime *processRuntimePersistence) bootstrap(
 func (runtime *processRuntimePersistence) loadOrInitializeProject(
 	identity monitordomain.RuntimeProjectIdentity,
 	allowInitialize bool,
+	allowExisting bool,
 ) (*processProjectRuntime, error) {
 	dir := filepath.Join("project-runtime", identity.SafeProjectKey)
-	if err := runtime.store.ensureDir(dir); err != nil {
-		return nil, err
+	if allowInitialize {
+		if err := runtime.store.ensureDir(dir); err != nil {
+			return nil, err
+		}
 	}
 	var ledger monitordomain.TerminalReservationLedger
 	ledgerFound, err := runtime.store.loadJSON(filepath.Join(dir, "terminal-reservations.json"), &ledger)
@@ -382,6 +459,9 @@ func (runtime *processRuntimePersistence) loadOrInitializeProject(
 	}
 	if ledgerFound != journalFound && !allowInitialize {
 		return nil, errors.New("runtime project ledger/journal establishment mismatch")
+	}
+	if !allowExisting && (ledgerFound || journalFound) {
+		return nil, errors.New("untracked runtime project store exists without a sentinel")
 	}
 	if !ledgerFound && !allowInitialize {
 		return nil, errors.New("established runtime project store is missing")
@@ -450,66 +530,104 @@ func validateRuntimeProjectIndex(index runtimeProjectIndex) error {
 }
 
 func validateProcessAuthoritySnapshot(snapshot processAuthoritySnapshot) error {
-	if snapshot.SchemaVersion != processSnapshotSchemaVersion || snapshot.Projects == nil {
-		return errors.New("invalid process authority schema")
+	if err := validateProcessAuthorityHeader(snapshot); err != nil {
+		return err
 	}
 	for key, project := range snapshot.Projects {
-		if err := project.Project.Validate(); err != nil {
+		if err := validateProcessAuthorityProject(key, project); err != nil {
 			return err
-		}
-		if key != project.Project.SafeProjectKey || project.Records == nil || project.Tombstones == nil {
-			return errors.New("invalid process authority project partition")
-		}
-		for id, record := range project.Records {
-			if id == "" || record.Process.ID != id || record.Process.ProjectID != project.Project.ProjectID ||
-				!safeProcessID(id) || !record.Process.State.Valid() ||
-				record.Process.LogPath != processLogRelativePath(project.Project, id) {
-				return errors.New("invalid durable process record")
-			}
-			if record.Reservation != nil {
-				if err := monitordomain.ValidateTerminalReservation(project.Project, *record.Reservation); err != nil {
-					return err
-				}
-				if record.Reservation.AuthorityID != processAuthorityID || record.Reservation.EntityID != id {
-					return errors.New("process reservation authority/entity mismatch")
-				}
-				if !record.Process.State.Terminal() &&
-					record.Reservation.State != monitordomain.ReservationAllocating &&
-					record.Reservation.State != monitordomain.ReservationActive {
-					return errors.New("active process has a terminal reservation state")
-				}
-			} else if !record.Process.State.Terminal() {
-				return errors.New("active process is missing terminal reservation")
-			}
-			if record.Event != nil {
-				if record.AcknowledgedEventID != "" {
-					return errors.New("process terminal event is both pending and acknowledged")
-				}
-				if err := validateProcessTerminalEvent(project.Project, record); err != nil {
-					return err
-				}
-			} else if record.Process.State.Terminal() {
-				if record.AcknowledgedEventID != processTerminalEventID(id) {
-					return errors.New("terminal process lacks an exact acknowledgement marker")
-				}
-				if record.Reservation != nil &&
-					record.Reservation.State != monitordomain.ReservationTerminalUnacknowledged &&
-					record.Reservation.State != monitordomain.ReservationReleasing {
-					return errors.New("acknowledged terminal process has invalid reservation state")
-				}
-			} else if record.AcknowledgedEventID != "" {
-				return errors.New("active process has a terminal acknowledgement marker")
-			}
-		}
-		for id, tombstone := range project.Tombstones {
-			if !safeProcessID(id) || tombstone.ProcessID != id ||
-				tombstone.LogPath != processLogRelativePath(project.Project, id) ||
-				tombstone.CreatedAt.IsZero() {
-				return errors.New("invalid process retention tombstone")
-			}
 		}
 	}
 	return nil
+}
+
+func validateProcessAuthorityHeader(snapshot processAuthoritySnapshot) error {
+	if snapshot.SchemaVersion != processSnapshotSchemaVersion || snapshot.Projects == nil {
+		return errors.New("invalid process authority schema")
+	}
+	return nil
+}
+
+func validateProcessAuthorityProject(key string, project processAuthorityProject) error {
+	if err := project.Project.Validate(); err != nil {
+		return err
+	}
+	if key != project.Project.SafeProjectKey || project.Records == nil || project.Tombstones == nil {
+		return errors.New("invalid process authority project partition")
+	}
+	for id, record := range project.Records {
+		if id == "" || record.Process.ID != id || record.Process.ProjectID != project.Project.ProjectID ||
+			!safeProcessID(id) || !record.Process.State.Valid() ||
+			record.Process.LogPath != processLogRelativePath(project.Project, id) {
+			return errors.New("invalid durable process record")
+		}
+		if record.Reservation != nil {
+			if err := monitordomain.ValidateTerminalReservation(project.Project, *record.Reservation); err != nil {
+				return err
+			}
+			if record.Reservation.AuthorityID != processAuthorityID || record.Reservation.EntityID != id {
+				return errors.New("process reservation authority/entity mismatch")
+			}
+			if !record.Process.State.Terminal() &&
+				record.Reservation.State != monitordomain.ReservationAllocating &&
+				record.Reservation.State != monitordomain.ReservationActive {
+				return errors.New("active process has a terminal reservation state")
+			}
+		} else if !record.Process.State.Terminal() {
+			return errors.New("active process is missing terminal reservation")
+		}
+		if record.Event != nil {
+			if record.AcknowledgedEventID != "" {
+				return errors.New("process terminal event is both pending and acknowledged")
+			}
+			if err := validateProcessTerminalEvent(project.Project, record); err != nil {
+				return err
+			}
+		} else if record.Process.State.Terminal() {
+			if record.AcknowledgedEventID != processTerminalEventID(id) {
+				return errors.New("terminal process lacks an exact acknowledgement marker")
+			}
+			if record.Reservation != nil &&
+				record.Reservation.State != monitordomain.ReservationTerminalUnacknowledged &&
+				record.Reservation.State != monitordomain.ReservationReleasing {
+				return errors.New("acknowledged terminal process has invalid reservation state")
+			}
+		} else if record.AcknowledgedEventID != "" {
+			return errors.New("active process has a terminal acknowledgement marker")
+		}
+	}
+	for id, tombstone := range project.Tombstones {
+		if !safeProcessID(id) || tombstone.ProcessID != id ||
+			tombstone.LogPath != processLogRelativePath(project.Project, id) ||
+			tombstone.CreatedAt.IsZero() {
+			return errors.New("invalid process retention tombstone")
+		}
+	}
+	return nil
+}
+
+func (runtime *processRuntimePersistence) disableProject(
+	identity monitordomain.RuntimeProjectIdentity,
+	err error,
+) {
+	runtime.healthMu.Lock()
+	defer runtime.healthMu.Unlock()
+	runtime.projectErrs[identity.ProjectID] = err
+	runtime.disabledKeys[identity.SafeProjectKey] = true
+}
+
+func (runtime *processRuntimePersistence) projectDisabled(key string) bool {
+	runtime.healthMu.RLock()
+	defer runtime.healthMu.RUnlock()
+	return runtime.disabledKeys[key]
+}
+
+func (runtime *processRuntimePersistence) projectRuntime(
+	projectID string,
+) *processProjectRuntime {
+	runtime.registryMu.RLock()
+	defer runtime.registryMu.RUnlock()
+	return runtime.projects[projectID]
 }
 
 func validateProcessTerminalEvent(
@@ -588,7 +706,10 @@ func (runtime *processRuntimePersistence) persistenceFail(point processPersisten
 	if runtime.fail == nil {
 		return nil
 	}
-	return runtime.fail(point)
+	if err := runtime.fail(point); err != nil {
+		return &processPersistenceInjectedFailure{point: point, err: err}
+	}
+	return nil
 }
 
 func randomRuntimeID(prefix string) (string, error) {

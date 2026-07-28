@@ -44,9 +44,11 @@ func (a *app) shutdownProcessRuntime(ctx context.Context) error {
 		a.supervisorCancel()
 		return nil
 	}
-	err := a.processSupervisor.Shutdown(ctx)
+	if err := a.processSupervisor.Shutdown(ctx); err != nil {
+		return err
+	}
 	a.supervisorCancel()
-	return err
+	return nil
 }
 
 func (a *app) processRuntimeReady() bool {
@@ -69,4 +71,11 @@ func defaultProcessRetentionPolicy() processdomain.RetentionPolicy {
 	return processdomain.RetentionPolicy{
 		MaxRecords: 200, MaxAge: 7 * 24 * time.Hour, MaxTotalBytes: 256 << 20,
 	}
+}
+
+func (a *app) registerProcessRuntimeProject(project Project) error {
+	if a.processRuntime == nil {
+		return nil
+	}
+	return a.processRuntime.RegisterProject(project)
 }

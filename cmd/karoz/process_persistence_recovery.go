@@ -57,9 +57,28 @@ func (runtime *processRuntimePersistence) recoverAdmissionLocked(
 	authority, authorityExists := partition.Records[operation.EntityID]
 	runtime.authorityMu.Unlock()
 
+	if ledgerExists && (operation.ReservationToken == "" ||
+		ledgerReservation.Token != operation.ReservationToken) {
+		return errors.New("process admission operation/ledger token mismatch")
+	}
+	if authorityExists && (authority.Reservation == nil ||
+		operation.ReservationToken == "" ||
+		authority.Reservation.Token != operation.ReservationToken) {
+		return errors.New("process admission operation/authority token mismatch")
+	}
 	if !authorityExists {
 		if !ledgerExists {
+			switch operation.State {
+			case "intent", "token_selected", "allocated":
+			default:
+				return errors.New("committed admission operation lost authority and ledger state")
+			}
 			return runtime.deleteOperation(project, operation.ID)
+		}
+		switch operation.State {
+		case "token_selected", "allocated":
+		default:
+			return errors.New("post-authority admission operation lost its authority record")
 		}
 		if ledgerReservation.State != monitordomain.ReservationAllocating {
 			return errors.New("active ledger reservation has no process authority record")
@@ -144,6 +163,12 @@ func (runtime *processRuntimePersistence) validateProjectBijection(
 	project.ledgerMu.Lock()
 	ledger := project.ledger
 	project.ledgerMu.Unlock()
+	project.journalMu.Lock()
+	operations := make(map[string]monitordomain.RuntimeMutationOperation, len(project.journal.Operations))
+	for id, operation := range project.journal.Operations {
+		operations[id] = operation
+	}
+	project.journalMu.Unlock()
 
 	seenTokens := make(map[string]bool, len(records))
 	for id, record := range records {
@@ -154,6 +179,12 @@ func (runtime *processRuntimePersistence) validateProjectBijection(
 			continue
 		}
 		reservation := *record.Reservation
+		operation, operationExists := operations[reservation.OperationID]
+		if !operationExists || operation.Kind != "process_admission" ||
+			operation.State != "committed" || operation.EntityID != id ||
+			operation.ReservationToken != reservation.Token {
+			return fmt.Errorf("process %s reservation lacks its exact committed admission operation", id)
+		}
 		ledgerReservation, exists := ledger.Slots[reservation.Slot]
 		if !exists || !monitordomain.SameTerminalReservation(
 			project.identity, reservation, ledgerReservation,
@@ -165,6 +196,12 @@ func (runtime *processRuntimePersistence) validateProjectBijection(
 	for _, reservation := range ledger.Slots {
 		if reservation.AuthorityID != processAuthorityID || !seenTokens[reservation.Token] {
 			return errors.New("terminal ledger contains orphan/non-process reservation")
+		}
+		operation, exists := operations[reservation.OperationID]
+		if !exists || operation.State != "committed" ||
+			operation.ReservationToken != reservation.Token ||
+			operation.EntityID != reservation.EntityID {
+			return errors.New("terminal ledger reservation lacks its exact admission operation")
 		}
 	}
 	return nil
@@ -180,6 +217,9 @@ func (runtime *processRuntimePersistence) recoverInterruptedProcesses() error {
 	runtime.authorityMu.Lock()
 	changed := false
 	for key, partition := range runtime.authority.Projects {
+		if runtime.projectDisabled(key) {
+			continue
+		}
 		for id, record := range partition.Records {
 			if record.Process.State != processdomain.StateStarting &&
 				record.Process.State != processdomain.StateRunning {
@@ -217,7 +257,7 @@ func (runtime *processRuntimePersistence) recoverInterruptedProcesses() error {
 	}
 	runtime.authorityMu.Unlock()
 	for _, item := range transitions {
-		project := runtime.projects[item.projectID]
+		project := runtime.projectRuntime(item.projectID)
 		project.lane.Lock()
 		_, err := runtime.transitionLedger(
 			project, item.reservation, monitordomain.ReservationTerminalUnacknowledged,
@@ -238,7 +278,7 @@ func (runtime *processRuntimePersistence) recoverInterruptedProcesses() error {
 func (runtime *processRuntimePersistence) AcknowledgeTerminal(
 	projectID, processID, eventID string,
 ) error {
-	project := runtime.projects[projectID]
+	project := runtime.projectRuntime(projectID)
 	if project == nil {
 		return errors.New("process project runtime is unavailable")
 	}
@@ -531,7 +571,7 @@ func (runtime *processRuntimePersistence) ApplyRetention(
 	policy processdomain.RetentionPolicy,
 	now time.Time,
 ) error {
-	project := runtime.projects[projectID]
+	project := runtime.projectRuntime(projectID)
 	if project == nil {
 		return errors.New("process project runtime is unavailable")
 	}
@@ -597,6 +637,9 @@ func (runtime *processRuntimePersistence) recoverTombstones() error {
 	runtime.authorityMu.Lock()
 	refs := make([]tombstoneRef, 0)
 	for key, partition := range runtime.authority.Projects {
+		if runtime.projectDisabled(key) {
+			continue
+		}
 		for _, tombstone := range partition.Tombstones {
 			refs = append(refs, tombstoneRef{projectKey: key, value: tombstone})
 		}

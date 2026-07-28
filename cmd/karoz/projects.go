@@ -154,6 +154,9 @@ func (a *app) createProject(req ProjectCreateRequest) (Project, error) {
 	if err := initializeProjectKaroz(project.Path); err != nil {
 		return Project{}, err
 	}
+	if err := a.registerProcessRuntimeProject(project); err != nil {
+		return Project{}, fmt.Errorf("register project runtime: %w", err)
+	}
 	return project, nil
 }
 
@@ -193,6 +196,9 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 	}
 	if err := a.saveSettings(); err != nil {
 		return Project{}, err
+	}
+	if err := a.registerProcessRuntimeProject(project); err != nil {
+		return Project{}, fmt.Errorf("register imported project runtime: %w", err)
 	}
 	return project, nil
 }

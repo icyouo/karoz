@@ -64,9 +64,17 @@ func main() {
 	a.resumeScheduledRuns()
 	a.resumeActionablePlans()
 
-	log.Printf("karoz listening on %s projects_root=%s data_dir=%s", addr, a.settings.ProjectsRoot, a.settings.DataDir)
-	if err := http.ListenAndServe(addr, withLogging(withRecovery(a.httpHandler()))); err != nil {
-		log.Fatal(err)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: withLogging(withRecovery(a.httpHandler()))}
+	signals, stopSignals := applicationSignals()
+	log.Printf("karoz listening on %s projects_root=%s data_dir=%s", listener.Addr(), a.settings.ProjectsRoot, a.settings.DataDir)
+	err = serveApplication(a, server, listener, signals, applicationShutdownTimeout)
+	stopSignals()
+	if err != nil {
+		log.Fatalf("shutdown: %v", err)
 	}
 }
 
