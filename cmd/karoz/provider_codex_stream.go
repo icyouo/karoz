@@ -128,7 +128,16 @@ func residentHistoryPairValid(call, result AgentTranscriptItem, occurrences map[
 		strings.TrimSpace(call.ToolCallID) != "" && call.ToolCallID == result.ToolCallID &&
 		result.Seq == call.Seq+1 &&
 		strings.TrimSpace(call.ToolName) != "" &&
+		residentToolArgumentsValid(call.ToolArguments) &&
 		occurrences[residentHistoryPairKey(call)] == 2
+}
+
+func residentToolArgumentsValid(arguments string) bool {
+	var object map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(arguments)), &object); err != nil {
+		return false
+	}
+	return object != nil
 }
 
 func boundedTranscriptToolArguments(item AgentTranscriptItem) string {

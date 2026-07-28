@@ -139,6 +139,22 @@ func TestCodexCompletedOutputItemsPreserveSSEOrder(t *testing.T) {
 	}
 }
 
+func TestCodexUnparseableCompletedItemIsExplicitAndNeverDispatched(t *testing.T) {
+	payload := []byte(`{"type":"response.output_item.done","item":"opaque-unparseable-item"}`)
+	item, ok := codexSSECompletedItem(payload)
+	if !ok || item["type"] != "karoz_unparseable_output_item" || item["raw_item"] != `"opaque-unparseable-item"` {
+		t.Fatalf("unparseable completed item was silently lost: %#v, %t", item, ok)
+	}
+	if calls := codexToolCallsFromCompletedItems([]map[string]any{item}); len(calls) != 0 {
+		t.Fatalf("unparseable item produced tool dispatch: %#v", calls)
+	}
+	wire := newCodexStreamWire("/workspace", "current", "", "", nil)
+	wire.appendAssistantTurn(residentStepOutput{CompletedItems: []map[string]any{item}})
+	if len(wire.input) != 1 {
+		t.Fatalf("unparseable item was replayed as provider input: %#v", wire.input)
+	}
+}
+
 func TestCompactCodexFinalInputKeepsReasoningCallOutputAtomicAtBoundary(t *testing.T) {
 	input := []map[string]any{
 		codexMessage("user", "initial"),
@@ -236,6 +252,10 @@ func TestNativeTranscriptPairingRejectsCollisionsAndSupportsMultiCallGrouping(t 
 			{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_result", ToolCallID: "before", ToolResult: "result"},
 			{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_call", ToolCallID: "after", ToolName: "one"},
 		},
+		"malformed arguments": {
+			{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "bad-args", ToolName: "one", ToolArguments: `{"broken":`},
+			{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "bad-args", ToolResult: "result"},
+		},
 	}
 	for name, transcript := range fallbackCases {
 		t.Run(name, func(t *testing.T) {
@@ -248,10 +268,29 @@ func TestNativeTranscriptPairingRejectsCollisionsAndSupportsMultiCallGrouping(t 
 	}
 }
 
+func TestMalformedNativeArgumentsFallbackForCodexAndClaude(t *testing.T) {
+	items := []AgentTranscriptItem{
+		{SessionID: "s", RunID: "r", Seq: 1, Role: "assistant", Kind: "tool_call", ToolCallID: "bad", ToolName: "repo_read", ToolArguments: `["not","an","object"]`},
+		{SessionID: "s", RunID: "r", Seq: 2, Role: "tool", Kind: "tool_result", ToolCallID: "bad", ToolResult: "result"},
+	}
+	for _, item := range codexTranscriptInput(items) {
+		if item["type"] != "message" {
+			t.Fatalf("Codex malformed arguments became native: %#v", item)
+		}
+	}
+	for _, message := range claudeTranscriptMessages(items) {
+		for _, content := range message["content"].([]map[string]any) {
+			if content["type"] == "tool_use" || content["type"] == "tool_result" {
+				t.Fatalf("Claude malformed arguments became native: %#v", message)
+			}
+		}
+	}
+}
+
 func TestNativeTranscriptPayloadUsesContextBounds(t *testing.T) {
 	success := true
 	items := []AgentTranscriptItem{
-		{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "large", ToolName: "repo_read", ToolArguments: strings.Repeat("a", 9000)},
+		{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "large", ToolName: "repo_read", ToolArguments: `{"data":"` + strings.Repeat("a", 9000) + `"}`},
 		{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "large", ToolResult: strings.Repeat("b", 9000), ToolSuccess: &success},
 	}
 	input := codexTranscriptInput(items)
@@ -285,6 +324,30 @@ func TestProviderTranscriptBoundsToolPairsAtomically(t *testing.T) {
 	}
 }
 
+func TestDuplicateIDOutsideProviderCutoffInvalidatesRetainedOccurrence(t *testing.T) {
+	success := true
+	items := []AgentTranscriptItem{
+		{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "duplicate", ToolName: "repo_read", ToolArguments: `{}`},
+		{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "duplicate", ToolResult: "old", ToolSuccess: &success},
+	}
+	for i := 0; i < residentTranscriptPromptMaxItems-2; i++ {
+		items = append(items, AgentTranscriptItem{SessionID: "s", RunID: "r", Seq: int64(i + 3), Role: "assistant", Kind: "message", Body: "middle"})
+	}
+	items = append(items,
+		AgentTranscriptItem{SessionID: "s", RunID: "r", Seq: 100, Kind: "tool_call", ToolCallID: "duplicate", ToolName: "repo_read", ToolArguments: `{}`},
+		AgentTranscriptItem{SessionID: "s", RunID: "r", Seq: 101, Kind: "tool_result", ToolCallID: "duplicate", ToolResult: "new", ToolSuccess: &success},
+	)
+	bounded := boundedProviderTranscript(items, "", "")
+	if len(bounded) != residentTranscriptPromptMaxItems {
+		t.Fatalf("bounded item count = %d", len(bounded))
+	}
+	for _, input := range codexTranscriptInput(bounded) {
+		if input["type"] == "function_call" || input["type"] == "function_call_output" {
+			t.Fatalf("duplicate outside cutoff allowed retained native pair: %#v", input)
+		}
+	}
+}
+
 func TestClaudeHistoryNormalizesRolesAndCurrentUserOnce(t *testing.T) {
 	items := []AgentTranscriptItem{
 		{Role: "user", Kind: "message", Body: "first"},
@@ -314,15 +377,15 @@ func TestCurrentUserInputRemovedOnceWithOrWithoutRunID(t *testing.T) {
 		runID string
 	}{
 		{
-			name: "current item has run id",
+			name: "scheduled current item has run id",
 			items: []AgentTranscriptItem{
 				{Role: "user", Kind: "message", Body: "older"},
-				{Role: "user", Kind: "message", Body: "repeat", RunID: "run-1"},
+				{Role: "user", Kind: "message", Intent: "scheduled_plan_event_input", Body: "repeat", RunID: "run-1"},
 			},
 			runID: "run-1",
 		},
 		{
-			name: "visible item lacks run id",
+			name: "direct visible item lacks run id",
 			items: []AgentTranscriptItem{
 				{Role: "assistant", Kind: "message", Body: "prior"},
 				{Role: "user", Kind: "message", Body: "current"},

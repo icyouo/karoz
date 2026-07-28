@@ -193,8 +193,8 @@ func codexSSEReasoningItem(payload []byte) (map[string]any, bool) {
 
 func codexSSECompletedItem(payload []byte) (map[string]any, bool) {
 	var event struct {
-		Type string         `json:"type"`
-		Item map[string]any `json:"item"`
+		Type string          `json:"type"`
+		Item json.RawMessage `json:"item"`
 	}
 	if err := json.Unmarshal(payload, &event); err != nil {
 		return nil, false
@@ -203,9 +203,17 @@ func codexSSECompletedItem(payload []byte) (map[string]any, bool) {
 		return nil, false
 	}
 	if len(event.Item) == 0 {
-		return nil, false
+		event.Item = json.RawMessage("null")
 	}
-	return event.Item, true
+	var item map[string]any
+	if err := json.Unmarshal(event.Item, &item); err != nil || len(item) == 0 {
+		return map[string]any{
+			"type":       "karoz_unparseable_output_item",
+			"raw_item":   string(event.Item),
+			"replayable": false,
+		}, true
+	}
+	return item, true
 }
 
 func decodeRawJSONText(raw json.RawMessage) string {

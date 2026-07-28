@@ -120,6 +120,38 @@ func TestStructuredTranscriptPairsToolEventsAcrossTheNextTurn(t *testing.T) {
 	}
 }
 
+func TestDirectCurrentInputDeliveredExactlyOnce(t *testing.T) {
+	a, project := newHandlerTestApp(t)
+	agent, ok := a.projectAgent(project, "worker-a")
+	if !ok {
+		t.Fatal("worker-a missing")
+	}
+	const userText = "Inspect the direct input exactly once."
+	run, started := a.beginAgentRun(AgentRunInput{RunID: "direct-input-once", ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: "ask"})
+	if !started {
+		t.Fatal("direct run did not start")
+	}
+	if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", "ask", userText); !ok {
+		t.Fatal("direct input was not persisted")
+	}
+	provider := &scheduledTranscriptTestProvider{output: "done"}
+	provider.beforeStream = func(request CLI2APIRequest) error {
+		if strings.Count(request.Prompt, userText) != 1 {
+			return fmt.Errorf("direct input prompt count = %d", strings.Count(request.Prompt, userText))
+		}
+		for _, item := range request.Transcript {
+			if item.Body == userText {
+				return fmt.Errorf("direct current input was duplicated into provider history")
+			}
+		}
+		return nil
+	}
+	a.modelProvider = provider
+	if _, err := a.runResidentAgentTurn(context.Background(), project, agent, userText, "ask", nil); err != nil {
+		t.Fatalf("direct turn failed: %v", err)
+	}
+}
+
 func TestScheduledPlanTranscriptPersistsInputBeforeToolsAndSurvivesReload(t *testing.T) {
 	a, project := newHandlerTestApp(t)
 	agent, ok := a.projectAgent(project, "worker-a")
@@ -143,8 +175,19 @@ func TestScheduledPlanTranscriptPersistsInputBeforeToolsAndSurvivesReload(t *tes
 	}
 	expectedInput := fmt.Sprintf("[plan event] event=%s plan_id=%s plan_version=%d step_id=%s task_id=%s\n\nCurrent WorkPlan:\n%s\n\nYou own this active WorkPlan. Continue advancing its todo list. Inspect task/review/group-result evidence, then call advance_plan with one concrete action. Task completion alone never completes a step. You may accept it, delegate review, request rework, block it, dispatch a local task, delegate cross-group work through the group inbox, or complete the plan when every required step is accepted. Do not only summarize.", "task_terminal", plan.ID, plan.Version, "verify", "task-42", string(planJSON))
 	provider := &scheduledTranscriptTestProvider{output: "Plan event processed."}
-	provider.beforeStream = func(CLI2APIRequest) error {
-		return scheduledModelInputOnDisk(a.settings.DataDir, project.ID, agent.ID, job.ID, "scheduled_plan_event_input", expectedInput)
+	provider.beforeStream = func(request CLI2APIRequest) error {
+		if err := scheduledModelInputOnDisk(a.settings.DataDir, project.ID, agent.ID, job.ID, "scheduled_plan_event_input", expectedInput); err != nil {
+			return err
+		}
+		if strings.Count(request.Prompt, expectedInput) != 1 {
+			return fmt.Errorf("scheduled input prompt count = %d", strings.Count(request.Prompt, expectedInput))
+		}
+		for _, item := range request.Transcript {
+			if item.Body == expectedInput {
+				return fmt.Errorf("scheduled current input was duplicated into provider history")
+			}
+		}
+		return nil
 	}
 	a.modelProvider = provider
 	beginScheduledTranscriptTestRun(t, a, job)

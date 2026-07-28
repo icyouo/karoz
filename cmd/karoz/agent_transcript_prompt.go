@@ -165,10 +165,31 @@ func boundedProviderTranscript(items []AgentTranscriptItem, currentRunID, userTe
 	out := make([]AgentTranscriptItem, 0, itemCount)
 	for i, unit := range units {
 		if selected[i] {
-			out = append(out, unit.Items...)
+			for _, item := range unit.Items {
+				if !unit.Native {
+					item = residentHistoryTextFallback(item)
+				}
+				out = append(out, item)
+			}
 		}
 	}
 	return out
+}
+
+func residentHistoryTextFallback(item AgentTranscriptItem) AgentTranscriptItem {
+	kind := firstNonEmpty(item.Kind, transcriptKindForMessage(item.Role, item.Intent))
+	if kind != "tool_call" && kind != "tool_result" {
+		return item
+	}
+	item.Body = boundedTranscriptText(item)
+	item.Kind = "message"
+	item.Role = firstNonEmpty(item.Role, "system")
+	item.ToolCallID = ""
+	item.ToolName = ""
+	item.ToolArguments = ""
+	item.ToolResult = ""
+	item.ToolSuccess = nil
+	return item
 }
 
 func contextMessageFromTranscript(item AgentTranscriptItem) AgentContextMessage {
