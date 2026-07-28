@@ -71,12 +71,13 @@ func claudeTranscriptMessages(items []AgentTranscriptItem) []map[string]any {
 			out = appendClaudeHistoryContent(out, "user", []map[string]any{{"type": "tool_result", "tool_use_id": call.ToolCallID, "content": boundedTranscriptToolResult(result), "is_error": result.ToolSuccess != nil && !*result.ToolSuccess}})
 			continue
 		}
-		item := unit.Items[0]
-		role := transcriptTextRole(item)
-		if role == "system" {
-			role = "user"
+		for _, item := range unit.Items {
+			role := transcriptTextRole(item)
+			if role == "system" {
+				role = "user"
+			}
+			out = appendClaudeHistoryContent(out, role, []map[string]any{{"type": "text", "text": boundedTranscriptText(item)}})
 		}
-		out = appendClaudeHistoryContent(out, role, []map[string]any{{"type": "text", "text": boundedTranscriptText(item)}})
 	}
 	return out
 }

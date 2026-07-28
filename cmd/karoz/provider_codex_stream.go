@@ -84,8 +84,9 @@ func codexTranscriptInput(items []AgentTranscriptItem) []map[string]any {
 			out = append(out, map[string]any{"type": "function_call_output", "call_id": call.ToolCallID, "output": boundedTranscriptToolResult(result)})
 			continue
 		}
-		item := unit.Items[0]
-		out = append(out, codexMessage(transcriptTextRole(item), boundedTranscriptText(item)))
+		for _, item := range unit.Items {
+			out = append(out, codexMessage(transcriptTextRole(item), boundedTranscriptText(item)))
+		}
 	}
 	return out
 }
@@ -110,8 +111,11 @@ func projectResidentHistoryUnits(items []AgentTranscriptItem) []residentHistoryU
 	units := make([]residentHistoryUnit, 0, len(items))
 	for i := 0; i < len(items); i++ {
 		call := items[i]
-		if i+1 < len(items) && residentHistoryPairValid(call, items[i+1], occurrences) {
-			units = append(units, residentHistoryUnit{Items: []AgentTranscriptItem{call, items[i+1]}, Native: true})
+		if i+1 < len(items) && residentHistoryPairRelated(call, items[i+1]) {
+			units = append(units, residentHistoryUnit{
+				Items:  []AgentTranscriptItem{call, items[i+1]},
+				Native: residentHistoryPairValid(call, items[i+1], occurrences),
+			})
 			i++
 		} else {
 			units = append(units, residentHistoryUnit{Items: []AgentTranscriptItem{call}})
@@ -124,13 +128,17 @@ func residentHistoryPairKey(item AgentTranscriptItem) string {
 	return item.SessionID + "\x00" + item.RunID + "\x00" + item.ToolCallID
 }
 
-func residentHistoryPairValid(call, result AgentTranscriptItem, occurrences map[string]int) bool {
+func residentHistoryPairRelated(call, result AgentTranscriptItem) bool {
 	return firstNonEmpty(call.Kind, transcriptKindForMessage(call.Role, call.Intent)) == "tool_call" &&
 		firstNonEmpty(result.Kind, transcriptKindForMessage(result.Role, result.Intent)) == "tool_result" &&
 		strings.TrimSpace(call.SessionID) != "" && call.SessionID == result.SessionID &&
 		strings.TrimSpace(call.RunID) != "" && call.RunID == result.RunID &&
 		strings.TrimSpace(call.ToolCallID) != "" && call.ToolCallID == result.ToolCallID &&
-		result.Seq == call.Seq+1 &&
+		result.Seq == call.Seq+1
+}
+
+func residentHistoryPairValid(call, result AgentTranscriptItem, occurrences map[string]int) bool {
+	return residentHistoryPairRelated(call, result) &&
 		strings.TrimSpace(call.ToolName) != "" &&
 		residentToolArgumentsValid(call.ToolArguments) &&
 		occurrences[residentHistoryPairKey(call)] == 2

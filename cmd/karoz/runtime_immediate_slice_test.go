@@ -332,6 +332,10 @@ func TestOversizedNativeArgumentsDegradeAtomicallyForBothProviders(t *testing.T)
 		{SessionID: "s", RunID: "r", Seq: 1, Kind: "tool_call", ToolCallID: "large", ToolName: "repo_read", ToolArguments: oversizedArguments},
 		{SessionID: "s", RunID: "r", Seq: 2, Kind: "tool_result", ToolCallID: "large", ToolResult: oversizedResult, ToolSuccess: &success},
 	}
+	units := projectResidentHistoryUnits(items)
+	if len(units) != 1 || units[0].Native || len(units[0].Items) != 2 {
+		t.Fatalf("oversized call/result did not form one atomic fallback unit: %#v", units)
+	}
 	codex := codexTranscriptInput(items)
 	for _, input := range codex {
 		if input["type"] != "message" {
@@ -366,6 +370,15 @@ func TestOversizedNativeArgumentsDegradeAtomicallyForBothProviders(t *testing.T)
 	}
 	if got := estimateModelBoundTranscriptTokens(history); got >= estimateResidentContextTextTokens(oversizedArguments+oversizedResult) {
 		t.Fatalf("context meter counted unbounded native payload: bounded=%d raw=%d", got, estimateResidentContextTextTokens(oversizedArguments+oversizedResult))
+	}
+	fallbackItems := 0
+	for _, item := range history {
+		if item.Seq == 1 || item.Seq == 2 {
+			fallbackItems++
+		}
+	}
+	if fallbackItems != 0 && fallbackItems != 2 {
+		t.Fatalf("bounded projection split oversized fallback pair: %#v", history)
 	}
 }
 
