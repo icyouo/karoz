@@ -44,5 +44,5 @@ jobs:
           go-version: "1.22"
           cache: false
 
-      - name: Test Windows Job Object crash containment
-        run: go test ./cmd/karoz -run TestWindows -count=5
+      - name: Test Windows Job Object and assignment failure
+        run: go test -v ./cmd/karoz -run TestWindows -count=5
