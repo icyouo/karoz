@@ -9,7 +9,10 @@ import (
 )
 
 func newApp(settings Settings) *app {
+	supervisorCtx, supervisorCancel := context.WithCancel(context.Background())
 	a := &app{
+		supervisorCtx:            supervisorCtx,
+		supervisorCancel:         supervisorCancel,
 		settings:                 settings,
 		tasks:                    map[string][]Task{},
 		taskRunCancels:           map[string]taskRun{},

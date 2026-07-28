@@ -17,6 +17,8 @@ import (
 
 type app struct {
 	mu                                 sync.Mutex
+	supervisorCtx                      context.Context
+	supervisorCancel                   context.CancelFunc
 	taskRunMu                          sync.Mutex
 	taskRunCancels                     map[string]taskRun
 	taskIntegrationLocksMu             sync.Mutex

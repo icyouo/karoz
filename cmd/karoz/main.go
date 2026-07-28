@@ -10,6 +10,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "process-guard" {
+		os.Exit(runBackgroundProcessGuard(os.Args[2:]))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp-bridge" {
 		if err := runClaudeMCPBridge(os.Args[2:], os.Stdin, os.Stdout); err != nil {
 			log.Printf("mcp bridge: %v", err)
