@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -214,6 +217,166 @@ func TestCompactCodexFinalInputKeepsReasoningCallOutputAtomicAtBoundary(t *testi
 		if !strings.Contains(string(keptRaw), required) {
 			t.Fatalf("complete native group was not retained with sufficient budget: %s", keptRaw)
 		}
+	}
+}
+
+func TestCompactCodexFinalInputValidatesIndexZeroHistoryAndPinsCurrentPrompt(t *testing.T) {
+	input := []any{
+		map[string]any{"type": "function_call", "call_id": "history-call", "name": "repo_read", "arguments": `{}`},
+		map[string]any{"type": "function_call_output", "call_id": "history-call", "output": "history-result"},
+		codexMessage("user", "CURRENT_PROMPT_MUST_SURVIVE"),
+		map[string]any{"type": "function_call", "call_id": "recent-call", "name": "repo_search", "arguments": `{}`},
+		map[string]any{"type": "function_call_output", "call_id": "recent-call", "output": strings.Repeat("x", 2000)},
+	}
+	full := compactCodexInputForFinal(input, 100000, 2)
+	fullRaw, err := json.Marshal(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"history-call", "history-result", "CURRENT_PROMPT_MUST_SURVIVE", "recent-call"} {
+		if !strings.Contains(string(fullRaw), required) {
+			t.Fatalf("large-budget final compaction dropped %q: %s", required, fullRaw)
+		}
+	}
+	tight := compactCodexInputForFinal(input, 300, 2)
+	tightRaw, err := json.Marshal(tight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tightRaw), "CURRENT_PROMPT_MUST_SURVIVE") {
+		t.Fatalf("explicit current prompt was dropped: %s", tightRaw)
+	}
+	hasHistoryCall := strings.Contains(string(tightRaw), `"call_id":"history-call"`)
+	hasHistoryResult := strings.Contains(string(tightRaw), "history-result")
+	if hasHistoryCall != hasHistoryResult {
+		t.Fatalf("index-zero historical native pair was orphaned: %s", tightRaw)
+	}
+}
+
+func TestCodexNextRequestPreservesRawCompletedItemLiteralBytes(t *testing.T) {
+	authPath := t.TempDir() + "/auth.json"
+	auth, err := json.Marshal(map[string]any{
+		"tokens":  map[string]any{"access_token": "test-token"},
+		"expired": time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(authPath, auth, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KAROZ_CODEX_AUTH_PATH", authPath)
+	rawItem := json.RawMessage(`{ "id" : "rs_1", "type" : "reasoning", "encrypted_content" : "opaque +/= bytes" }`)
+	request, err := newCodexDirectRequestWithInput(context.Background(), []any{
+		codexMessage("user", "current"),
+		rawItem,
+	}, "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, rawItem) {
+		t.Fatalf("actual next request changed raw item bytes:\nwant: %s\nbody: %s", rawItem, body)
+	}
+	if !json.Valid(body) {
+		t.Fatalf("literal-preserving request is not valid JSON: %s", body)
+	}
+}
+
+type interruptAfterCodexToolWire struct {
+	*codexStreamWire
+	steps int
+}
+
+func (wire *interruptAfterCodexToolWire) step(context.Context, []map[string]any, AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {
+	wire.steps++
+	if wire.steps > 1 {
+		return residentStepOutput{Text: "done"}, nil, nil
+	}
+	call := codexToolCall{CallID: "interrupted-call", Name: "repo_read", Arguments: `{}`}
+	raw := json.RawMessage(`{"type":"function_call","call_id":"interrupted-call","name":"repo_read","arguments":"{}"}`)
+	return residentStepOutput{
+		Text:             "partial assistant text",
+		ToolCalls:        []codexToolCall{call},
+		CodexOutputItems: []codexResponseOutputItem{{Raw: raw, ToolCall: &call}},
+	}, []AgentInterrupt{{ID: "interrupt-1", Body: "change direction"}}, nil
+}
+
+type interruptAfterClaudeToolWire struct {
+	*claudeStreamWire
+	steps int
+}
+
+func (wire *interruptAfterClaudeToolWire) step(context.Context, []map[string]any, AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {
+	wire.steps++
+	if wire.steps > 1 {
+		return residentStepOutput{Text: "done"}, nil, nil
+	}
+	call := codexToolCall{CallID: "interrupted-tool", Name: "repo_read", Arguments: `{}`}
+	return residentStepOutput{
+		Text:      "partial assistant text",
+		ToolCalls: []codexToolCall{call},
+		AssistantContent: []map[string]any{
+			{"type": "text", "text": "partial assistant text"},
+			{"type": "tool_use", "id": "interrupted-tool", "name": "repo_read", "input": map[string]any{}},
+		},
+	}, []AgentInterrupt{{ID: "interrupt-1", Body: "change direction"}}, nil
+}
+
+func TestInterruptAfterCompletedToolDiscardsProviderGroupForBothWires(t *testing.T) {
+	budget := residentTurnBudgetFor("ask")
+	tests := []struct {
+		name string
+		wire residentStreamWire
+		raw  func() []byte
+	}{
+		{
+			name: "codex",
+			wire: &interruptAfterCodexToolWire{codexStreamWire: newCodexStreamWire("/tmp/project", "current prompt", "", "", nil)},
+			raw: func() []byte {
+				return nil
+			},
+		},
+	}
+	codexWire := tests[0].wire.(*interruptAfterCodexToolWire)
+	tests[0].raw = func() []byte {
+		raw, _ := json.Marshal(codexWire.input)
+		return raw
+	}
+	claudeWire := &interruptAfterClaudeToolWire{claudeStreamWire: newClaudeStreamWire("/tmp/project", "current prompt", "", "", nil)}
+	tests = append(tests, struct {
+		name string
+		wire residentStreamWire
+		raw  func() []byte
+	}{
+		name: "claude",
+		wire: claudeWire,
+		raw: func() []byte {
+			raw, _ := json.Marshal(claudeWire.messages)
+			return raw
+		},
+	})
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			executed := 0
+			if err := invokeResidentToolLoop(context.Background(), test.wire, nil, AgentStreamCallbacks{}, budget, func(context.Context, codexToolCall) (string, error) {
+				executed++
+				return "unexpected", nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			raw := test.raw()
+			if executed != 0 || bytes.Contains(raw, []byte("interrupted-call")) || bytes.Contains(raw, []byte("interrupted-tool")) ||
+				bytes.Contains(raw, []byte("function_call_output")) || bytes.Contains(raw, []byte("tool_result")) {
+				t.Fatalf("interrupted provider tool group survived or executed: executed=%d history=%s", executed, raw)
+			}
+			if strings.Count(string(raw), "partial assistant text") != 1 || !strings.Contains(string(raw), "change direction") {
+				t.Fatalf("interrupted turn was not normalized exactly once: %s", raw)
+			}
+		})
 	}
 }
 

@@ -105,7 +105,10 @@ func (w *claudeStreamWire) appendAssistantTurn(streamed residentStepOutput) {
 	}
 }
 
-func (w *claudeStreamWire) appendInterruptTurn(_ residentStepOutput, interrupts []AgentInterrupt) {
+func (w *claudeStreamWire) appendInterruptTurn(streamed residentStepOutput, interrupts []AgentInterrupt) {
+	if strings.TrimSpace(streamed.Text) != "" {
+		w.messages = appendClaudeHistoryContent(w.messages, "assistant", []map[string]any{{"type": "text", "text": streamed.Text}})
+	}
 	w.messages = append(w.messages, map[string]any{"role": "user", "content": renderAgentInterruptsForModel(interrupts)})
 }
 

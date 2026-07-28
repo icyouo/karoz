@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,10 +53,11 @@ func invokeCodexDirectStreamWithBudget(ctx context.Context, workdir, prompt, mod
 // codexStreamWire adapts the Codex responses SSE protocol to the shared
 // resident tool loop. It owns the responses API input items.
 type codexStreamWire struct {
-	input          []any
-	model          string
-	thinkingEffort string
-	replayedCalls  map[string]int
+	input              []any
+	currentPromptIndex int
+	model              string
+	thinkingEffort     string
+	replayedCalls      map[string]int
 }
 
 func newCodexStreamWire(workdir, prompt, model, thinkingEffort string, transcript []AgentTranscriptItem) *codexStreamWire {
@@ -66,10 +68,11 @@ func newCodexStreamWire(workdir, prompt, model, thinkingEffort string, transcrip
 	}
 	wireInput = append(wireInput, codexMessage("user", prompt+"\n\nProject workspace: "+workdir))
 	return &codexStreamWire{
-		input:          wireInput,
-		model:          model,
-		thinkingEffort: thinkingEffort,
-		replayedCalls:  map[string]int{},
+		input:              wireInput,
+		currentPromptIndex: len(wireInput) - 1,
+		model:              model,
+		thinkingEffort:     thinkingEffort,
+		replayedCalls:      map[string]int{},
 	}
 }
 
@@ -240,7 +243,7 @@ func (w *codexStreamWire) appendLimitMessage(limitReason string) {
 }
 
 func (w *codexStreamWire) finalize(parentCtx, finalCtx context.Context, callbacks AgentStreamCallbacks) error {
-	httpReq, err := newCodexDirectRequestWithInput(finalCtx, compactCodexInputForFinal(w.input, 90000), w.model, w.thinkingEffort, nil)
+	httpReq, err := newCodexDirectRequestWithInput(finalCtx, compactCodexInputForFinal(w.input, 90000, w.currentPromptIndex), w.model, w.thinkingEffort, nil)
 	if err != nil {
 		return err
 	}
@@ -256,7 +259,7 @@ func (w *codexStreamWire) finalize(parentCtx, finalCtx context.Context, callback
 	return nil
 }
 
-func compactCodexInputForFinal(input []any, maxChars int) []any {
+func compactCodexInputForFinal(input []any, maxChars int, requiredIndexes ...int) []any {
 	if len(input) <= 2 || maxChars <= 0 {
 		return input
 	}
@@ -279,7 +282,7 @@ func compactCodexInputForFinal(input []any, maxChars int) []any {
 	}
 	callIndexes := map[string][]int{}
 	outputIndexes := map[string][]int{}
-	for i := 1; i < len(input); i++ {
+	for i := 0; i < len(input); i++ {
 		item := codexInputMetadataForCompaction(input[i])
 		switch item.Type {
 		case "function_call", "tool_call":
@@ -309,7 +312,7 @@ func compactCodexInputForFinal(input []any, maxChars int) []any {
 	// A completed response batch may contain reasoning, assistant text, and
 	// multiple calls before their outputs. Keep the whole batch connected so
 	// tail compaction cannot retain a result while dropping its predecessor.
-	for i := 1; i < len(input); {
+	for i := 0; i < len(input); {
 		itemType := codexInputMetadataForCompaction(input[i]).Type
 		if itemType != "reasoning" && itemType != "function_call" && itemType != "tool_call" {
 			i++
@@ -347,7 +350,7 @@ func compactCodexInputForFinal(input []any, maxChars int) []any {
 		invalid bool
 	}
 	groupsByRoot := map[int]*compactGroup{}
-	for i := 1; i < len(input); i++ {
+	for i := 0; i < len(input); i++ {
 		root := find(i)
 		group := groupsByRoot[root]
 		if group == nil {
@@ -368,7 +371,27 @@ func compactCodexInputForFinal(input []any, maxChars int) []any {
 	selected := make([]bool, len(input))
 	used := 0
 	omitted := false
+	requiredRoots := map[int]bool{}
+	for _, index := range requiredIndexes {
+		if index >= 0 && index < len(input) {
+			requiredRoots[find(index)] = true
+		}
+	}
+	for root := range requiredRoots {
+		group := groupsByRoot[root]
+		if group == nil || group.invalid {
+			omitted = true
+			continue
+		}
+		for _, index := range group.indexes {
+			selected[index] = true
+		}
+		used += group.cost
+	}
 	for _, group := range groups {
+		if requiredRoots[find(group.indexes[0])] {
+			continue
+		}
 		if group.invalid {
 			omitted = true
 			continue
@@ -387,11 +410,10 @@ func compactCodexInputForFinal(input []any, maxChars int) []any {
 		used += group.cost
 	}
 	out := make([]any, 0, len(input))
-	out = append(out, input[0])
 	if omitted {
 		out = append(out, codexMessage("user", "[Earlier provider reasoning and tool evidence was omitted atomically to fit the final response context.]"))
 	}
-	for i := 1; i < len(input); i++ {
+	for i := 0; i < len(input); i++ {
 		if selected[i] {
 			out = append(out, input[i])
 		}
@@ -489,12 +511,11 @@ func newCodexDirectRequestWithInput(ctx context.Context, input []any, model, thi
 		"parallel_tool_calls": true,
 		"include":             []string{"reasoning.encrypted_content"},
 		"reasoning":           map[string]any{"effort": thinkingEffort, "summary": "auto"},
-		"input":               input,
 	}
 	if len(tools) > 0 {
 		payload["tools"] = tools
 	}
-	body, err := json.Marshal(payload)
+	body, err := marshalCodexRequestPayload(payload, input)
 	if err != nil {
 		return nil, err
 	}
@@ -514,6 +535,46 @@ func newCodexDirectRequestWithInput(ctx context.Context, input []any, model, thi
 		httpReq.Header.Set("Chatgpt-Account-Id", credential.AccountID)
 	}
 	return httpReq, nil
+}
+
+func marshalCodexRequestPayload(payload map[string]any, input []any) ([]byte, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 || body[len(body)-1] != '}' {
+		return nil, errors.New("codex request payload must encode as an object")
+	}
+	var encodedInput bytes.Buffer
+	encodedInput.WriteByte('[')
+	for index, item := range input {
+		if index > 0 {
+			encodedInput.WriteByte(',')
+		}
+		switch typed := item.(type) {
+		case json.RawMessage:
+			if !json.Valid(typed) {
+				return nil, errors.New("codex request contains invalid raw input item")
+			}
+			encodedInput.Write(typed)
+		case []byte:
+			if !json.Valid(typed) {
+				return nil, errors.New("codex request contains invalid raw input item")
+			}
+			encodedInput.Write(typed)
+		default:
+			encoded, marshalErr := json.Marshal(item)
+			if marshalErr != nil {
+				return nil, marshalErr
+			}
+			encodedInput.Write(encoded)
+		}
+	}
+	encodedInput.WriteByte(']')
+	body = append(body[:len(body)-1], []byte(`,"input":`)...)
+	body = append(body, encodedInput.Bytes()...)
+	body = append(body, '}')
+	return body, nil
 }
 
 func codexMessage(role, text string) map[string]any {

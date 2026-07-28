@@ -65,11 +65,11 @@ toolLoop:
 			}
 			return err
 		}
-		wire.appendAssistantTurn(streamed)
 		if len(interrupts) > 0 {
 			wire.appendInterruptTurn(streamed, interrupts)
 			continue
 		}
+		wire.appendAssistantTurn(streamed)
 		if len(streamed.ToolCalls) == 0 {
 			return nil
 		}
