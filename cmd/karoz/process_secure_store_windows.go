@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -220,10 +221,63 @@ func validateWindowsSecurePath(path string) error {
 	if !actualOwner.Equals(owner) {
 		return errors.New("runtime path owner mismatch")
 	}
-	if actual.String() != desired.String() {
+	control, _, err := actual.Control()
+	if err != nil {
+		return err
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return errors.New("runtime path ACL inherits permissions")
+	}
+	actualDACL, _, err := actual.DACL()
+	if err != nil {
+		return err
+	}
+	desiredDACL, _, err := desired.DACL()
+	if err != nil {
+		return err
+	}
+	if !sameWindowsACL(actualDACL, desiredDACL) {
 		return errors.New("runtime path ACL is not owner-only")
 	}
 	return nil
+}
+
+func sameWindowsACL(left, right *windows.ACL) bool {
+	if left == nil || right == nil || left.AceCount != right.AceCount {
+		return false
+	}
+	rightEntries := make([]*windows.ACCESS_ALLOWED_ACE, right.AceCount)
+	for index := range rightEntries {
+		if windows.GetAce(right, uint32(index), &rightEntries[index]) != nil {
+			return false
+		}
+	}
+	matched := make([]bool, len(rightEntries))
+	for index := uint16(0); index < left.AceCount; index++ {
+		var candidate *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(left, uint32(index), &candidate) != nil ||
+			candidate.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return false
+		}
+		candidateSID := (*windows.SID)(unsafe.Pointer(&candidate.SidStart))
+		found := false
+		for desiredIndex, desired := range rightEntries {
+			desiredSID := (*windows.SID)(unsafe.Pointer(&desired.SidStart))
+			if !matched[desiredIndex] &&
+				candidate.Header.AceType == desired.Header.AceType &&
+				candidate.Header.AceFlags == desired.Header.AceFlags &&
+				candidate.Mask == desired.Mask &&
+				candidateSID.Equals(desiredSID) {
+				matched[desiredIndex] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func applyAndValidateWindowsOwnerACL(path string) error {
