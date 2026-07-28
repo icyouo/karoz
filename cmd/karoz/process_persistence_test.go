@@ -976,6 +976,156 @@ func TestApplicationRegistersNewProjectWithoutRebuildingLiveSupervisor(t *testin
 	}
 }
 
+func TestImportProjectRejectsCanonicalPathAliasWithoutRuntimeWrites(t *testing.T) {
+	root := t.TempDir()
+	existingPath := filepath.Join(root, "existing")
+	if err := os.MkdirAll(filepath.Join(existingPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := projectFromPath(existingPath, root, "main")
+	dataDir := t.TempDir()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := a.bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := a.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown process runtime: %v", err)
+		}
+	})
+
+	existingRuntime := a.processRuntime.projectRuntime(existing.ID)
+	if existingRuntime == nil {
+		t.Fatal("existing project runtime was not registered")
+	}
+	safetyPaths := []string{
+		filepath.Join(dataDir, "project-runtime", "index.json"),
+		filepath.Join(dataDir, "processes.json"),
+		filepath.Join(
+			dataDir, "project-runtime", existingRuntime.identity.SafeProjectKey,
+			"terminal-reservations.json",
+		),
+		filepath.Join(
+			dataDir, "project-runtime", existingRuntime.identity.SafeProjectKey,
+			"runtime-mutations.json",
+		),
+	}
+	before := make(map[string][]byte, len(safetyPaths))
+	for _, path := range safetyPaths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[path] = body
+	}
+
+	aliasRoot := t.TempDir()
+	aliasPath := filepath.Join(aliasRoot, "alias")
+	if err := os.Symlink(existingPath, aliasPath); err != nil {
+		t.Fatal(err)
+	}
+	aliasProject := projectFromPath(aliasPath, aliasPath, "extra")
+	if aliasProject.ID == existing.ID {
+		t.Fatal("alias fixture unexpectedly produced the primary project ID")
+	}
+	if _, err := a.importProject(ProjectCreateRequest{
+		Path: aliasPath, Name: "canonical-alias",
+	}); err == nil {
+		t.Fatal("canonical path alias import succeeded")
+	}
+
+	for _, path := range safetyPaths {
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before[path]) {
+			t.Errorf("failed alias registration changed runtime safety state %s", path)
+		}
+	}
+	aliasKey := monitordomain.SafeProjectKey(aliasProject.ID)
+	if _, err := os.Stat(filepath.Join(dataDir, "project-runtime", aliasKey)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed alias registration created runtime partition: %v", err)
+	}
+	if a.processRuntime.projectRuntime(aliasProject.ID) != nil {
+		t.Fatal("failed alias registration became runtime-visible")
+	}
+}
+
+func TestProcessRuntimeConcurrentCanonicalPathRegistrationAllowsOneOwner(t *testing.T) {
+	dataDir := t.TempDir()
+	runtime, err := newProcessRuntimePersistence(dataDir, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir()
+	projects := []Project{
+		{ID: "canonical-owner-a", Name: "a", Path: path},
+		{ID: "canonical-owner-b", Name: "b", Path: path},
+	}
+	start := make(chan struct{})
+	results := make(chan error, len(projects))
+	var registrations sync.WaitGroup
+	for _, project := range projects {
+		project := project
+		registrations.Add(1)
+		go func() {
+			defer registrations.Done()
+			<-start
+			results <- runtime.RegisterProject(project)
+		}()
+	}
+	close(start)
+	registrations.Wait()
+	close(results)
+
+	var succeeded, rejected int
+	for registerErr := range results {
+		if registerErr == nil {
+			succeeded++
+		} else {
+			rejected++
+		}
+	}
+	if succeeded != 1 || rejected != 1 {
+		t.Fatalf("registration outcomes: succeeded=%d rejected=%d", succeeded, rejected)
+	}
+
+	runtime.indexMu.Lock()
+	index := cloneRuntimeProjectIndex(runtime.index)
+	runtime.indexMu.Unlock()
+	if err := validateRuntimeProjectIndex(index); err != nil {
+		t.Fatalf("invalid committed index: %v", err)
+	}
+	if len(index.Projects) != 1 {
+		t.Fatalf("committed index has %d projects, want 1", len(index.Projects))
+	}
+	var visible int
+	for _, project := range projects {
+		if runtime.projectRuntime(project.ID) != nil {
+			visible++
+		}
+	}
+	if visible != 1 {
+		t.Fatalf("runtime-visible canonical owners=%d, want 1", visible)
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "project-runtime"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectPartitions int
+	for _, entry := range entries {
+		if entry.IsDir() {
+			projectPartitions++
+		}
+	}
+	if projectPartitions != 1 {
+		t.Fatalf("runtime project partitions=%d, want 1", projectPartitions)
+	}
+}
+
 func TestProcessRuntimeProjectRegistrationCrashRecovery(t *testing.T) {
 	for _, point := range []processPersistenceFailpoint{
 		processPersistAfterIndexInitializing,

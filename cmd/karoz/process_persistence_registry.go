@@ -32,17 +32,29 @@ func (runtime *processRuntimePersistence) RegisterProject(project Project) error
 		}
 		return errors.New("runtime project is disabled and requires bootstrap recovery")
 	}
+	for _, existing := range runtime.index.Projects {
+		if existing.Project.CanonicalProjectPath == identity.CanonicalProjectPath &&
+			existing.Project.ProjectID != identity.ProjectID {
+			runtime.indexMu.Unlock()
+			return errors.New("runtime project canonical path is already registered")
+		}
+	}
 	entry = runtimeProjectIndexEntry{
 		Project: identity, State: "initializing", Generation: 1,
 	}
-	runtime.index.Projects[identity.SafeProjectKey] = entry
-	if err := runtime.store.saveJSON(
-		filepath.Join("project-runtime", "index.json"), runtime.index,
-	); err != nil {
-		delete(runtime.index.Projects, identity.SafeProjectKey)
+	candidate := cloneRuntimeProjectIndex(runtime.index)
+	candidate.Projects[identity.SafeProjectKey] = entry
+	if err := validateRuntimeProjectIndex(candidate); err != nil {
 		runtime.indexMu.Unlock()
 		return err
 	}
+	if err := runtime.store.saveJSON(
+		filepath.Join("project-runtime", "index.json"), candidate,
+	); err != nil {
+		runtime.indexMu.Unlock()
+		return err
+	}
+	runtime.index = candidate
 	runtime.indexMu.Unlock()
 	if err := runtime.persistenceFail(processPersistAfterIndexInitializing); err != nil {
 		return err
@@ -100,6 +112,17 @@ func (runtime *processRuntimePersistence) RegisterProject(project Project) error
 	delete(runtime.disabledKeys, identity.SafeProjectKey)
 	runtime.healthMu.Unlock()
 	return nil
+}
+
+func cloneRuntimeProjectIndex(index runtimeProjectIndex) runtimeProjectIndex {
+	cloned := runtimeProjectIndex{
+		SchemaVersion: index.SchemaVersion,
+		Projects:      make(map[string]runtimeProjectIndexEntry, len(index.Projects)),
+	}
+	for key, entry := range index.Projects {
+		cloned.Projects[key] = entry
+	}
+	return cloned
 }
 
 func (runtime *processRuntimePersistence) ProjectError(projectID string) error {
