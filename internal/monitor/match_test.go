@@ -14,7 +14,9 @@ func TestTriggerMatching(t *testing.T) {
 		},
 	}
 	event := Event{
-		ProjectID: "project-1", Kind: "task_changed", EntityID: "task-1",
+		ID: "task/task-1/1", ProjectID: "project-1",
+		AuthorityID: "task-store", AuthorityGeneration: 1,
+		Kind: "task_changed", EntityID: "task-1",
 		Origin: Origin{Kind: "runtime"}, Payload: json.RawMessage(`{"from":"running","to":"done"}`),
 	}
 	if matched, _ := MatchEvent(runtimeMonitor, event); !matched {
@@ -59,7 +61,9 @@ func TestMonitorOriginGuards(t *testing.T) {
 		Trigger: Trigger{Kind: TriggerRuntimeEvent, EventKinds: []string{"task_changed"}},
 	}
 	event := Event{
-		ProjectID: "project-1", Kind: "task_changed",
+		ID: "task/task-1/1", ProjectID: "project-1",
+		AuthorityID: "task-store", AuthorityGeneration: 1,
+		Kind: "task_changed", EntityID: "task-1",
 		Origin: Origin{Kind: "monitor", MonitorID: "monitor-2", FireID: "fire-2"},
 	}
 	if matched, _ := MatchEvent(item, event); matched {

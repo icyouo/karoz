@@ -26,7 +26,7 @@ func MatchEvent(item Monitor, event Event) (bool, string) {
 	if item.Trigger.Kind != TriggerRuntimeEvent || len(item.Trigger.EventKinds) == 0 {
 		return false, ""
 	}
-	if event.ProjectID != item.ProjectID || !matchOrigin(item, event.Origin) {
+	if event.Validate() != nil || event.ProjectID != item.ProjectID || !matchOrigin(item, event.Origin) {
 		return false, ""
 	}
 	if item.Trigger.EntityID != "" && item.Trigger.EntityID != event.EntityID {

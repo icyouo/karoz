@@ -161,8 +161,9 @@ func (origin Origin) Validate() error {
 
 func (event Event) Validate() error {
 	if strings.TrimSpace(event.ID) == "" || strings.TrimSpace(event.ProjectID) == "" ||
+		strings.TrimSpace(event.AuthorityID) == "" ||
 		strings.TrimSpace(event.Kind) == "" || strings.TrimSpace(event.EntityID) == "" ||
-		event.SourceVersion == 0 {
+		event.AuthorityGeneration == 0 {
 		return errors.New("event identity is incomplete")
 	}
 	if err := event.Origin.Validate(); err != nil {
@@ -175,14 +176,15 @@ func (event Event) Validate() error {
 }
 
 type Event struct {
-	ID            string          `json:"id"`
-	SourceVersion uint64          `json:"source_version"`
-	ProjectID     string          `json:"project_id"`
-	Kind          string          `json:"kind"`
-	EntityID      string          `json:"entity_id"`
-	Origin        Origin          `json:"origin"`
-	At            time.Time       `json:"at"`
-	Payload       json.RawMessage `json:"payload,omitempty"`
+	ID                  string          `json:"id"`
+	ProjectID           string          `json:"project_id"`
+	AuthorityID         string          `json:"authority_id"`
+	AuthorityGeneration uint64          `json:"authority_generation"`
+	Kind                string          `json:"kind"`
+	EntityID            string          `json:"entity_id"`
+	Origin              Origin          `json:"origin"`
+	At                  time.Time       `json:"at"`
+	Payload             json.RawMessage `json:"payload,omitempty"`
 }
 
 type FrozenAction struct {

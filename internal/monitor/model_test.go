@@ -36,7 +36,8 @@ func TestOriginValidationAndJSON(t *testing.T) {
 
 func TestEventIdentityValidationAndDeterministicJSON(t *testing.T) {
 	event := Event{
-		ID: "task/task-1/7", SourceVersion: 7, ProjectID: "project-1",
+		ID: "task/task-1/7", ProjectID: "project-1",
+		AuthorityID: "task-store", AuthorityGeneration: 7,
 		Kind: "task_changed", EntityID: "task-1", Origin: Origin{Kind: "runtime"},
 		At:      time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC),
 		Payload: json.RawMessage(`{"from":"running","to":"done"}`),
