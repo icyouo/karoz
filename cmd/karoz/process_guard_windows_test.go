@@ -51,7 +51,9 @@ func TestWindowsJobOwnerHelper(t *testing.T) {
 		_ = boundary.Close()
 		os.Exit(6)
 	}
-	select {}
+	for {
+		time.Sleep(time.Second)
+	}
 }
 
 func TestWindowsDescendantParentHelper(t *testing.T) {
