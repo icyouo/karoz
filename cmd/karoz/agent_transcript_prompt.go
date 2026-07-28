@@ -122,6 +122,43 @@ func compactTranscriptForModelContext(items []AgentTranscriptItem, maxItems, max
 	return out
 }
 
+func boundedProviderTranscript(items []AgentTranscriptItem, currentRunID, userText string) []AgentTranscriptItem {
+	filtered := make([]AgentTranscriptItem, 0, len(items))
+	for _, item := range items {
+		if currentRunID != "" && item.RunID == currentRunID {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	if currentRunID == "" {
+		for i := len(filtered) - 1; i >= 0; i-- {
+			if strings.EqualFold(filtered[i].Role, "user") && strings.TrimSpace(filtered[i].Body) == strings.TrimSpace(userText) {
+				filtered = append(filtered[:i], filtered[i+1:]...)
+				break
+			}
+		}
+	}
+	var reversed []AgentTranscriptItem
+	used := 0
+	for i := len(filtered) - 1; i >= 0; i-- {
+		item := filtered[i]
+		cost := utf8.RuneCountInString(promptAgentTranscriptBody(item))
+		if len(reversed) > 0 && used+cost > residentTranscriptPromptMaxChars {
+			break
+		}
+		reversed = append(reversed, item)
+		used += cost
+		if len(reversed) >= residentTranscriptPromptMaxItems {
+			break
+		}
+	}
+	out := make([]AgentTranscriptItem, len(reversed))
+	for i := range reversed {
+		out[len(reversed)-1-i] = reversed[i]
+	}
+	return out
+}
+
 func contextMessageFromTranscript(item AgentTranscriptItem) AgentContextMessage {
 	return AgentContextMessage{
 		ID:     limitString(item.ID, residentContextIDMaxChars),

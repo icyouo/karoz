@@ -76,7 +76,7 @@ func (a *app) invokeCLI2APIStream(ctx context.Context, req CLI2APIRequest, toolC
 	if provider == "codex-direct" || provider == "codex-oauth" || provider == "codex-api" {
 		toolCtx.Workdir = workdir
 		tools := a.residentToolContractForProvider(ctx, toolCtx, provider)
-		return invokeCodexDirectStreamWithBudget(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, budget, func(toolCallCtx context.Context, call codexToolCall) (string, error) {
+		return invokeCodexDirectStreamWithBudget(ctx, workdir, prompt, req.Model, req.ThinkingEffort, req.Transcript, tools, callbacks, budget, func(toolCallCtx context.Context, call codexToolCall) (string, error) {
 			return a.executeResidentTool(toolCallCtx, toolCtx, call)
 		})
 	}
@@ -88,7 +88,7 @@ func (a *app) invokeCLI2APIStream(ctx context.Context, req CLI2APIRequest, toolC
 				return a.executeResidentTool(toolCallCtx, toolCtx, call)
 			})
 		}
-		return invokeClaudeDirectStreamWithBudget(ctx, workdir, prompt, req.Model, req.ThinkingEffort, tools, callbacks, budget, func(toolCallCtx context.Context, call codexToolCall) (string, error) {
+		return invokeClaudeDirectStreamWithBudget(ctx, workdir, prompt, req.Model, req.ThinkingEffort, req.Transcript, tools, callbacks, budget, func(toolCallCtx context.Context, call codexToolCall) (string, error) {
 			return a.executeResidentTool(toolCallCtx, toolCtx, call)
 		})
 	}

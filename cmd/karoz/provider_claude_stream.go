@@ -27,13 +27,13 @@ type claudeToolAccumulator struct {
 }
 
 func invokeClaudeDirectStream(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
-	return invokeClaudeDirectStreamWithBudget(ctx, workdir, prompt, model, effort, tools, callbacks, residentTurnBudgetFor("ask"), func(_ context.Context, call codexToolCall) (string, error) {
+	return invokeClaudeDirectStreamWithBudget(ctx, workdir, prompt, model, effort, nil, tools, callbacks, residentTurnBudgetFor("ask"), func(_ context.Context, call codexToolCall) (string, error) {
 		return executeTool(call)
 	})
 }
 
-func invokeClaudeDirectStreamWithBudget(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, executeTool residentToolExecutor) error {
-	return invokeResidentToolLoop(ctx, newClaudeStreamWire(workdir, prompt, model, effort), tools, callbacks, budget, executeTool)
+func invokeClaudeDirectStreamWithBudget(ctx context.Context, workdir, prompt, model, effort string, transcript []AgentTranscriptItem, tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, executeTool residentToolExecutor) error {
+	return invokeResidentToolLoop(ctx, newClaudeStreamWire(workdir, prompt, model, effort, transcript), tools, callbacks, budget, executeTool)
 }
 
 // claudeStreamWire adapts the Claude messages SSE protocol to the shared
@@ -46,12 +46,39 @@ type claudeStreamWire struct {
 	results  []map[string]any
 }
 
-func newClaudeStreamWire(workdir, prompt, model, effort string) *claudeStreamWire {
+func newClaudeStreamWire(workdir, prompt, model, effort string, transcript []AgentTranscriptItem) *claudeStreamWire {
+	messages := claudeTranscriptMessages(transcript)
+	messages = append(messages, map[string]any{"role": "user", "content": prompt + "\n\nProject workspace: " + workdir})
 	return &claudeStreamWire{
-		messages: []map[string]any{{"role": "user", "content": prompt + "\n\nProject workspace: " + workdir}},
+		messages: messages,
 		model:    model,
 		effort:   effort,
 	}
+}
+
+func claudeTranscriptMessages(items []AgentTranscriptItem) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for i := 0; i < len(items); i++ {
+		item := items[i]
+		if i+1 < len(items) && transcriptToolPair(item, items[i+1]) {
+			var input any = map[string]any{}
+			if strings.TrimSpace(item.ToolArguments) != "" {
+				_ = json.Unmarshal([]byte(item.ToolArguments), &input)
+			}
+			out = append(out,
+				map[string]any{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": item.ToolCallID, "name": item.ToolName, "input": input}}},
+				map[string]any{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": item.ToolCallID, "content": firstNonEmpty(items[i+1].ToolResult, items[i+1].Body), "is_error": items[i+1].ToolSuccess != nil && !*items[i+1].ToolSuccess}}},
+			)
+			i++
+			continue
+		}
+		role := transcriptTextRole(item)
+		if role == "system" {
+			role = "user"
+		}
+		out = append(out, map[string]any{"role": role, "content": promptAgentTranscriptBody(item)})
+	}
+	return out
 }
 
 func (w *claudeStreamWire) step(ctx context.Context, tools []map[string]any, callbacks AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {

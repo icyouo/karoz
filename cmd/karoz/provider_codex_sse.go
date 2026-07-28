@@ -174,6 +174,23 @@ func codexSSEToolCall(payload []byte) (codexToolCall, bool) {
 	}, strings.TrimSpace(event.Item.Name) != ""
 }
 
+func codexSSEReasoningItem(payload []byte) (map[string]any, bool) {
+	var event struct {
+		Type string         `json:"type"`
+		Item map[string]any `json:"item"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return nil, false
+	}
+	if event.Type != "response.output_item.done" && event.Type != "item.completed" {
+		return nil, false
+	}
+	if itemType, _ := event.Item["type"].(string); itemType != "reasoning" {
+		return nil, false
+	}
+	return event.Item, true
+}
+
 func decodeRawJSONText(raw json.RawMessage) string {
 	text := strings.TrimSpace(string(raw))
 	if text == "" || text == "null" {

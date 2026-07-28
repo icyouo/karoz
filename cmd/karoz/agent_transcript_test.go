@@ -110,15 +110,13 @@ func TestStructuredTranscriptPairsToolEventsAcrossTheNextTurn(t *testing.T) {
 	}
 
 	prompt := a.buildResidentAgentPrompt(project, agent, "What did the search find?", "ask")
-	for _, fragment := range []string{
-		"### Recent structured resident transcript",
-		"tool_call id=call-checkout name=repo_search",
-		"tool_result call_id=call-checkout name=repo_search success=true",
-		"What did the search find?",
-	} {
-		if !strings.Contains(prompt, fragment) {
-			t.Fatalf("structured next-turn prompt missing %q:\n%s", fragment, prompt)
-		}
+	if strings.Contains(prompt, "### Recent structured resident transcript") || strings.Contains(prompt, "tool_call id=call-checkout") {
+		t.Fatalf("provider-native history was duplicated into prompt prose:\n%s", prompt)
+	}
+	history := boundedProviderTranscript(a.agentTranscriptDeltaForModel(project.ID, agent.ID), "", "What did the search find?")
+	input := codexTranscriptInput(history)
+	if len(input) < 4 || input[1]["type"] != "function_call" || input[2]["type"] != "function_call_output" {
+		t.Fatalf("structured next-turn provider history = %#v", input)
 	}
 }
 
@@ -206,9 +204,17 @@ func TestScheduledPlanTranscriptPersistsInputBeforeToolsAndSurvivesReload(t *tes
 		t.Fatalf("scheduled final transcript=%+v", final)
 	}
 	nextPrompt := reloaded.buildResidentAgentPrompt(project, agent, "What plan event was processed?", "ask")
-	for _, fragment := range []string{"[plan event] event=task_terminal", "Current WorkPlan", `"title":"Preserve scheduled context"`, "tool_call id=scheduled-tool", "Plan event processed."} {
-		if !strings.Contains(nextPrompt, fragment) {
-			t.Fatalf("next prompt lost scheduled plan context %q:\n%s", fragment, nextPrompt)
+	if strings.Contains(nextPrompt, "tool_call id=scheduled-tool") {
+		t.Fatalf("scheduled provider history was duplicated into prompt prose:\n%s", nextPrompt)
+	}
+	history := boundedProviderTranscript(reloaded.agentTranscriptDeltaForModel(project.ID, agent.ID), "", "What plan event was processed?")
+	wireJSON, err := json.Marshal(codexTranscriptInput(history))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"[plan event] event=task_terminal", "Current WorkPlan", "Preserve scheduled context", `"call_id":"scheduled-tool"`, "Plan event processed."} {
+		if !strings.Contains(string(wireJSON), fragment) {
+			t.Fatalf("next provider history lost scheduled plan context %q:\n%s", fragment, wireJSON)
 		}
 	}
 }

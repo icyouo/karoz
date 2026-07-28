@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 func (a *app) createMemory(projectID, agentID, layer string, args map[string]any, priority int, metadata map[string]any) (string, error) {
@@ -86,14 +87,14 @@ func (a *app) searchArchive(projectID, agentID, query string, limit int) string 
 	memories := append([]AgentMemoryEntry{}, a.memories[key]...)
 	archives := append([]AgentArchiveMessage{}, a.archives[key]...)
 	a.mu.Unlock()
-	terms := strings.Fields(query)
+	lexicalQuery := newMemoryLexicalQuery(query)
 	type memoryMatch struct {
 		entry AgentMemoryEntry
 		score int
 	}
 	var matchedMemories []memoryMatch
 	for _, entry := range memories {
-		if score := memoryMatchScore(query, terms, entry.Summary+"\n"+entry.Detail); score > 0 {
+		if score := memoryMatchScore(lexicalQuery, entry.Summary+"\n"+entry.Detail); score > 0 {
 			matchedMemories = append(matchedMemories, memoryMatch{entry: entry, score: score})
 		}
 	}
@@ -122,7 +123,7 @@ func (a *app) searchArchive(projectID, agentID, query string, limit int) string 
 		if msg.Role == "tool_call" || msg.Role == "tool_result" {
 			continue
 		}
-		if score := memoryMatchScore(query, terms, msg.Body); score > 0 {
+		if score := memoryMatchScore(lexicalQuery, msg.Body); score > 0 {
 			matchedMessages = append(matchedMessages, messageMatch{message: msg, score: score})
 		}
 	}
@@ -143,24 +144,82 @@ func (a *app) searchArchive(projectID, agentID, query string, limit int) string 
 	return toolJSON(map[string]any{"memory_entries": memoryResults, "messages": messageResults})
 }
 
-// memoryMatchScore scores text against a lowercased query and its terms. A
-// full-phrase containment scores above any per-term match so exact phrase
-// matches sort first.
-func memoryMatchScore(query string, terms []string, text string) int {
+type memoryLexicalQuery struct {
+	phrase     string
+	asciiTerms []string
+	cjkBigrams []string
+}
+
+func newMemoryLexicalQuery(query string) memoryLexicalQuery {
+	query = strings.ToLower(strings.TrimSpace(query))
+	result := memoryLexicalQuery{phrase: query}
+	var asciiRun, cjkRun []rune
+	seenASCII := map[string]bool{}
+	seenCJK := map[string]bool{}
+	flushASCII := func() {
+		term := string(asciiRun)
+		asciiRun = asciiRun[:0]
+		if len([]rune(term)) >= 2 && !seenASCII[term] {
+			seenASCII[term] = true
+			result.asciiTerms = append(result.asciiTerms, term)
+		}
+	}
+	flushCJK := func() {
+		for i := 0; i+1 < len(cjkRun); i++ {
+			term := string(cjkRun[i : i+2])
+			if !seenCJK[term] {
+				seenCJK[term] = true
+				result.cjkBigrams = append(result.cjkBigrams, term)
+			}
+		}
+		cjkRun = cjkRun[:0]
+	}
+	for _, r := range []rune(query) {
+		switch {
+		case isMemoryCJKRune(r):
+			flushASCII()
+			cjkRun = append(cjkRun, r)
+		case unicode.IsLetter(r) || unicode.IsNumber(r):
+			flushCJK()
+			asciiRun = append(asciiRun, r)
+		default:
+			flushASCII()
+			flushCJK()
+		}
+	}
+	flushASCII()
+	flushCJK()
+	return result
+}
+
+func isMemoryCJKRune(r rune) bool {
+	return unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul)
+}
+
+// memoryMatchScore gives exact phrase matches the highest priority, preserves
+// whole ASCII term behavior, and uses overlapping CJK bigrams only when at
+// least two fragments and 20% of the query fragments match.
+func memoryMatchScore(query memoryLexicalQuery, text string) int {
 	text = strings.ToLower(text)
-	if strings.Contains(text, query) {
-		return len(terms) + 4
+	if query.phrase != "" && strings.Contains(text, query.phrase) {
+		return 10000 + len(query.asciiTerms)*100 + len(query.cjkBigrams)
 	}
-	score := 0
-	for _, term := range terms {
-		if len([]rune(term)) < 2 {
-			continue
-		}
+	asciiMatches := 0
+	for _, term := range query.asciiTerms {
 		if strings.Contains(text, term) {
-			score++
+			asciiMatches++
 		}
 	}
-	return score
+	cjkMatches := 0
+	for _, term := range query.cjkBigrams {
+		if strings.Contains(text, term) {
+			cjkMatches++
+		}
+	}
+	if cjkMatches < 2 || cjkMatches*5 < len(query.cjkBigrams) {
+		cjkMatches = 0
+	}
+	return asciiMatches*100 + cjkMatches
 }
 
 // relevantMemoriesFor returns the agent's active fact/decision/done memories
@@ -172,7 +231,7 @@ func (a *app) relevantMemoriesFor(projectID, agentID, query string, limit int) [
 	if query == "" || limit <= 0 {
 		return []AgentMemoryEntry{}
 	}
-	terms := strings.Fields(query)
+	lexicalQuery := newMemoryLexicalQuery(query)
 	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
 	memories := append([]AgentMemoryEntry{}, a.memories[key]...)
@@ -191,7 +250,7 @@ func (a *app) relevantMemoriesFor(projectID, agentID, query string, limit int) [
 		default:
 			continue
 		}
-		if score := memoryMatchScore(query, terms, entry.Summary+"\n"+entry.Detail); score >= 1 {
+		if score := memoryMatchScore(lexicalQuery, entry.Summary+"\n"+entry.Detail); score >= 1 {
 			matched = append(matched, memoryMatch{entry: entry, score: score})
 		}
 	}

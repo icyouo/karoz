@@ -39,13 +39,13 @@ func invokeCodexDirect(ctx context.Context, workdir, prompt string) (CLI2APIResp
 }
 
 func invokeCodexDirectStream(ctx context.Context, workdir, prompt, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
-	return invokeCodexDirectStreamWithBudget(ctx, workdir, prompt, model, thinkingEffort, tools, callbacks, residentTurnBudgetFor("ask"), func(_ context.Context, call codexToolCall) (string, error) {
+	return invokeCodexDirectStreamWithBudget(ctx, workdir, prompt, model, thinkingEffort, nil, tools, callbacks, residentTurnBudgetFor("ask"), func(_ context.Context, call codexToolCall) (string, error) {
 		return executeTool(call)
 	})
 }
 
-func invokeCodexDirectStreamWithBudget(ctx context.Context, workdir, prompt, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, executeTool residentToolExecutor) error {
-	return invokeResidentToolLoop(ctx, newCodexStreamWire(workdir, prompt, model, thinkingEffort), tools, callbacks, budget, executeTool)
+func invokeCodexDirectStreamWithBudget(ctx context.Context, workdir, prompt, model, thinkingEffort string, transcript []AgentTranscriptItem, tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, executeTool residentToolExecutor) error {
+	return invokeResidentToolLoop(ctx, newCodexStreamWire(workdir, prompt, model, thinkingEffort, transcript), tools, callbacks, budget, executeTool)
 }
 
 // codexStreamWire adapts the Codex responses SSE protocol to the shared
@@ -56,20 +56,60 @@ type codexStreamWire struct {
 	thinkingEffort string
 }
 
-func newCodexStreamWire(workdir, prompt, model, thinkingEffort string) *codexStreamWire {
+func newCodexStreamWire(workdir, prompt, model, thinkingEffort string, transcript []AgentTranscriptItem) *codexStreamWire {
+	input := codexTranscriptInput(transcript)
+	input = append(input, codexMessage("user", prompt+"\n\nProject workspace: "+workdir))
 	return &codexStreamWire{
-		input:          []map[string]any{codexMessage("user", prompt+"\n\nProject workspace: "+workdir)},
+		input:          input,
 		model:          model,
 		thinkingEffort: thinkingEffort,
 	}
 }
 
-func (w *codexStreamWire) step(ctx context.Context, tools []map[string]any, callbacks AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {
-	streamed, interrupts, err := streamCodexStep(ctx, w.input, w.model, w.thinkingEffort, tools, callbacks)
-	return residentStepOutput{Text: streamed.Text, ToolCalls: streamed.ToolCalls}, interrupts, err
+func codexTranscriptInput(items []AgentTranscriptItem) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for i := 0; i < len(items); i++ {
+		item := items[i]
+		if i+1 < len(items) && transcriptToolPair(item, items[i+1]) {
+			out = append(out, codexFunctionCallItem(codexToolCall{
+				ID: item.ToolCallID, CallID: item.ToolCallID, Name: item.ToolName, Arguments: item.ToolArguments,
+			}))
+			result := firstNonEmpty(items[i+1].ToolResult, items[i+1].Body)
+			out = append(out, map[string]any{"type": "function_call_output", "call_id": item.ToolCallID, "output": result})
+			i++
+			continue
+		}
+		out = append(out, codexMessage(transcriptTextRole(item), promptAgentTranscriptBody(item)))
+	}
+	return out
 }
 
-func (w *codexStreamWire) appendAssistantTurn(residentStepOutput) {}
+func transcriptToolPair(call, result AgentTranscriptItem) bool {
+	return firstNonEmpty(call.Kind, transcriptKindForMessage(call.Role, call.Intent)) == "tool_call" &&
+		firstNonEmpty(result.Kind, transcriptKindForMessage(result.Role, result.Intent)) == "tool_result" &&
+		strings.TrimSpace(call.ToolCallID) != "" && call.ToolCallID == result.ToolCallID &&
+		strings.TrimSpace(call.ToolName) != ""
+}
+
+func transcriptTextRole(item AgentTranscriptItem) string {
+	switch strings.ToLower(strings.TrimSpace(item.Role)) {
+	case "assistant":
+		return "assistant"
+	case "user":
+		return "user"
+	default:
+		return "system"
+	}
+}
+
+func (w *codexStreamWire) step(ctx context.Context, tools []map[string]any, callbacks AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {
+	streamed, interrupts, err := streamCodexStep(ctx, w.input, w.model, w.thinkingEffort, tools, callbacks)
+	return residentStepOutput{Text: streamed.Text, ToolCalls: streamed.ToolCalls, ReasoningItems: streamed.ReasoningItems}, interrupts, err
+}
+
+func (w *codexStreamWire) appendAssistantTurn(streamed residentStepOutput) {
+	w.input = append(w.input, streamed.ReasoningItems...)
+}
 
 func (w *codexStreamWire) appendInterruptTurn(streamed residentStepOutput, interrupts []AgentInterrupt) {
 	if strings.TrimSpace(streamed.Text) != "" {
@@ -140,8 +180,9 @@ func compactCodexInputForFinal(input []map[string]any, maxChars int) []map[strin
 }
 
 type codexStreamResult struct {
-	ToolCalls []codexToolCall
-	Text      string
+	ToolCalls      []codexToolCall
+	ReasoningItems []map[string]any
+	Text           string
 }
 
 func streamCodexStep(ctx context.Context, input []map[string]any, model, thinkingEffort string, tools []map[string]any, callbacks AgentStreamCallbacks) (codexStreamResult, []AgentInterrupt, error) {
@@ -239,6 +280,7 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) (codexStre
 		return codexStreamResult{}, fmt.Errorf("codex direct status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	var toolCalls []codexToolCall
+	var reasoningItems []map[string]any
 	var streamed strings.Builder
 	var finalText string
 	scanner := bufio.NewScanner(resp.Body)
@@ -267,9 +309,12 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) (codexStre
 		if call, ok := codexSSEToolCall([]byte(payload)); ok {
 			toolCalls = append(toolCalls, call)
 		}
+		if item, ok := codexSSEReasoningItem([]byte(payload)); ok {
+			reasoningItems = append(reasoningItems, item)
+		}
 	}
 	if err := scanner.Err(); err != nil {
-		return codexStreamResult{ToolCalls: toolCalls, Text: streamed.String()}, err
+		return codexStreamResult{ToolCalls: toolCalls, ReasoningItems: reasoningItems, Text: streamed.String()}, err
 	}
 	if streamed.Len() == 0 && strings.TrimSpace(finalText) != "" && onDelta != nil {
 		onDelta(finalText)
@@ -278,5 +323,5 @@ func streamCodexResponse(httpReq *http.Request, onDelta func(string)) (codexStre
 	if strings.TrimSpace(text) == "" {
 		text = finalText
 	}
-	return codexStreamResult{ToolCalls: toolCalls, Text: text}, nil
+	return codexStreamResult{ToolCalls: toolCalls, ReasoningItems: reasoningItems, Text: text}, nil
 }

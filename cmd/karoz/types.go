@@ -177,12 +177,13 @@ type AgentUpdateRequest struct {
 }
 
 type CLI2APIRequest struct {
-	Provider       string `json:"provider"`
-	Model          string `json:"model,omitempty"`
-	ThinkingEffort string `json:"thinking_effort,omitempty"`
-	Prompt         string `json:"prompt"`
-	Workdir        string `json:"workdir,omitempty"`
-	Mode           string `json:"mode,omitempty"`
+	Provider       string                `json:"provider"`
+	Model          string                `json:"model,omitempty"`
+	ThinkingEffort string                `json:"thinking_effort,omitempty"`
+	Prompt         string                `json:"prompt"`
+	Workdir        string                `json:"workdir,omitempty"`
+	Mode           string                `json:"mode,omitempty"`
+	Transcript     []AgentTranscriptItem `json:"-"`
 }
 
 type CLI2APIResponse struct {

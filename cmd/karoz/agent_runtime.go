@@ -84,6 +84,7 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 		Prompt:         prompt,
 		Workdir:        project.Path,
 		Mode:           chatTurnRuntimeMode(turnType),
+		Transcript:     boundedProviderTranscript(a.agentTranscriptDeltaForModel(project.ID, agent.ID), runID, userText),
 	}
 	provider := a.residentModelProvider()
 	if capabilities := provider.Capabilities(request); !capabilities.SupportsResidentRuntime() {

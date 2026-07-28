@@ -25,7 +25,6 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 	delta := a.agentTranscriptDeltaForModel(project.ID, agentID)
 	var b strings.Builder
 	b.WriteString("## Session mode: Resident agent\n")
-	b.WriteString("## Current chat turn type: " + turnType + "\n")
 	b.WriteString("- You are a project resident agent. Keep continuity across turns and work from durable project context, not just the latest message.\n")
 	b.WriteString("- Treat the visible conversation as the short-term window. Earlier full messages are archived; use memory/archive tools by id, sequence range, or query when details are needed.\n")
 	b.WriteString("- When important facts, decisions, completed work, or pending work appear, preserve them through resident memory tools.\n")
@@ -55,6 +54,9 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 		b.WriteString("- For multi-agent product/design/architecture coordination, send concise requests to the responsible agents and tell the user which agents were queued. Use the visible Resident teammates list as the routing source.\n")
 		b.WriteString("- Do not infer Karoz resident template IDs from repository files; the list_agent_templates tool is authoritative.\n\n")
 	}
+	a.renderProviderNeutralToolContract(&b)
+	stablePrefixChars := b.Len()
+	b.WriteString("## Current chat turn type: " + turnType + "\n")
 	switch turnType {
 	case "ask":
 		b.WriteString("### Turn contract: ask\n")
@@ -75,7 +77,6 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 		b.WriteString("- You may inspect the repo, create bug/feature/deploy tasks, and use tools needed to advance implementation.\n")
 		b.WriteString("- Prefer creating a task for coding/deployment execution rather than pretending long-running work happened inside the chat turn.\n\n")
 	}
-	a.renderProviderNeutralToolContract(&b, project, agent, turnType)
 	b.WriteString("### Current project\n")
 	b.WriteString("- name: " + project.Name + "\n")
 	b.WriteString("- path: " + project.Path + "\n")
@@ -135,7 +136,6 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 	if residentAgentIsBuilder(agent) {
 		b.WriteString(residentBuilderAgentPrompt())
 	}
-	stablePrefixChars := b.Len()
 	if peers := a.projectAgents(project); len(peers) > 1 {
 		b.WriteString("\n### Resident teammates (address by unique nickname)\n")
 		shown := 0
@@ -259,31 +259,16 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 		b.WriteString("\n\nEarlier full messages are archived. Use search_archive or get_messages for exact details.")
 		b.WriteString("\n")
 	}
-	transcriptSection := ""
-	if len(delta) > 0 {
-		var section strings.Builder
-		section.WriteString("\n### Recent structured resident transcript\n")
-		for _, line := range renderAgentTranscriptDelta(delta, residentTranscriptPromptMaxItems, residentTranscriptPromptMaxChars) {
-			section.WriteString(strings.ToUpper(line.Role))
-			section.WriteString(": ")
-			section.WriteString(line.Body)
-			section.WriteString("\n")
-		}
-		transcriptSection = section.String()
-		b.WriteString(transcriptSection)
-	}
-	if !transcriptContainsUserText(delta, userText) {
-		b.WriteString("\n### Current runtime instruction\n")
-		b.WriteString(limitString(userText, residentTranscriptMessageMaxChars))
-		b.WriteString("\n")
-	}
+	b.WriteString("\n### Current runtime instruction\n")
+	b.WriteString(limitString(userText, residentTranscriptMessageMaxChars))
+	b.WriteString("\n")
 	prompt := b.String()
 	totalTokens := estimateResidentContextTextTokens(prompt)
 	if stablePrefixChars > len(prompt) {
 		stablePrefixChars = len(prompt)
 	}
 	stableTokens := estimateResidentContextTextTokens(prompt[:stablePrefixChars])
-	transcriptTokens := estimateResidentContextTextTokens(transcriptSection)
+	transcriptTokens := estimateModelBoundTranscriptTokens(delta)
 	dynamicTokens := totalTokens - stableTokens - transcriptTokens
 	if dynamicTokens < 0 {
 		dynamicTokens = 0
@@ -292,30 +277,13 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 	return prompt
 }
 
-func (a *app) renderProviderNeutralToolContract(b *strings.Builder, project Project, agent Agent, turnType string) {
+func (a *app) renderProviderNeutralToolContract(b *strings.Builder) {
 	if b == nil {
 		return
 	}
-	toolCtx := ResidentToolContext{Project: project, Agent: agent, Workdir: project.Path, TurnType: turnType, EnforcePolicy: true}
-	specs := append(residentToolSpecs(), residentPlanToolSpecs()...)
-	if capabilitiesForAgent(agent).CanManageAgents {
-		specs = append(specs, residentAgentManagementToolSpecs()...)
-	}
-	names := make([]string, 0, len(specs))
-	for _, spec := range specs {
-		if name := strings.TrimSpace(toolNameFromSpec(spec)); name != "" && residentToolAllowed(toolCtx, name) {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
 	b.WriteString("### Provider-neutral tool contract\n")
-	b.WriteString("- The runtime exposes the same allowed tool surface to every supported provider and enforces authorization at execution time.\n")
-	b.WriteString("- allowed_tools: ")
-	b.WriteString(limitString(strings.Join(names, ", "), 1800))
-	if residentDynamicToolsAllowed(toolCtx) {
-		b.WriteString("; dynamic MCP tools may be appended by the runtime in dev mode")
-	}
-	b.WriteString("\n\n")
+	b.WriteString("- Provider tool schemas are authoritative for availability and arguments; use a tool only when its schema is present.\n")
+	b.WriteString("- The runtime enforces authorization and turn scope at execution time. Ground every claimed action in the returned result and never invent success.\n\n")
 }
 
 func transcriptContainsUserText(items []AgentTranscriptItem, userText string) bool {
