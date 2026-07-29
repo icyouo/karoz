@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -37,6 +38,7 @@ func TestProcessReleaseChildServer(t *testing.T) {
 	fmt.Printf("server=http://%s\n", listener.Addr().String())
 	time.Sleep(200 * time.Millisecond)
 	fmt.Println("delayed-line API_TOKEN=child-secret")
+	fmt.Println("Authorization: Bearer prompt-bearer-secret")
 	time.Sleep(600 * time.Millisecond)
 	_ = server.Close()
 }
@@ -265,6 +267,7 @@ func TestBackgroundProcessOutlivesRunCreatorAndSSERequest(t *testing.T) {
 	_ = finalLog.Body.Close()
 	if !strings.Contains(string(finalLogBody), "delayed-line") ||
 		strings.Contains(string(finalLogBody), "child-secret") ||
+		strings.Contains(string(finalLogBody), "prompt-bearer-secret") ||
 		!strings.Contains(string(finalLogBody), "[REDACTED]") {
 		t.Fatalf("terminal log contract failed: %s", finalLogBody)
 	}
@@ -279,6 +282,7 @@ func TestBackgroundProcessOutlivesRunCreatorAndSSERequest(t *testing.T) {
 	if !strings.Contains(prompt, processID) ||
 		strings.Contains(prompt, command) ||
 		strings.Contains(prompt, "child-secret") ||
+		strings.Contains(prompt, "prompt-bearer-secret") ||
 		strings.Contains(prompt, "canonical_workdir") {
 		t.Fatalf("prompt process observation leaked or omitted data: %s", prompt)
 	}
@@ -468,4 +472,398 @@ func TestRunBackgroundApprovalSeparationAndInstantExit(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("instant process did not reach a terminal snapshot: %+v", payload.Process)
+}
+
+type backgroundProcessTestFixture struct {
+	app          *app
+	project      Project
+	agent        Agent
+	projectsRoot string
+	dataDir      string
+}
+
+func newBackgroundProcessTestFixture(t *testing.T) backgroundProcessTestFixture {
+	t.Helper()
+	projectsRoot := t.TempDir()
+	projectPath := filepath.Join(projectsRoot, "project")
+	if err := os.MkdirAll(filepath.Join(projectPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	project := projectFromPath(projectPath, projectsRoot, "main")
+	dataDir := t.TempDir()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: projectsRoot})
+	agent := Agent{
+		ID: "owner", ProjectID: project.ID, Name: "owner", Nickname: "Owner",
+	}
+	a.agents[project.ID] = []Agent{agent}
+	if err := a.bootstrapProcessRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	a.processSupervisor.config.GuardExecutable = os.Args[0]
+	a.processSupervisor.config.GuardArgsPrefix = []string{
+		"-test.run=TestBackgroundProcessGuardHelper",
+		"--",
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := a.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown process runtime: %v", err)
+		}
+	})
+	return backgroundProcessTestFixture{
+		app: a, project: project, agent: agent,
+		projectsRoot: projectsRoot, dataDir: dataDir,
+	}
+}
+
+func runningBackgroundScheduledRun(
+	t *testing.T,
+	a *app,
+	project Project,
+	agent Agent,
+	id string,
+) ScheduledRun {
+	t.Helper()
+	now := time.Now().UTC()
+	job := ScheduledRun{
+		ID: id, ProjectID: project.ID, AgentID: agent.ID,
+		Kind: ScheduledRunTaskEvent, Status: ScheduledRunQueued,
+		MaxAttempts: 3, CreatedAt: now, UpdatedAt: now,
+	}
+	if result := a.ensureSchedulerQueue().Enqueue(job); !result.Accepted {
+		t.Fatalf("enqueue %s: %+v", id, result)
+	}
+	claimed, ok := a.ensureSchedulerQueue().Claim(
+		projectAgentKey(project.ID, agent.ID),
+		now.Add(time.Millisecond),
+	)
+	if !ok || claimed.ID != id || claimed.Status != ScheduledRunRunning {
+		t.Fatalf("claim %s: %+v ok=%t", id, claimed, ok)
+	}
+	return claimed
+}
+
+func scheduledRunFromDisk(
+	t *testing.T,
+	dataDir, runID string,
+) ScheduledRun {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(dataDir, "agent-run-queue.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot scheduledRunSnapshot
+	if err := json.Unmarshal(body, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range snapshot.Jobs {
+		if job.ID == runID {
+			return job
+		}
+	}
+	t.Fatalf("scheduled run %s absent from %s", runID, body)
+	return ScheduledRun{}
+}
+
+func startBackgroundProcessFixture(
+	t *testing.T,
+	fixture backgroundProcessTestFixture,
+) string {
+	t.Helper()
+	result, err := fixture.app.executeResidentRunBackgroundTool(
+		context.Background(),
+		ResidentToolContext{
+			Project: fixture.project, Agent: fixture.agent,
+			Workdir: fixture.project.Path, TurnType: "dev",
+		},
+		map[string]any{"command": "sleep 30"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Process processView `json:"process"`
+	}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil ||
+		payload.Process.ID == "" {
+		t.Fatalf("start fixture = %s err=%v", result, err)
+	}
+	return payload.Process.ID
+}
+
+func TestRunBackgroundWorkdirContainmentPrecedesApprovalAndEffects(t *testing.T) {
+	fixture := newBackgroundProcessTestFixture(t)
+	subdir := filepath.Join(fixture.project.Path, "subdir")
+	sibling := filepath.Join(fixture.projectsRoot, "sibling")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkEscape := filepath.Join(fixture.project.Path, "escape")
+	if err := os.Symlink(sibling, symlinkEscape); err != nil {
+		t.Fatal(err)
+	}
+
+	for index, workdir := range []string{fixture.project.Path, subdir} {
+		result, err := fixture.app.executeResidentRunBackgroundTool(
+			context.Background(),
+			ResidentToolContext{
+				Project: fixture.project, Agent: fixture.agent,
+				RunID:   fmt.Sprintf("allowed-%d", index),
+				Workdir: workdir, TurnType: "ask",
+			},
+			map[string]any{"command": fmt.Sprintf("echo allowed-%d", index)},
+		)
+		if err != nil || !toolResultIsChoiceRequest(result) {
+			t.Fatalf("allowed workdir %q = %s err=%v", workdir, result, err)
+		}
+	}
+	fixture.app.mu.Lock()
+	fixture.app.residentBashApprovals = map[string]ResidentBashApproval{}
+	fixture.app.mu.Unlock()
+
+	invalid := []struct {
+		name, workdir string
+	}{
+		{name: "parent", workdir: fixture.projectsRoot},
+		{name: "sibling", workdir: sibling},
+		{name: "symlink escape", workdir: symlinkEscape},
+	}
+	for index, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			runID := fmt.Sprintf("invalid-%d", index)
+			askResult, askErr := fixture.app.executeResidentRunBackgroundTool(
+				context.Background(),
+				ResidentToolContext{
+					Project: fixture.project, Agent: fixture.agent,
+					RunID: runID + "-ask", Workdir: test.workdir, TurnType: "ask",
+				},
+				map[string]any{"command": "sleep 30"},
+			)
+			if askErr != nil ||
+				!strings.Contains(askResult, `"error":"validation_error"`) {
+				t.Fatalf("invalid ask workdir %q = %s err=%v", test.workdir, askResult, askErr)
+			}
+			fixture.app.mu.Lock()
+			approvalCount := len(fixture.app.residentBashApprovals)
+			fixture.app.mu.Unlock()
+			if approvalCount != 0 {
+				t.Fatalf("invalid workdir created %d approvals", approvalCount)
+			}
+
+			runningBackgroundScheduledRun(
+				t, fixture.app, fixture.project, fixture.agent, runID,
+			)
+			result, err := fixture.app.executeResidentRunBackgroundTool(
+				context.Background(),
+				ResidentToolContext{
+					Project: fixture.project, Agent: fixture.agent,
+					RunID: runID, Workdir: test.workdir, TurnType: "dev",
+				},
+				map[string]any{"command": "sleep 30"},
+			)
+			if err != nil ||
+				!strings.Contains(result, `"error":"validation_error"`) {
+				t.Fatalf("invalid workdir %q = %s err=%v", test.workdir, result, err)
+			}
+			job, found := fixture.app.ensureSchedulerQueue().Job(runID)
+			if !found || job.EffectsStarted {
+				t.Fatalf("invalid workdir crossed effects barrier: %+v found=%t", job, found)
+			}
+			if records := fixture.app.processRuntime.List(fixture.project.ID); len(records) != 0 {
+				t.Fatalf("invalid workdir spawned processes: %+v", records)
+			}
+		})
+	}
+}
+
+func TestBackgroundEffectsMarkerSaveFailureRetriesBeforeEffect(t *testing.T) {
+	for _, operation := range []string{
+		residentBashOperationBackgroundStart,
+		residentBashOperationBackgroundStop,
+	} {
+		t.Run(operation, func(t *testing.T) {
+			fixture := newBackgroundProcessTestFixture(t)
+			processID := ""
+			if operation == residentBashOperationBackgroundStop {
+				processID = startBackgroundProcessFixture(t, fixture)
+			}
+			runID := "retry-" + operation
+			runningBackgroundScheduledRun(
+				t, fixture.app, fixture.project, fixture.agent, runID,
+			)
+			saveErr := errors.New("injected scheduled-run save failure")
+			fixture.app.scheduledRunsSaveOverride = func(
+				scheduledRunSnapshot,
+			) error {
+				return saveErr
+			}
+			invoke := func() (string, error) {
+				toolContext := ResidentToolContext{
+					Project: fixture.project, Agent: fixture.agent,
+					RunID: runID, Workdir: fixture.project.Path, TurnType: "dev",
+				}
+				if operation == residentBashOperationBackgroundStart {
+					return fixture.app.executeResidentRunBackgroundTool(
+						context.Background(),
+						toolContext,
+						map[string]any{"command": "sleep 30"},
+					)
+				}
+				return fixture.app.executeResidentStopProcessTool(
+					context.Background(),
+					toolContext,
+					map[string]any{"process_id": processID},
+				)
+			}
+			result, err := invoke()
+			if !errors.Is(err, saveErr) ||
+				!strings.Contains(result, `"error":"effect_barrier_failed"`) {
+				t.Fatalf("first %s = %s err=%v", operation, result, err)
+			}
+			if _, err := os.Stat(filepath.Join(
+				fixture.dataDir,
+				"agent-run-queue.json",
+			)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("failed save unexpectedly durable: %v", err)
+			}
+			stored, found := fixture.app.ensureSchedulerQueue().Job(runID)
+			if !found || !stored.EffectsStarted {
+				t.Fatalf("in-memory marker missing after failed save: %+v", stored)
+			}
+			if operation == residentBashOperationBackgroundStart {
+				if records := fixture.app.processRuntime.List(fixture.project.ID); len(records) != 0 {
+					t.Fatalf("start effect ran after failed marker save: %+v", records)
+				}
+			} else {
+				record, lookupErr := fixture.app.processRecord(
+					fixture.project.ID,
+					processID,
+				)
+				if lookupErr != nil || record.State.Terminal() {
+					t.Fatalf("stop effect ran after failed marker save: %+v err=%v", record, lookupErr)
+				}
+			}
+
+			fixture.app.scheduledRunsSaveOverride = nil
+			result, err = invoke()
+			if err != nil {
+				t.Fatalf("retry %s = %s err=%v", operation, result, err)
+			}
+			durable := scheduledRunFromDisk(t, fixture.dataDir, runID)
+			if !durable.EffectsStarted || durable.Status != ScheduledRunRunning {
+				t.Fatalf("retry marker was not durable before effect: %+v", durable)
+			}
+			if operation == residentBashOperationBackgroundStart {
+				var payload struct {
+					Process processView `json:"process"`
+				}
+				if err := json.Unmarshal([]byte(result), &payload); err != nil ||
+					payload.Process.ID == "" {
+					t.Fatalf("retry start = %s err=%v", result, err)
+				}
+			} else {
+				record, lookupErr := fixture.app.processRecord(
+					fixture.project.ID,
+					processID,
+				)
+				if lookupErr != nil || record.State != "killed" {
+					t.Fatalf("retry stop = %+v err=%v", record, lookupErr)
+				}
+			}
+		})
+	}
+}
+
+func TestBackgroundEffectsMarkerUncertainSaveCrashSuppressesReplay(t *testing.T) {
+	for _, operation := range []string{
+		residentBashOperationBackgroundStart,
+		residentBashOperationBackgroundStop,
+	} {
+		t.Run(operation, func(t *testing.T) {
+			fixture := newBackgroundProcessTestFixture(t)
+			processID := ""
+			if operation == residentBashOperationBackgroundStop {
+				processID = startBackgroundProcessFixture(t, fixture)
+			}
+			runID := "uncertain-" + operation
+			runningBackgroundScheduledRun(
+				t, fixture.app, fixture.project, fixture.agent, runID,
+			)
+			uncertainErr := errors.New("injected uncertain scheduled-run save")
+			fixture.app.scheduledRunsSaveOverride = func(
+				snapshot scheduledRunSnapshot,
+			) error {
+				if err := writeJSONFileAtomic(
+					filepath.Join(fixture.dataDir, "agent-run-queue.json"),
+					snapshot,
+					0o644,
+				); err != nil {
+					return err
+				}
+				return uncertainErr
+			}
+			toolContext := ResidentToolContext{
+				Project: fixture.project, Agent: fixture.agent,
+				RunID: runID, Workdir: fixture.project.Path, TurnType: "dev",
+			}
+			var result string
+			var err error
+			if operation == residentBashOperationBackgroundStart {
+				result, err = fixture.app.executeResidentRunBackgroundTool(
+					context.Background(),
+					toolContext,
+					map[string]any{"command": "sleep 30"},
+				)
+			} else {
+				result, err = fixture.app.executeResidentStopProcessTool(
+					context.Background(),
+					toolContext,
+					map[string]any{"process_id": processID},
+				)
+			}
+			if !errors.Is(err, uncertainErr) ||
+				!strings.Contains(result, `"error":"effect_barrier_failed"`) {
+				t.Fatalf("uncertain %s = %s err=%v", operation, result, err)
+			}
+			durable := scheduledRunFromDisk(t, fixture.dataDir, runID)
+			if !durable.EffectsStarted || durable.Status != ScheduledRunRunning {
+				t.Fatalf("uncertain marker was not durable: %+v", durable)
+			}
+			if operation == residentBashOperationBackgroundStart {
+				if records := fixture.app.processRuntime.List(fixture.project.ID); len(records) != 0 {
+					t.Fatalf("uncertain start performed effect: %+v", records)
+				}
+			} else {
+				record, lookupErr := fixture.app.processRecord(
+					fixture.project.ID,
+					processID,
+				)
+				if lookupErr != nil || record.State.Terminal() {
+					t.Fatalf("uncertain stop performed effect: %+v err=%v", record, lookupErr)
+				}
+			}
+
+			restarted := newApp(Settings{
+				DataDir: fixture.dataDir, ProjectsRoot: fixture.projectsRoot,
+			})
+			if err := restarted.loadScheduledRuns(); err != nil {
+				t.Fatal(err)
+			}
+			recovered, found := restarted.ensureSchedulerQueue().Job(runID)
+			if !found || recovered.Status != ScheduledRunFailed ||
+				!recovered.EffectsStarted ||
+				!strings.Contains(recovered.Error, "retry suppressed") {
+				t.Fatalf("crash recovery replayed uncertain effect: %+v found=%t", recovered, found)
+			}
+			recoveredDisk := scheduledRunFromDisk(t, fixture.dataDir, runID)
+			if recoveredDisk.Status != ScheduledRunFailed ||
+				!recoveredDisk.EffectsStarted {
+				t.Fatalf("crash recovery was not durable: %+v", recoveredDisk)
+			}
+		})
+	}
 }

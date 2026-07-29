@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	processdomain "github.com/karoz/karoz/internal/process"
 )
 
 func TestResidentCommandApprovalSubjectIsCanonicalAndOperationSeparated(
@@ -272,7 +274,17 @@ func TestProcessReleaseConfigDefaultsAndFailClosedCeilings(t *testing.T) {
 
 func TestReadProcessLogWindowIsBoundedAndRedacted(t *testing.T) {
 	file := t.TempDir() + "/process.log"
-	body := "normal\nAPI_TOKEN=super-secret\nPASSWORD:also-secret\n"
+	body := strings.Join([]string{
+		"normal",
+		"API_TOKEN=super-secret",
+		"PASSWORD:also-secret",
+		"Authorization: Bearer bearer-secret",
+		"aUtHoRiZaTiOn: Basic basic-secret",
+		`"Authorization": "Bearer quoted-secret"`,
+		"callback?access_token=query-secret&next=visible",
+		"Cookie: session_token=cookie-secret; theme=visible",
+		`api_key="quoted-key-secret", safe=visible`,
+	}, "\n") + "\n"
 	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -289,12 +301,102 @@ func TestReadProcessLogWindowIsBoundedAndRedacted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "super-secret") ||
-		strings.Contains(string(encoded), "also-secret") ||
-		!strings.Contains(string(encoded), "[REDACTED]") {
-		t.Fatalf("log redaction failed: %s", encoded)
+	for _, secret := range []string{
+		"super-secret",
+		"also-secret",
+		"bearer-secret",
+		"basic-secret",
+		"quoted-secret",
+		"query-secret",
+		"cookie-secret",
+		"quoted-key-secret",
+	} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("log redaction leaked %q: %s", secret, encoded)
+		}
+	}
+	if !strings.Contains(string(encoded), "[REDACTED]") ||
+		!strings.Contains(string(encoded), "next=visible") ||
+		!strings.Contains(string(encoded), "theme=visible") ||
+		!strings.Contains(string(encoded), "safe=visible") {
+		t.Fatalf("log redaction damaged structural boundaries: %s", encoded)
 	}
 	if len(encoded) > maxProcessLogResponseBytes+4096 {
 		t.Fatalf("log response exceeded bound: %d", len(encoded))
+	}
+}
+
+func TestProcessViewRedactsEveryExposedTextField(t *testing.T) {
+	now := time.Now().UTC()
+	view := newProcessView(
+		processdomain.Process{
+			ID: "process-redaction", ProjectID: "project-a", AgentID: "agent-a",
+			Command:     "curl -H 'Authorization: Bearer command-secret' localhost",
+			Description: `authorization="Basic description-secret"`,
+			Error:       "AUTH=error-secret",
+			State:       processdomain.StateFailed,
+			StartedAt:   now,
+			UpdatedAt:   now,
+		},
+		"Authorization: Bearer last-line-secret",
+		now,
+	)
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{
+		"command-secret",
+		"description-secret",
+		"error-secret",
+		"last-line-secret",
+	} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("process view leaked %q: %s", secret, encoded)
+		}
+	}
+	if count := strings.Count(string(encoded), "[REDACTED]"); count < 4 {
+		t.Fatalf("process view redaction count = %d: %s", count, encoded)
+	}
+}
+
+func TestRedactSensitiveProcessTextAuthorizationBoundaries(t *testing.T) {
+	tests := []struct {
+		name, input, secret, visible string
+	}{
+		{
+			name: "bearer header", input: "Authorization: Bearer bearer-secret",
+			secret: "bearer-secret",
+		},
+		{
+			name: "mixed case basic", input: "aUtHoRiZaTiOn: Basic basic-secret",
+			secret: "basic-secret",
+		},
+		{
+			name: "quoted header", input: `"Authorization": "Bearer quoted-secret", "safe":"visible"`,
+			secret: "quoted-secret", visible: `"safe":"visible"`,
+		},
+		{
+			name: "query", input: "/callback?authorization=Bearer query-secret&next=visible",
+			secret: "query-secret", visible: "next=visible",
+		},
+		{
+			name: "cookie", input: "session_token=cookie-secret; theme=visible",
+			secret: "cookie-secret", visible: "theme=visible",
+		},
+		{
+			name: "quoted key value", input: `api_key="quoted-secret"; safe=visible`,
+			secret: "quoted-secret", visible: "safe=visible",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := redactSensitiveProcessText(test.input)
+			if strings.Contains(got, test.secret) ||
+				!strings.Contains(got, "[REDACTED]") ||
+				(test.visible != "" && !strings.Contains(got, test.visible)) {
+				t.Fatalf("redacted text = %q", got)
+			}
+		})
 	}
 }

@@ -35,7 +35,7 @@ func (a *app) executeResidentRunBackgroundTool(
 		}), nil
 	}
 	projectRoot, err := canonicalResidentWorkdir(toolCtx.Project.Path)
-	if err != nil || !pathInside(projectRoot, workdir) {
+	if err != nil || !pathInside(workdir, projectRoot) {
 		return toolJSON(map[string]any{
 			"error":   "validation_error",
 			"message": "background process workdir must stay inside the current project",

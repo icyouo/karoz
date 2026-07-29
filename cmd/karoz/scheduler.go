@@ -298,18 +298,24 @@ func (a *app) scheduledAgentWorkerActive(projectID, agentID string) bool {
 func (a *app) saveScheduledRuns() error {
 	a.schedulerPersistMu.Lock()
 	defer a.schedulerPersistMu.Unlock()
-	jobs := a.ensureSchedulerQueue().Jobs()
-	return persistenceadapter.NewJSONStore(a.settings.DataDir).Save("agent-run-queue.json", scheduledRunSnapshot{Jobs: jobs}, 0644)
+	snapshot := scheduledRunSnapshot{Jobs: a.ensureSchedulerQueue().Jobs()}
+	if a.scheduledRunsSaveOverride != nil {
+		return a.scheduledRunsSaveOverride(snapshot)
+	}
+	return persistenceadapter.NewJSONStore(a.settings.DataDir).Save("agent-run-queue.json", snapshot, 0644)
 }
 
 func (a *app) markScheduledRunEffectsStarted(runID string) error {
 	if strings.TrimSpace(runID) == "" {
 		return nil
 	}
-	_, found, changed := a.ensureSchedulerQueue().MarkEffectsStarted(runID, time.Now().UTC())
-	if !found || !changed {
+	_, found, _ := a.ensureSchedulerQueue().MarkEffectsStarted(runID, time.Now().UTC())
+	if !found {
 		return nil
 	}
+	// Save even when the in-memory marker was already true. A previous save may
+	// have failed before durability was confirmed; no effect may proceed until
+	// this call has successfully re-confirmed the marker on disk.
 	return a.saveScheduledRuns()
 }
 

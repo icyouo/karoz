@@ -20,9 +20,31 @@ const (
 	maxProcessLogLineBytes     = 8 << 10
 )
 
-var sensitiveProcessValuePattern = regexp.MustCompile(
-	`(?i)(\b(?:[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTHORIZATION)[A-Z0-9_]*|AUTH)\s*[:=]\s*)([^\s,;]+)`,
-)
+var sensitiveProcessValuePatterns = []struct {
+	pattern     *regexp.Regexp
+	replacement string
+}{
+	{
+		// Authorization values commonly contain a scheme and credential
+		// separated by whitespace. Redact the complete quoted value first.
+		regexp.MustCompile(`(?i)(["']?authorization["']?\s*[:=]\s*["'])[^"'\r\n]*(["'])`),
+		"${1}[REDACTED]${2}",
+	},
+	{
+		// Unquoted headers, assignments, query parameters, and cookie-like
+		// fields end at their structural delimiter, not the first whitespace.
+		regexp.MustCompile(`(?i)(["']?authorization["']?\s*[:=]\s*)[^,\r\n;&]+`),
+		"${1}[REDACTED]",
+	},
+	{
+		regexp.MustCompile(`(?i)(["']?(?:[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*|AUTH)["']?\s*[:=]\s*["'])[^"'\r\n]*(["'])`),
+		"${1}[REDACTED]${2}",
+	},
+	{
+		regexp.MustCompile(`(?i)(["']?(?:[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*|AUTH)["']?\s*[:=]\s*)[^\s,\r\n;&]+`),
+		"${1}[REDACTED]",
+	},
+}
 
 var errProcessLogGone = errors.New("process log is gone")
 
@@ -289,5 +311,8 @@ func processLogEncodedSize(value string) int {
 
 func redactSensitiveProcessText(value string) string {
 	value = strings.ToValidUTF8(value, "�")
-	return sensitiveProcessValuePattern.ReplaceAllString(value, "${1}[REDACTED]")
+	for _, redaction := range sensitiveProcessValuePatterns {
+		value = redaction.pattern.ReplaceAllString(value, redaction.replacement)
+	}
+	return value
 }

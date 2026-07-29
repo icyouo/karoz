@@ -36,6 +36,7 @@ type app struct {
 	handoffOpsMu                       sync.Mutex
 	handoffReplyMu                     sync.Mutex
 	schedulerPersistMu                 sync.Mutex
+	scheduledRunsSaveOverride          func(scheduledRunSnapshot) error
 	settings                           Settings
 	tasks                              map[string][]Task
 	agents                             map[string][]Agent

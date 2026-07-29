@@ -220,7 +220,7 @@ func newProcessView(
 		RuntimeMS:     runtime.Milliseconds(), LifetimeMS: record.LifetimeMS,
 		LogBytes: record.LogBytes, LogLines: record.LogLines,
 		LogTruncated: record.LogTruncated,
-		LastLine:     limitString(lastLine, 1000),
+		LastLine:     redactSensitiveProcessText(limitString(lastLine, 1000)),
 		StartedAt:    record.StartedAt, UpdatedAt: record.UpdatedAt,
 		EndedAt: record.EndedAt,
 	}
