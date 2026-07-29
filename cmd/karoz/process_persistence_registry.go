@@ -40,8 +40,7 @@ func (runtime *processRuntimePersistence) RegisterProjectPrepared(
 	if alreadyRegistered {
 		runtime.indexMu.Unlock()
 		if prepare != nil {
-			_, err := prepare()
-			return err
+			return errors.New("runtime project is already registered; reimport is not allowed")
 		}
 		return nil
 	}
@@ -125,6 +124,35 @@ func (runtime *processRuntimePersistence) RegisterProjectPrepared(
 	delete(runtime.projectErrs, identity.ProjectID)
 	delete(runtime.disabledKeys, identity.SafeProjectKey)
 	runtime.healthMu.Unlock()
+	return nil
+}
+
+func (runtime *processRuntimePersistence) ValidateProjectConfiguration(
+	projects []Project,
+) error {
+	identities, err := resolveRuntimeProjectIdentities(runtime.store.root, projects)
+	if err != nil {
+		return err
+	}
+	proposed := make(map[string]monitordomain.RuntimeProjectIdentity, len(identities))
+	for _, identity := range identities {
+		proposed[identity.SafeProjectKey] = identity
+	}
+	runtime.registryMu.RLock()
+	defer runtime.registryMu.RUnlock()
+	runtime.indexMu.Lock()
+	defer runtime.indexMu.Unlock()
+	if err := validateRuntimeProjectIndex(runtime.index); err != nil {
+		return err
+	}
+	if len(proposed) != len(runtime.index.Projects) {
+		return errors.New("workspace settings must preserve the registered runtime project set")
+	}
+	for key, entry := range runtime.index.Projects {
+		if identity, exists := proposed[key]; !exists || identity != entry.Project {
+			return errors.New("workspace settings removed or rebound a registered runtime project")
+		}
+	}
 	return nil
 }
 

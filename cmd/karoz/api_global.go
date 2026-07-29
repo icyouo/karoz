@@ -85,37 +85,60 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		root := filepath.Clean(expandHome(strings.TrimSpace(req.ProjectsRoot)))
-		if root == "" {
-			writeError(w, http.StatusBadRequest, errors.New("projects_root is required"))
-			return
-		}
-		if err := os.MkdirAll(root, 0755); err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("create projects root: %w", err))
-			return
-		}
-		extraRoots := normalizeWorkspaceRoots(req.ExtraProjectsRoots, root)
-		for _, extraRoot := range extraRoots {
-			if err := os.MkdirAll(extraRoot, 0755); err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Errorf("create extra projects root %s: %w", extraRoot, err))
-				return
-			}
-		}
-		a.mu.Lock()
-		a.settings.ProjectsRoot = root
-		a.settings.ExtraProjectsRoots = extraRoots
-		if req.MCPServers != nil {
-			a.settings.MCPServers = normalizeMCPServers(*req.MCPServers)
-		}
-		a.mu.Unlock()
-		if err := a.saveSettings(); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Errorf("save settings: %w", err))
+		if err := a.updateSettings(req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 		writeJSON(w, a.settingsResponse())
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (a *app) updateSettings(req SettingsUpdateRequest) error {
+	root := filepath.Clean(expandHome(strings.TrimSpace(req.ProjectsRoot)))
+	if root == "" {
+		return errors.New("projects_root is required")
+	}
+	a.projectRegistrationMu.Lock()
+	defer a.projectRegistrationMu.Unlock()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return fmt.Errorf("create projects root: %w", err)
+	}
+	extraRoots := normalizeWorkspaceRoots(req.ExtraProjectsRoots, root)
+	for _, extraRoot := range extraRoots {
+		if err := os.MkdirAll(extraRoot, 0o755); err != nil {
+			return fmt.Errorf("create extra projects root %s: %w", extraRoot, err)
+		}
+	}
+	a.mu.Lock()
+	previous := a.settings
+	proposed := previous
+	proposed.ProjectsRoot = root
+	proposed.ExtraProjectsRoots = extraRoots
+	if req.MCPServers != nil {
+		proposed.MCPServers = normalizeMCPServers(*req.MCPServers)
+	}
+	a.mu.Unlock()
+	projects, err := scanProjectsForSettings(proposed)
+	if err != nil {
+		return err
+	}
+	if a.processRuntime != nil {
+		if err := a.processRuntime.ValidateProjectConfiguration(projects); err != nil {
+			return err
+		}
+	}
+	a.mu.Lock()
+	a.settings = proposed
+	a.mu.Unlock()
+	if err := a.saveSettings(); err != nil {
+		a.mu.Lock()
+		a.settings = previous
+		a.mu.Unlock()
+		return fmt.Errorf("save settings: %w", err)
+	}
+	return nil
 }
 
 func (a *app) handleAgentTemplates(w http.ResponseWriter, r *http.Request) {

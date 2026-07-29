@@ -14,9 +14,28 @@ import (
 )
 
 func (a *app) scanProjects() ([]Project, error) {
+	projects, err := scanProjectsForSettings(a.settings)
+	if err != nil {
+		return nil, err
+	}
+	for index := range projects {
+		projects[index] = a.applyProjectAlias(projects[index])
+	}
+	sort.Slice(projects, func(i, j int) bool {
+		left := strings.ToLower(projects[i].Name)
+		right := strings.ToLower(projects[j].Name)
+		if left == right {
+			return projects[i].Path < projects[j].Path
+		}
+		return left < right
+	})
+	return projects, nil
+}
+
+func scanProjectsForSettings(settings Settings) ([]Project, error) {
 	projects := make([]Project, 0)
 	seen := map[string]bool{}
-	for index, root := range a.settings.WorkspaceRoots() {
+	for index, root := range settings.WorkspaceRoots() {
 		scanned, err := scanWorkspaceProjects(root, index == 0)
 		if err != nil {
 			if index == 0 {
@@ -30,17 +49,9 @@ func (a *app) scanProjects() ([]Project, error) {
 				continue
 			}
 			seen[project.ID] = true
-			projects = append(projects, a.applyProjectAlias(project))
+			projects = append(projects, project)
 		}
 	}
-	sort.Slice(projects, func(i, j int) bool {
-		left := strings.ToLower(projects[i].Name)
-		right := strings.ToLower(projects[j].Name)
-		if left == right {
-			return projects[i].Path < projects[j].Path
-		}
-		return left < right
-	})
 	return projects, nil
 }
 

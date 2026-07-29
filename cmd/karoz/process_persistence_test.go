@@ -1645,6 +1645,227 @@ func TestImportProjectClaimCrashRecovery(t *testing.T) {
 	}
 }
 
+func TestExistingProjectReimportIsRejectedBeforeConfigMutation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "existing", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	externalPath := filepath.Join(t.TempDir(), "external")
+	if err := os.MkdirAll(filepath.Join(externalPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := a.bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	imported, err := a.importProject(ProjectCreateRequest{
+		Path: externalPath, Name: "old-alias",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{
+		filepath.Join(dataDir, "settings.json"),
+		filepath.Join(dataDir, "project-aliases.json"),
+		filepath.Join(dataDir, "project-runtime", "index.json"),
+		filepath.Join(dataDir, "processes.json"),
+	}
+	before := make(map[string][]byte, len(paths))
+	for _, path := range paths {
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		before[path] = body
+	}
+	var fired atomic.Bool
+	a.processRuntime.fail = func(point processPersistenceFailpoint) error {
+		if point == processPersistAfterImportSettings {
+			fired.Store(true)
+			return errors.New("must not reach config callback")
+		}
+		return nil
+	}
+	if _, err := a.importProject(ProjectCreateRequest{
+		Path: externalPath, Name: "new-alias",
+	}); err == nil {
+		t.Fatal("existing project reimport succeeded")
+	}
+	if fired.Load() {
+		t.Fatal("reimport invoked its config callback before rejection")
+	}
+	for _, path := range paths {
+		after, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(after) != string(before[path]) {
+			t.Fatalf("reimport changed %s", path)
+		}
+	}
+	a.mu.Lock()
+	alias := a.projectAliases[imported.ID]
+	a.mu.Unlock()
+	if alias != "old-alias" {
+		t.Fatalf("live alias=%q, want old-alias", alias)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := a.shutdownProcessRuntime(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	restarted := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := restarted.loadSettings(); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := restarted.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown restarted runtime: %v", err)
+		}
+	})
+	restarted.mu.Lock()
+	alias = restarted.projectAliases[imported.ID]
+	restarted.mu.Unlock()
+	if alias != "old-alias" {
+		t.Fatalf("restarted alias=%q, want old-alias", alias)
+	}
+}
+
+func TestSettingsRejectsImportedRootRemovalAndRestartsCleanly(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "existing", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	externalPath := filepath.Join(t.TempDir(), "external")
+	if err := os.MkdirAll(filepath.Join(externalPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := a.bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	imported, err := a.importProject(ProjectCreateRequest{
+		Path: externalPath, Name: "external-alias",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(dataDir, "settings.json")
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.updateSettings(SettingsUpdateRequest{ProjectsRoot: root}); err == nil {
+		t.Fatal("settings removed a registered imported project")
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("rejected settings removal changed settings bytes")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := a.shutdownProcessRuntime(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	restarted := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := restarted.loadSettings(); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.bootstrap(); err != nil {
+		t.Fatalf("restart after rejected settings removal: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := restarted.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown restarted runtime: %v", err)
+		}
+	})
+	if restarted.processRuntime.projectRuntime(imported.ID) == nil {
+		t.Fatal("restart lost imported project runtime")
+	}
+}
+
+func TestSettingsUpdateAndImportRacePreservesRuntimeProjectSet(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "existing", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	externalPath := filepath.Join(t.TempDir(), "external")
+	if err := os.MkdirAll(filepath.Join(externalPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := a.bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	importResult := make(chan error, 1)
+	settingsResult := make(chan error, 1)
+	go func() {
+		<-start
+		_, err := a.importProject(ProjectCreateRequest{
+			Path: externalPath, Name: "external",
+		})
+		importResult <- err
+	}()
+	go func() {
+		<-start
+		settingsResult <- a.updateSettings(SettingsUpdateRequest{ProjectsRoot: root})
+	}()
+	close(start)
+	if err := <-importResult; err != nil {
+		t.Fatalf("concurrent import failed: %v", err)
+	}
+	_ = <-settingsResult
+	external := projectFromPath(externalPath, externalPath, "extra")
+	if a.processRuntime.projectRuntime(external.ID) == nil {
+		t.Fatal("concurrent settings update lost imported runtime")
+	}
+	a.mu.Lock()
+	roots := append([]string(nil), a.settings.ExtraProjectsRoots...)
+	a.mu.Unlock()
+	if len(roots) != 1 || filepath.Clean(roots[0]) != filepath.Clean(externalPath) {
+		t.Fatalf("concurrent settings roots=%v", roots)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := a.shutdownProcessRuntime(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	restarted := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := restarted.loadSettings(); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.bootstrap(); err != nil {
+		t.Fatalf("restart after settings/import race: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := restarted.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown restarted runtime: %v", err)
+		}
+	})
+	if restarted.processRuntime.projectRuntime(external.ID) == nil {
+		t.Fatal("restart lost concurrently imported runtime")
+	}
+}
+
 func TestProcessRuntimeConcurrentCanonicalPathRegistrationAllowsOneOwner(t *testing.T) {
 	dataDir := t.TempDir()
 	runtime, err := newProcessRuntimePersistence(dataDir, nil, nil)
