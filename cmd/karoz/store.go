@@ -79,6 +79,7 @@ func (a *app) bootstrap() error {
 		return err
 	}
 	a.resumeMonitorPending()
+	a.armMonitorProbes()
 	if err := a.reconcileWorkspaceArtifacts(); err != nil {
 		return err
 	}

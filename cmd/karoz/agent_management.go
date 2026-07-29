@@ -462,14 +462,40 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	a.agents[project.ID] = next
 	// A deleted owner must not leave a latent monitor able to wake a recreated
 	// same-ID agent.  Pending work is discarded under the same deletion fence.
+	probeMonitorIDs := make([]string, 0)
 	for i := range a.monitors[project.ID] {
 		item := &a.monitors[project.ID][i]
 		if item.AgentID == agentID || (item.Action.Kind == "notify_agent" && item.Action.AgentID == agentID) {
+			if item.Trigger.Kind == "script_probe" {
+				probeMonitorIDs = append(probeMonitorIDs, item.ID)
+			}
 			item.State = "disabled"
 			item.ErrorCode = "owner_deleted"
 			item.LastError = "monitor owner or target agent was deleted"
 			item.PendingFires = nil
 			item.UpdatedAt = time.Now().UTC()
+		}
+	}
+	now := time.Now().UTC()
+	for id, reservation := range a.monitorProbeReservations {
+		if reservation.ProjectID == project.ID &&
+			reservation.AgentID == agentID {
+			delete(a.monitorProbeReservations, id)
+		}
+	}
+	for id, challenge := range a.monitorProbeChallenges {
+		if challenge.ProjectID == project.ID &&
+			challenge.AgentID == agentID &&
+			challenge.ConsumedReceiptID == "" {
+			delete(a.monitorProbeChallenges, id)
+		}
+	}
+	for id, receipt := range a.monitorProbeReceipts {
+		if receipt.ProjectID == project.ID &&
+			receipt.AgentID == agentID &&
+			receipt.RevokedAt == nil {
+			receipt.RevokedAt = timePointer(now)
+			a.monitorProbeReceipts[id] = receipt
 		}
 	}
 	var routes []AgentRoute
@@ -483,6 +509,9 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	delete(a.agentRuns, key)
 	delete(a.agentRunCancels, key)
 	a.mu.Unlock()
+	for _, monitorID := range probeMonitorIDs {
+		a.cancelMonitorProbe(project.ID, monitorID)
+	}
 	ownerRemoved = true
 	if err := a.saveMonitors(); err != nil {
 		return err

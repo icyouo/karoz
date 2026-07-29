@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	monitordomain "github.com/karoz/karoz/internal/monitor"
 )
@@ -11,7 +12,7 @@ func (a *app) handleMonitors(w http.ResponseWriter, r *http.Request, project Pro
 	if len(parts) == 0 {
 		switch r.Method {
 		case http.MethodGet:
-			writeJSON(w, map[string]any{"monitors": a.monitorsForProject(project.ID)})
+			writeJSON(w, map[string]any{"monitors": publicMonitors(a.monitorsForProject(project.ID))})
 		case http.MethodPost:
 			var item Monitor
 			if err := readJSON(r, &item); err != nil {
@@ -23,10 +24,19 @@ func (a *app) handleMonitors(w http.ResponseWriter, r *http.Request, project Pro
 				writeError(w, http.StatusBadRequest, err)
 				return
 			}
-			writeJSON(w, created)
+			writeJSON(w, publicMonitor(created))
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodPatch {
+		item, err := a.patchMonitorHTTP(project, strings.TrimSpace(parts[0]), r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, publicMonitor(item))
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodDelete {
@@ -42,6 +52,21 @@ func (a *app) handleMonitors(w http.ResponseWriter, r *http.Request, project Pro
 		return
 	}
 	id, operation := strings.TrimSpace(parts[0]), parts[1]
+	if r.Method == http.MethodPost && operation == "check" {
+		result, err := a.runMonitorProbe(
+			r.Context(),
+			project.ID,
+			id,
+			time.Now().UTC(),
+			true,
+		)
+		if err != nil && result.Error == "" {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, map[string]any{"result": result, "dry_run": true})
+		return
+	}
 	if r.Method == http.MethodPost && (operation == "pause" || operation == "resume") {
 		state := monitordomain.StateDisabled
 		if operation == "resume" {

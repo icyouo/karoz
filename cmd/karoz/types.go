@@ -36,6 +36,16 @@ type app struct {
 	processOutputPendingGaps           map[string]processOutputGapDelta
 	processOutputGapWake               chan struct{}
 	processOutputGapWorkerOnce         sync.Once
+	monitorCtx                         context.Context
+	monitorCancel                      context.CancelFunc
+	monitorProbeWG                     sync.WaitGroup
+	monitorProbeStopping               bool
+	monitorProbeCancels                map[string]context.CancelFunc
+	monitorProbeProjectSlots           map[string]chan struct{}
+	monitorProbeReservations           map[string]monitorProbeReservation
+	monitorProbeChallenges             map[string]monitorProbeChallenge
+	monitorProbeReceipts               map[string]monitordomain.ProbeApprovalReceipt
+	monitorProbeSessions               map[string]monitorProbeOperatorSession
 	backgroundOwnerMu                  sync.Mutex
 	backgroundOwnerDeleting            map[string]bool
 	projectRegistrationMu              sync.Mutex
@@ -111,6 +121,47 @@ type AgentMemoryEntry = agentdomain.AgentMemoryEntry
 
 type AgentBlackboardEntry = collaborationdomain.BlackboardEntry
 type Monitor = monitordomain.Monitor
+
+type monitorProbeReservation struct {
+	ID              string    `json:"id"`
+	ProjectID       string    `json:"project_id"`
+	AgentID         string    `json:"agent_id"`
+	OwnerCreatedAt  time.Time `json:"owner_created_at"`
+	MonitorID       string    `json:"monitor_id"`
+	TriggerRevision int       `json:"trigger_revision"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+type monitorProbeChallenge struct {
+	ID                string    `json:"id"`
+	ReservationID     string    `json:"reservation_id"`
+	OperatorSessionID string    `json:"operator_session_id"`
+	ApprovalRunID     string    `json:"approval_run_id,omitempty"`
+	ChoiceRequestID   string    `json:"choice_request_id,omitempty"`
+	ProjectID         string    `json:"project_id"`
+	AgentID           string    `json:"agent_id"`
+	MonitorID         string    `json:"monitor_id"`
+	TriggerRevision   int       `json:"trigger_revision"`
+	CanonicalWorkdir  string    `json:"canonical_workdir"`
+	Language          string    `json:"language"`
+	NormalizedSource  []byte    `json:"normalized_source"`
+	SourceSHA256      string    `json:"source_sha256"`
+	IntervalMS        int64     `json:"interval_ms"`
+	TimeoutMS         int64     `json:"timeout_ms"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	State             string    `json:"state"`
+	StagingReceiptID  string    `json:"staging_receipt_id,omitempty"`
+	StagingPath       string    `json:"staging_path,omitempty"`
+	ConsumedReceiptID string    `json:"consumed_receipt_id,omitempty"`
+}
+
+type monitorProbeOperatorSession struct {
+	ID           string    `json:"id"`
+	ProjectID    string    `json:"project_id"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastActiveAt time.Time `json:"last_active_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
 
 type processOutputGapDelta struct {
 	ProjectID string

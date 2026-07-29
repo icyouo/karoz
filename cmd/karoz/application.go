@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	httpapiadapter "github.com/karoz/karoz/internal/httpapi"
+	monitordomain "github.com/karoz/karoz/internal/monitor"
 	runtimedomain "github.com/karoz/karoz/internal/runtime"
 	"net/http"
 	"sync"
@@ -10,9 +11,12 @@ import (
 
 func newApp(settings Settings) *app {
 	supervisorCtx, supervisorCancel := context.WithCancel(context.Background())
+	monitorCtx, monitorCancel := context.WithCancel(context.Background())
 	a := &app{
 		supervisorCtx:            supervisorCtx,
 		supervisorCancel:         supervisorCancel,
+		monitorCtx:               monitorCtx,
+		monitorCancel:            monitorCancel,
 		settings:                 settings,
 		tasks:                    map[string][]Task{},
 		taskRunCancels:           map[string]taskRun{},
@@ -49,6 +53,12 @@ func newApp(settings Settings) *app {
 		processOutputCursors:     map[string]uint64{},
 		processOutputPendingGaps: map[string]processOutputGapDelta{},
 		processOutputGapWake:     make(chan struct{}, 1),
+		monitorProbeCancels:      map[string]context.CancelFunc{},
+		monitorProbeProjectSlots: map[string]chan struct{}{},
+		monitorProbeReservations: map[string]monitorProbeReservation{},
+		monitorProbeChallenges:   map[string]monitorProbeChallenge{},
+		monitorProbeReceipts:     map[string]monitordomain.ProbeApprovalReceipt{},
+		monitorProbeSessions:     map[string]monitorProbeOperatorSession{},
 		schedulerQueue:           runtimedomain.NewSchedulerQueue(),
 		schedulerExecutors:       map[ScheduledRunKind]ScheduledRunExecutor{},
 		runtimeHooks:             map[string]bool{},

@@ -158,8 +158,8 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 		messageStored := false
 		currentInput := AgentMessage{}
 		if !started {
-			if isResidentBashChoice(req.ChoiceID) {
-				writeError(w, http.StatusConflict, errors.New("wait for the active agent run to finish before resolving a bash approval"))
+			if isResidentBashChoice(req.ChoiceID) || isMonitorProbeChoice(req.ChoiceID) {
+				writeError(w, http.StatusConflict, errors.New("wait for the active agent run to finish before resolving an approval"))
 				return
 			}
 			msg, appended := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", "interrupt", userText)
@@ -188,7 +188,11 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 				return
 			}
 		}
-		if _, err := a.resolveResidentBashChoice(project.ID, agent.ID, run.ID, req.ChoiceID); err != nil {
+		recognized, err := a.resolveResidentBashChoice(project.ID, agent.ID, run.ID, req.ChoiceID)
+		if err == nil && !recognized {
+			_, err = a.resolveMonitorProbeChoice(project.ID, agent.ID, run.ID, req.ChoiceID)
+		}
+		if err != nil {
 			a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateCancelled, err)
 			writeError(w, http.StatusConflict, err)
 			return

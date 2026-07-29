@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -23,29 +25,142 @@ type MonitorRunPayload struct {
 }
 
 func (a *app) loadMonitors() error {
-	_, err := a.loadJSON("monitors.json", &a.monitors)
-	if err != nil {
+	data, err := os.ReadFile(filepath.Join(a.settings.DataDir, "monitors.json"))
+	found := err == nil
+	legacy := false
+	if errors.Is(err, os.ErrNotExist) {
+		found = false
+	} else if err != nil {
 		return err
+	}
+	if found {
+		raw := json.RawMessage(data)
+		var envelope struct {
+			Monitors json.RawMessage `json:"monitors"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return err
+		}
+		if len(envelope.Monitors) > 0 {
+			var snapshot monitorRegistrySnapshot
+			if err := json.Unmarshal(raw, &snapshot); err != nil {
+				return err
+			}
+			if snapshot.SchemaVersion != 2 {
+				return fmt.Errorf(
+					"unsupported monitor registry schema %d",
+					snapshot.SchemaVersion,
+				)
+			}
+			a.monitors = snapshot.Monitors
+			a.monitorProbeReservations = snapshot.ProbeReservations
+			a.monitorProbeChallenges = snapshot.ProbeChallenges
+			a.monitorProbeReceipts = snapshot.ProbeReceipts
+			a.monitorProbeSessions = snapshot.ProbeSessions
+		} else if err := json.Unmarshal(raw, &a.monitors); err != nil {
+			return err
+		} else {
+			legacy = true
+		}
 	}
 	if a.monitors == nil {
 		a.monitors = map[string][]Monitor{}
 	}
+	if a.monitorProbeReservations == nil {
+		a.monitorProbeReservations = map[string]monitorProbeReservation{}
+	}
+	if a.monitorProbeChallenges == nil {
+		a.monitorProbeChallenges = map[string]monitorProbeChallenge{}
+	}
+	if a.monitorProbeReceipts == nil {
+		a.monitorProbeReceipts = map[string]monitordomain.ProbeApprovalReceipt{}
+	}
+	if a.monitorProbeSessions == nil {
+		a.monitorProbeSessions = map[string]monitorProbeOperatorSession{}
+	}
+	normalized := legacy
+	now := time.Now().UTC()
+	beforeSecurityRecords := len(a.monitorProbeReservations) +
+		len(a.monitorProbeChallenges) +
+		len(a.monitorProbeReceipts) +
+		len(a.monitorProbeSessions)
+	a.pruneMonitorProbeApprovalsLocked(now)
+	afterSecurityRecords := len(a.monitorProbeReservations) +
+		len(a.monitorProbeChallenges) +
+		len(a.monitorProbeReceipts) +
+		len(a.monitorProbeSessions)
+	normalized = normalized || beforeSecurityRecords != afterSecurityRecords
 	for projectID, items := range a.monitors {
-		for _, item := range items {
-			if item.ProjectID != projectID || !gate3MonitorTrigger(item.Trigger.Kind) || monitordomain.ValidateMonitor(item) != nil {
+		for index := range items {
+			item := &items[index]
+			if item.ProjectID != projectID || !gate3MonitorTrigger(item.Trigger.Kind) || monitordomain.ValidateMonitor(*item) != nil {
 				return fmt.Errorf("invalid monitor %s", item.ID)
 			}
+			if item.Trigger.Kind != monitordomain.TriggerScriptProbe {
+				continue
+			}
+			item.ProbeRunning = false
+			if !scriptProbeSupported {
+				if item.State != monitordomain.StateError ||
+					item.ErrorCode != "unsupported_platform" {
+					item.State = monitordomain.StateError
+					item.ErrorCode = "unsupported_platform"
+					item.LastError = "script probes are unsupported on this platform"
+					item.UpdatedAt = now
+					normalized = true
+				}
+				continue
+			}
+			if item.State != monitordomain.StateActive {
+				continue
+			}
+			receipt, ok := a.monitorProbeReceipts[item.Trigger.ApprovalReceiptID]
+			if !ok {
+				item.State = monitordomain.StateError
+				item.ErrorCode = "probe_authorization"
+				item.LastError = "probe approval receipt is unavailable"
+				item.UpdatedAt = now
+				normalized = true
+				continue
+			}
+			if _, err := a.authorizedMonitorProbeSnapshot(*item, receipt); err != nil {
+				item.State = monitordomain.StateError
+				item.ErrorCode = "probe_authorization"
+				item.LastError = limitString(err.Error(), 1024)
+				item.UpdatedAt = now
+				normalized = true
+				continue
+			}
+			next := now.Add(time.Duration(item.Trigger.IntervalMS) * time.Millisecond)
+			item.NextCheckAt = &next
+			normalized = true
+		}
+		a.monitors[projectID] = items
+	}
+	if normalized {
+		if err := a.saveMonitorsLocked(); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func gate3MonitorTrigger(kind monitordomain.TriggerKind) bool {
-	return kind == monitordomain.TriggerRuntimeEvent || kind == monitordomain.TriggerProcessExit || kind == monitordomain.TriggerProcessOutput
+	return kind == monitordomain.TriggerRuntimeEvent ||
+		kind == monitordomain.TriggerProcessExit ||
+		kind == monitordomain.TriggerProcessOutput ||
+		kind == monitordomain.TriggerScriptProbe
 }
 
 func (a *app) saveMonitorsLocked() error {
-	return a.saveJSON("monitors.json", a.monitors, 0644)
+	return a.saveJSON("monitors.json", monitorRegistrySnapshot{
+		SchemaVersion:     2,
+		Monitors:          a.monitors,
+		ProbeReservations: a.monitorProbeReservations,
+		ProbeChallenges:   a.monitorProbeChallenges,
+		ProbeReceipts:     a.monitorProbeReceipts,
+		ProbeSessions:     a.monitorProbeSessions,
+	}, 0600)
 }
 
 func (a *app) saveMonitors() error {
@@ -88,6 +203,12 @@ func cloneMonitorList(items []Monitor) []Monitor {
 func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
 	a.backgroundOwnerMu.Lock()
 	defer a.backgroundOwnerMu.Unlock()
+	if item.Trigger.Kind == monitordomain.TriggerScriptProbe {
+		if !scriptProbeSupported {
+			return Monitor{}, errScriptProbeUnsupported
+		}
+		return Monitor{}, errors.New("dev_turn_required: script_probe requires a claimed approval receipt")
+	}
 	item.ProjectID = project.ID
 	item.ID = strings.TrimSpace(item.ID)
 	if item.ID == "" {
@@ -370,25 +491,72 @@ func (a *app) setMonitorState(project Project, id string, state monitordomain.St
 	a.backgroundOwnerMu.Lock()
 	defer a.backgroundOwnerMu.Unlock()
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	items := a.monitors[project.ID]
 	for i := range items {
 		if items[i].ID != id {
 			continue
 		}
 		if state == monitordomain.StateActive && items[i].ErrorCode == "owner_deleted" {
+			a.mu.Unlock()
 			return Monitor{}, errors.New("owner-deleted monitor cannot be resumed")
+		}
+		if state == monitordomain.StateActive &&
+			items[i].ErrorCode == "probe_authorization" {
+			a.mu.Unlock()
+			return Monitor{}, errors.New(
+				"probe authorization error requires a newly approved trigger revision",
+			)
+		}
+		if items[i].Trigger.Kind == monitordomain.TriggerScriptProbe &&
+			state == monitordomain.StateActive {
+			if !scriptProbeSupported {
+				a.mu.Unlock()
+				return Monitor{}, errScriptProbeUnsupported
+			}
+			if a.enabledScriptProbeCountLocked(project.ID, id) >= maximumEnabledProbes {
+				a.mu.Unlock()
+				return Monitor{}, errors.New("enabled script probe capacity exceeded")
+			}
+			receipt, ok := a.monitorProbeReceipts[items[i].Trigger.ApprovalReceiptID]
+			if !ok {
+				a.mu.Unlock()
+				return Monitor{}, errors.New("probe approval receipt not found")
+			}
+			if _, err := a.authorizedMonitorProbeSnapshot(items[i], receipt); err != nil {
+				a.mu.Unlock()
+				return Monitor{}, err
+			}
+			items[i].ErrorCode = ""
+			items[i].LastError = ""
+			items[i].ConsecutiveProbeErrors = 0
 		}
 		before := items[i]
 		items[i].State, items[i].UpdatedAt = state, time.Now().UTC()
+		if items[i].Trigger.Kind == monitordomain.TriggerScriptProbe {
+			next := time.Now().UTC().Add(
+				time.Duration(items[i].Trigger.IntervalMS) * time.Millisecond,
+			)
+			items[i].NextCheckAt = &next
+		}
 		a.monitors[project.ID] = items
 		if err := a.saveMonitorsLocked(); err != nil {
 			items[i] = before
 			a.monitors[project.ID] = items
+			a.mu.Unlock()
 			return Monitor{}, err
 		}
-		return items[i], nil
+		updated := items[i]
+		a.mu.Unlock()
+		if updated.Trigger.Kind == monitordomain.TriggerScriptProbe {
+			if state == monitordomain.StateActive {
+				a.armMonitorProbe(updated)
+			} else {
+				a.cancelMonitorProbe(project.ID, id)
+			}
+		}
+		return updated, nil
 	}
+	a.mu.Unlock()
 	return Monitor{}, errors.New("monitor not found")
 }
 
@@ -396,20 +564,46 @@ func (a *app) deleteMonitor(project Project, id string) error {
 	a.backgroundOwnerMu.Lock()
 	defer a.backgroundOwnerMu.Unlock()
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	items := a.monitors[project.ID]
 	for i := range items {
 		if items[i].ID != id {
 			continue
 		}
 		before := append([]Monitor(nil), items...)
+		deleted := items[i]
+		beforeReceipt, hadReceipt := a.monitorProbeReceipts[deleted.Trigger.ApprovalReceiptID]
+		beforeReservations := make(map[string]monitorProbeReservation)
+		for reservationID, reservation := range a.monitorProbeReservations {
+			if reservation.ProjectID == project.ID &&
+				reservation.MonitorID == id {
+				beforeReservations[reservationID] = reservation
+				delete(a.monitorProbeReservations, reservationID)
+			}
+		}
+		if hadReceipt {
+			receipt := beforeReceipt
+			receipt.RevokedAt = timePointer(time.Now().UTC())
+			a.monitorProbeReceipts[receipt.ID] = receipt
+		}
 		a.monitors[project.ID] = append(items[:i:i], items[i+1:]...)
 		if err := a.saveMonitorsLocked(); err != nil {
 			a.monitors[project.ID] = before
+			if hadReceipt {
+				a.monitorProbeReceipts[beforeReceipt.ID] = beforeReceipt
+			}
+			for reservationID, reservation := range beforeReservations {
+				a.monitorProbeReservations[reservationID] = reservation
+			}
+			a.mu.Unlock()
 			return err
+		}
+		a.mu.Unlock()
+		if deleted.Trigger.Kind == monitordomain.TriggerScriptProbe {
+			a.cancelMonitorProbe(project.ID, id)
 		}
 		return nil
 	}
+	a.mu.Unlock()
 	return errors.New("monitor not found")
 }
 
@@ -725,11 +919,29 @@ func (a *app) createMonitorFromTool(toolCtx ResidentToolContext, args map[string
 		return toolJSON(map[string]any{"error": "validation_error", "message": err.Error()})
 	}
 	item.AgentID = toolCtx.Agent.ID
+	if item.Trigger.Kind == monitordomain.TriggerScriptProbe ||
+		strings.TrimSpace(toolStringArg(args, "approval_receipt_id", 128)) != "" {
+		receiptID := firstNonEmpty(
+			toolStringArg(args, "approval_receipt_id", 128),
+			item.Trigger.ApprovalReceiptID,
+		)
+		created, err := a.claimScriptProbeMonitor(
+			toolCtx.Project,
+			toolCtx.Agent,
+			item,
+			receiptID,
+			toolStringArg(args, "mutation_id", 128),
+		)
+		if err != nil {
+			return toolJSON(map[string]any{"error": "probe_approval_error", "message": err.Error()})
+		}
+		return toolJSON(map[string]any{"monitor": publicMonitor(created)})
+	}
 	created, err := a.createMonitor(toolCtx.Project, item)
 	if err != nil {
 		return toolJSON(map[string]any{"error": "validation_error", "message": err.Error()})
 	}
-	return toolJSON(map[string]any{"monitor": created})
+	return toolJSON(map[string]any{"monitor": publicMonitor(created)})
 }
 
 func (a *app) setMonitorFromTool(toolCtx ResidentToolContext, args map[string]any, active bool) string {

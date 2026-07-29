@@ -53,6 +53,7 @@ func (a *app) bootstrapProcessRuntime() error {
 }
 
 func (a *app) shutdownProcessRuntime(ctx context.Context) error {
+	a.shutdownMonitorProbes()
 	if a.processSupervisor == nil {
 		if a.processRuntime != nil {
 			if err := a.drainProcessOutputGaps(); err != nil {

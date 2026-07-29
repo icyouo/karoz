@@ -90,6 +90,14 @@ func (store *secureRuntimeStore) saveJSON(relative string, value any) error {
 	return secureWriteFile(store.root, parts, data)
 }
 
+func (store *secureRuntimeStore) saveBytes(relative string, value []byte) error {
+	parts, err := secureRelativeParts(relative)
+	if err != nil {
+		return err
+	}
+	return secureWriteFile(store.root, parts, value)
+}
+
 func (store *secureRuntimeStore) openLog(relative string) (io.WriteCloser, error) {
 	parts, err := secureRelativeParts(relative)
 	if err != nil {

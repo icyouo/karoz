@@ -39,9 +39,15 @@ func (a *app) residentToolRegistry() *tooldomain.Registry[ResidentToolContext] {
 				return a.executeResidentStopProcessTool(ctx, toolCtx, args)
 			},
 			"list_monitors": func(_ context.Context, toolCtx ResidentToolContext, _ map[string]any) (string, error) {
-				return toolJSON(map[string]any{"monitors": a.monitorsForOwner(toolCtx.Project.ID, toolCtx.Agent.ID)}), nil
+				return toolJSON(map[string]any{"monitors": publicMonitors(a.monitorsForOwner(toolCtx.Project.ID, toolCtx.Agent.ID))}), nil
+			},
+			"prepare_monitor_probe": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.prepareMonitorProbeFromTool(toolCtx, args), nil
 			},
 			"create_monitor": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.createMonitorFromTool(toolCtx, args), nil
+			},
+			"update_monitor": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				return a.createMonitorFromTool(toolCtx, args), nil
 			},
 			"pause_monitor": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {

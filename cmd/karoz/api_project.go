@@ -12,7 +12,10 @@ func (a *app) handleProjectScoped(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if len(parts) >= 2 && parts[1] == "processes" &&
+	if len(parts) >= 2 &&
+		(parts[1] == "processes" ||
+			parts[1] == "monitors" ||
+			parts[1] == "monitor-probe-approvals") &&
 		isStateChangingMethod(r.Method) {
 		if !requireProcessMutationBoundary(w, r) {
 			return
@@ -48,6 +51,8 @@ func (a *app) handleProjectScoped(w http.ResponseWriter, r *http.Request) {
 		a.handleRuntimeEvents(w, r, project)
 	case "monitors":
 		a.handleMonitors(w, r, project, parts[2:])
+	case "monitor-probe-approvals":
+		a.handleMonitorProbeApprovals(w, r, project, parts[2:])
 	case "tasks":
 		a.handleTasks(w, r, project, parts[2:])
 	case "processes":

@@ -32,7 +32,24 @@ func residentToolSpecs() []map[string]any {
 			"process_id": map[string]any{"type": "string"},
 		}, []string{"process_id"}),
 		residentToolSpec("list_monitors", "List durable runtime-event and process-exit monitors in this project.", nil, nil),
-		residentToolSpec("create_monitor", "Create a durable runtime-event or process-exit monitor owned by this resident agent.", map[string]any{"monitor": map[string]any{"type": "object"}}, []string{"monitor"}),
+		residentToolSpec("prepare_monitor_probe", "Prepare an exact script-probe approval request. This does not create or update a monitor; after user approval, claim the returned receipt from a development turn.", map[string]any{
+			"monitor_id":  map[string]any{"type": "string", "description": "Optional existing monitor ID to update. Omit to reserve a new ID."},
+			"language":    map[string]any{"type": "string", "enum": []string{"shell", "javascript"}},
+			"workdir":     map[string]any{"type": "string", "description": "Optional project-contained workdir."},
+			"source":      map[string]any{"type": "string", "description": "Exact probe source, maximum 64 KiB."},
+			"interval_ms": map[string]any{"type": "integer", "description": "Default 60000; minimum 10000."},
+			"timeout_ms":  map[string]any{"type": "integer", "description": "Default 5000; maximum 30000."},
+		}, []string{"language", "source"}),
+		residentToolSpec("create_monitor", "Create a durable monitor owned by this resident agent. Script probes require a confirmed approval receipt and unique mutation_id in a dev turn.", map[string]any{
+			"monitor":             map[string]any{"type": "object"},
+			"approval_receipt_id": map[string]any{"type": "string"},
+			"mutation_id":         map[string]any{"type": "string"},
+		}, []string{"monitor"}),
+		residentToolSpec("update_monitor", "Update a durable monitor owned by this resident agent. Script-probe trigger replacement requires a newly confirmed approval receipt and unique mutation_id in a dev turn.", map[string]any{
+			"monitor":             map[string]any{"type": "object"},
+			"approval_receipt_id": map[string]any{"type": "string"},
+			"mutation_id":         map[string]any{"type": "string"},
+		}, []string{"monitor"}),
 		residentToolSpec("pause_monitor", "Pause one monitor owned by this resident agent.", map[string]any{"monitor_id": map[string]any{"type": "string"}}, []string{"monitor_id"}),
 		residentToolSpec("resume_monitor", "Resume one monitor owned by this resident agent.", map[string]any{"monitor_id": map[string]any{"type": "string"}}, []string{"monitor_id"}),
 		residentToolSpec("delete_monitor", "Delete one monitor owned by this resident agent.", map[string]any{"monitor_id": map[string]any{"type": "string"}}, []string{"monitor_id"}),
@@ -260,7 +277,7 @@ func residentToolAllowed(toolCtx ResidentToolContext, name string) bool {
 	}
 	turnType := normalizeChatTurnType(toolCtx.TurnType)
 	switch name {
-	case "create_monitor", "pause_monitor", "resume_monitor", "delete_monitor":
+	case "create_monitor", "update_monitor", "pause_monitor", "resume_monitor", "delete_monitor":
 		return turnType == "dev"
 	case "write_workspace_file", "show_preview":
 		return turnType == "dev"
