@@ -20,7 +20,8 @@ func (a *app) executeResidentRunBackgroundTool(
 			"error": "validation_error", "message": "command is required",
 		}), nil
 	}
-	if !a.processRuntimeReady() {
+	if !a.processRuntimeReady() ||
+		a.requireProcessProject(toolCtx.Project.ID) != nil {
 		return toolJSON(map[string]any{
 			"error":   "runtime_unavailable",
 			"message": "background process runtime is unavailable",
@@ -74,6 +75,12 @@ func (a *app) executeResidentRunBackgroundTool(
 
 	a.backgroundOwnerMu.Lock()
 	defer a.backgroundOwnerMu.Unlock()
+	if err := a.requireProcessProject(toolCtx.Project.ID); err != nil {
+		return toolJSON(map[string]any{
+			"error":   "runtime_unavailable",
+			"message": "background process runtime is unavailable",
+		}), nil
+	}
 	if _, exists := a.projectAgent(toolCtx.Project, toolCtx.Agent.ID); !exists {
 		return toolJSON(map[string]any{
 			"error":   "owner_not_found",
@@ -115,6 +122,12 @@ func (a *app) executeResidentListProcessesTool(
 		clampToolInt(args, "limit", 20, 1, 100),
 	)
 	if err != nil {
+		if errors.Is(err, errProcessRuntimeUnavailable) {
+			return toolJSON(map[string]any{
+				"error":   "runtime_unavailable",
+				"message": "background process runtime is unavailable",
+			}), nil
+		}
 		return toolJSON(map[string]any{
 			"error": "process_list_failed", "message": err.Error(),
 		}), nil
@@ -134,6 +147,12 @@ func (a *app) executeResidentReadProcessLogTool(
 		}), nil
 	}
 	record, err := a.processRecord(toolCtx.Project.ID, processID)
+	if errors.Is(err, errProcessRuntimeUnavailable) {
+		return toolJSON(map[string]any{
+			"error":   "runtime_unavailable",
+			"message": "background process runtime is unavailable",
+		}), nil
+	}
 	if err != nil || record.AgentID != toolCtx.Agent.ID {
 		return toolJSON(map[string]any{
 			"error": "not_found", "message": "process not found",
@@ -156,6 +175,12 @@ func (a *app) executeResidentReadProcessLogTool(
 		tail,
 	)
 	if err != nil {
+		if errors.Is(err, errProcessRuntimeUnavailable) {
+			return toolJSON(map[string]any{
+				"error":   "runtime_unavailable",
+				"message": "background process runtime is unavailable",
+			}), nil
+		}
 		code := "process_log_failed"
 		message := "process log is unavailable"
 		if errors.Is(err, errProcessLogGone) {
@@ -187,6 +212,12 @@ func (a *app) executeResidentStopProcessTool(
 		}), nil
 	}
 	record, err := a.processRecord(toolCtx.Project.ID, processID)
+	if errors.Is(err, errProcessRuntimeUnavailable) {
+		return toolJSON(map[string]any{
+			"error":   "runtime_unavailable",
+			"message": "background process runtime is unavailable",
+		}), nil
+	}
 	if err != nil || record.AgentID != toolCtx.Agent.ID {
 		return toolJSON(map[string]any{
 			"error": "not_found", "message": "process not found",
@@ -217,6 +248,12 @@ func (a *app) executeResidentStopProcessTool(
 	a.backgroundOwnerMu.Lock()
 	defer a.backgroundOwnerMu.Unlock()
 	current, err := a.processRecord(toolCtx.Project.ID, processID)
+	if errors.Is(err, errProcessRuntimeUnavailable) {
+		return toolJSON(map[string]any{
+			"error":   "runtime_unavailable",
+			"message": "background process runtime is unavailable",
+		}), nil
+	}
 	if err != nil || current.AgentID != toolCtx.Agent.ID {
 		return toolJSON(map[string]any{
 			"error": "not_found", "message": "process not found",

@@ -183,29 +183,19 @@ func (a *app) drainProcessTerminalOutbox() {
 	for _, fault := range faults {
 		log.Printf("process terminal outbox skipped invalid event: %v", fault)
 	}
-	pending := make(map[string]bool, len(events))
 	for _, event := range events {
-		deliveryKey := processTerminalDeliveryKey(event.ProjectID, event.ID)
-		pending[deliveryKey] = true
 		runtimeEvent := event.runtimeEvent()
-		if !a.processTerminalWasDelivered(deliveryKey) {
-			if err := a.acceptProcessTerminalEvent(runtimeEvent); err != nil {
-				log.Printf(
-					"process terminal outbox delivery %s failed: %v",
-					event.ID,
-					err,
-				)
-				continue
-			}
-			a.markProcessTerminalDelivered(deliveryKey)
-			if err := a.afterProcessTerminalDelivery(runtimeEvent); err != nil {
-				log.Printf(
-					"process terminal outbox post-delivery %s failed: %v",
-					event.ID,
-					err,
-				)
-				continue
-			}
+		accepted, err := a.acceptProcessTerminalEvent(runtimeEvent)
+		if err != nil {
+			log.Printf(
+				"process terminal outbox delivery %s failed: %v",
+				event.ID,
+				err,
+			)
+			continue
+		}
+		if accepted {
+			a.emitRuntimeStateChanged(runtimeEvent)
 		}
 		if err := runtime.AcknowledgeTerminal(
 			event.ProjectID,
@@ -219,66 +209,14 @@ func (a *app) drainProcessTerminalOutbox() {
 			)
 			continue
 		}
-		a.forgetProcessTerminalDelivery(deliveryKey)
-		delete(pending, deliveryKey)
 	}
-	a.forgetProcessTerminalDeliveriesNotPending(pending)
 }
 
-func processTerminalDeliveryKey(projectID, eventID string) string {
-	return projectID + "\x00" + eventID
-}
-
-func (a *app) acceptProcessTerminalEvent(event RuntimeEvent) error {
-	a.processTerminalSinkMu.RLock()
-	sink := a.processTerminalSink
-	a.processTerminalSinkMu.RUnlock()
-	if sink != nil {
-		return sink(event)
+func (a *app) acceptProcessTerminalEvent(
+	event RuntimeEvent,
+) (bool, error) {
+	if a.processEventSink == nil {
+		return false, errors.New("process runtime event sink is unavailable")
 	}
-	a.emitRuntimeStateChanged(event)
-	return nil
-}
-
-func (a *app) afterProcessTerminalDelivery(event RuntimeEvent) error {
-	a.processTerminalSinkMu.RLock()
-	hook := a.processTerminalAfterDeliveryHook
-	a.processTerminalSinkMu.RUnlock()
-	if hook == nil {
-		return nil
-	}
-	return hook(event)
-}
-
-func (a *app) processTerminalWasDelivered(deliveryKey string) bool {
-	a.processTerminalSinkMu.RLock()
-	defer a.processTerminalSinkMu.RUnlock()
-	return a.processTerminalDelivered[deliveryKey]
-}
-
-func (a *app) markProcessTerminalDelivered(deliveryKey string) {
-	a.processTerminalSinkMu.Lock()
-	if a.processTerminalDelivered == nil {
-		a.processTerminalDelivered = map[string]bool{}
-	}
-	a.processTerminalDelivered[deliveryKey] = true
-	a.processTerminalSinkMu.Unlock()
-}
-
-func (a *app) forgetProcessTerminalDelivery(deliveryKey string) {
-	a.processTerminalSinkMu.Lock()
-	delete(a.processTerminalDelivered, deliveryKey)
-	a.processTerminalSinkMu.Unlock()
-}
-
-func (a *app) forgetProcessTerminalDeliveriesNotPending(
-	pending map[string]bool,
-) {
-	a.processTerminalSinkMu.Lock()
-	for deliveryKey := range a.processTerminalDelivered {
-		if !pending[deliveryKey] {
-			delete(a.processTerminalDelivered, deliveryKey)
-		}
-	}
-	a.processTerminalSinkMu.Unlock()
+	return a.processEventSink.Accept(event)
 }

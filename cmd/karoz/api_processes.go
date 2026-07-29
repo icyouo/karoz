@@ -127,6 +127,10 @@ func (a *app) handleProcesses(
 			tail,
 		)
 		if err != nil {
+			if errors.Is(err, errProcessRuntimeUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, errProcessRuntimeUnavailable)
+				return
+			}
 			if errors.Is(err, errProcessLogGone) {
 				writeError(w, http.StatusGone, err)
 				return
@@ -164,7 +168,10 @@ func (a *app) handleProcesses(
 		process, err := a.stopProcess(project.ID, "", processID)
 		if err != nil {
 			status := http.StatusConflict
-			if errors.Is(err, errProcessNotFound) {
+			if errors.Is(err, errProcessRuntimeUnavailable) {
+				status = http.StatusServiceUnavailable
+				err = errProcessRuntimeUnavailable
+			} else if errors.Is(err, errProcessNotFound) {
 				status = http.StatusNotFound
 				err = errors.New("process not found")
 			}

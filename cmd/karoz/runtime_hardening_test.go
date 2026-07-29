@@ -310,6 +310,132 @@ func TestResidentBashApprovalIsRevokedWhenRunFinishes(t *testing.T) {
 	}
 }
 
+func TestResidentBashApprovalsAreRevokedWhenOwnerIsDeletedAndRecreated(
+	t *testing.T,
+) {
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
+	created := time.Now().UTC().Add(-time.Minute)
+	agent := Agent{
+		ID: "designer", ProjectID: project.ID, CreatedAt: created,
+	}
+	a.agents[project.ID] = []Agent{
+		{ID: "karoz", ProjectID: project.ID, CreatedAt: created},
+		agent,
+	}
+	command := "printf revoked"
+	subjects := []residentBashSubject{}
+	for _, operation := range []string{
+		residentBashOperationForeground,
+		residentBashOperationBackgroundStart,
+		residentBashOperationBackgroundStop,
+	} {
+		processID := ""
+		if operation == residentBashOperationBackgroundStop {
+			processID = "owned-process"
+		}
+		subject, err := newResidentBashSubject(
+			operation,
+			project.ID,
+			agent.ID,
+			project.Path,
+			command,
+			processID,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		subjects = append(subjects, subject)
+	}
+	context := ResidentToolContext{
+		Project: project, Agent: agent, RunID: "old-run", Workdir: project.Path,
+	}
+	choices := make([]string, 0, len(subjects))
+	for _, subject := range subjects {
+		request := a.requestResidentBashApprovalSubject(context, subject, command)
+		choices = append(
+			choices,
+			bashChoiceID(t, request, residentBashApprovePrefix),
+		)
+	}
+	if err := a.deleteProjectAgent(project, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	recreated := agent
+	recreated.CreatedAt = time.Now().UTC()
+	a.mu.Lock()
+	a.agents[project.ID] = append(a.agents[project.ID], recreated)
+	a.mu.Unlock()
+
+	for index, choice := range choices {
+		recognized, err := a.resolveResidentBashChoice(
+			project.ID,
+			recreated.ID,
+			"new-run",
+			choice,
+		)
+		if !recognized || err == nil {
+			t.Fatalf(
+				"deleted owner approval %d survived identity reuse: recognized=%t err=%v",
+				index,
+				recognized,
+				err,
+			)
+		}
+		if a.consumeResidentBashApprovalSubject("new-run", subjects[index]) {
+			t.Fatalf("deleted owner approval %d was consumed after recreation", index)
+		}
+	}
+	a.mu.Lock()
+	remaining := len(a.residentBashApprovals)
+	a.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("deleted owner retained %d resident approvals", remaining)
+	}
+}
+
+func TestAgentDeletionSaveFailureRevokesApprovalsAndClearsFence(
+	t *testing.T,
+) {
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
+	created := time.Now().UTC()
+	agent := Agent{
+		ID: "designer", ProjectID: project.ID, CreatedAt: created,
+	}
+	a.agents[project.ID] = []Agent{
+		{ID: "karoz", ProjectID: project.ID, CreatedAt: created},
+		agent,
+	}
+	request := a.requestResidentBashApproval(
+		ResidentToolContext{Project: project, Agent: agent},
+		"printf pending",
+	)
+	if !toolResultIsChoiceRequest(request) {
+		t.Fatalf("pending approval = %s", request)
+	}
+	saveErr := errors.New("injected agent deletion queue save failure")
+	a.scheduledRunsSaveOverride = func(scheduledRunSnapshot) error {
+		return saveErr
+	}
+	if err := a.deleteProjectAgent(project, agent.ID); !errors.Is(err, saveErr) {
+		t.Fatalf("delete save failure = %v, want %v", err, saveErr)
+	}
+	if _, exists := a.projectAgent(project, agent.ID); !exists {
+		t.Fatal("failed deletion removed the agent")
+	}
+	a.mu.Lock()
+	deleting := a.backgroundOwnerDeleting[projectAgentKey(project.ID, agent.ID)]
+	approvals := len(a.residentBashApprovals)
+	a.mu.Unlock()
+	if deleting {
+		t.Fatal("failed pre-removal deletion left the owner fence set")
+	}
+	if approvals != 0 {
+		t.Fatalf("failed deletion retained %d stale approvals", approvals)
+	}
+}
+
 func bashChoiceID(t *testing.T, result, prefix string) string {
 	t.Helper()
 	var payload struct {

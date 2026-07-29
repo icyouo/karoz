@@ -22,14 +22,12 @@ type app struct {
 	processRuntime                     *processRuntimePersistence
 	processSupervisor                  *processSupervisor
 	processPersistenceFail             func(processPersistenceFailpoint) error
+	processEventSink                   *processRuntimeEventSink
 	processTerminalDrainMu             sync.Mutex
-	processTerminalSinkMu              sync.RWMutex
-	processTerminalSink                func(RuntimeEvent) error
-	processTerminalAfterDeliveryHook   func(RuntimeEvent) error
-	processTerminalDelivered           map[string]bool
 	processTerminalWake                chan struct{}
 	processTerminalWorkerOnce          sync.Once
 	backgroundOwnerMu                  sync.Mutex
+	backgroundOwnerDeleting            map[string]bool
 	projectRegistrationMu              sync.Mutex
 	projectCreateAfterRegistrationHook func()
 	settingsUpdateBeforeRegistryHook   func()
@@ -250,12 +248,13 @@ type BashToolResult struct {
 }
 
 type ResidentBashApproval struct {
-	ID        string
-	RunID     string
-	Subject   residentBashSubject
-	State     string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	ID             string
+	RunID          string
+	Subject        residentBashSubject
+	State          string
+	OwnerCreatedAt time.Time
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
 }
 
 type AgentStreamCallbacks struct {

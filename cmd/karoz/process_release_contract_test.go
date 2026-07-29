@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -212,6 +214,129 @@ func TestProcessMutationBoundaryRunsBeforeProjectLookup(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestDisabledProjectProcessSurfacesFailClosed(t *testing.T) {
+	root := t.TempDir()
+	projectPath := filepath.Join(root, "project")
+	if err := os.MkdirAll(filepath.Join(projectPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	project := projectFromPath(projectPath, root, "main")
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
+	agent := Agent{
+		ID: "owner", ProjectID: project.ID, CreatedAt: time.Now().UTC(),
+	}
+	a.agents[project.ID] = []Agent{agent}
+	if err := a.bootstrapProcessRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := a.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown process runtime: %v", err)
+		}
+	})
+	handler := a.httpHandler()
+	healthyUnknown := httptest.NewRequest(
+		http.MethodGet,
+		"/api/projects/"+project.ID+"/processes/missing",
+		nil,
+	)
+	healthyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(healthyResponse, healthyUnknown)
+	if healthyResponse.Code != http.StatusNotFound {
+		t.Fatalf(
+			"healthy unknown process status=%d body=%s",
+			healthyResponse.Code,
+			healthyResponse.Body.String(),
+		)
+	}
+
+	projectRuntime := a.processRuntime.projectRuntime(project.ID)
+	a.processRuntime.disableProject(
+		projectRuntime.identity,
+		errors.New("sensitive corrupt-project detail"),
+	)
+	requests := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/processes"},
+		{method: http.MethodGet, path: "/processes/missing"},
+		{method: http.MethodGet, path: "/processes/missing/log"},
+		{method: http.MethodPost, path: "/processes/missing/stop"},
+	}
+	for _, test := range requests {
+		request := httptest.NewRequest(
+			test.method,
+			"/api/projects/"+project.ID+test.path,
+			strings.NewReader(`{}`),
+		)
+		request.Host = "127.0.0.1:8088"
+		if test.method == http.MethodPost {
+			request.Header.Set("Origin", "http://127.0.0.1:8088")
+			request.Header.Set("Content-Type", "application/json")
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(
+				response.Body.String(),
+				`"error":"process runtime is unavailable"`,
+			) ||
+			strings.Contains(response.Body.String(), "sensitive") {
+			t.Fatalf(
+				"%s %s status=%d body=%s",
+				test.method,
+				test.path,
+				response.Code,
+				response.Body.String(),
+			)
+		}
+	}
+
+	toolContext := ResidentToolContext{
+		Project: project, Agent: agent, Workdir: project.Path,
+		RunID: "disabled-project", TurnType: "dev",
+	}
+	toolCalls := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "list", args: map[string]any{}},
+		{name: "log", args: map[string]any{"process_id": "missing"}},
+		{name: "stop", args: map[string]any{"process_id": "missing"}},
+		{name: "start", args: map[string]any{"command": "true"}},
+	}
+	for _, test := range toolCalls {
+		var result string
+		var err error
+		switch test.name {
+		case "list":
+			result, err = a.executeResidentListProcessesTool(
+				context.Background(), toolContext, test.args,
+			)
+		case "log":
+			result, err = a.executeResidentReadProcessLogTool(
+				context.Background(), toolContext, test.args,
+			)
+		case "stop":
+			result, err = a.executeResidentStopProcessTool(
+				context.Background(), toolContext, test.args,
+			)
+		case "start":
+			result, err = a.executeResidentRunBackgroundTool(
+				context.Background(), toolContext, test.args,
+			)
+		}
+		if err != nil ||
+			!strings.Contains(result, `"error":"runtime_unavailable"`) ||
+			strings.Contains(result, "sensitive") {
+			t.Fatalf("%s disabled-project result=%s err=%v", test.name, result, err)
+		}
 	}
 }
 

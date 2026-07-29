@@ -305,12 +305,24 @@ func (a *app) requestResidentBashApprovalSubject(
 	if a.residentBashApprovals == nil {
 		a.residentBashApprovals = map[string]ResidentBashApproval{}
 	}
+	ownerCreatedAt, ownerAvailable := a.residentApprovalOwnerLocked(
+		toolCtx.Project.ID,
+		toolCtx.Agent,
+	)
+	if !ownerAvailable {
+		a.mu.Unlock()
+		return toolJSON(map[string]any{
+			"error":   "owner_not_found",
+			"message": "resident command owner is no longer registered",
+		})
+	}
 	for id, candidate := range a.residentBashApprovals {
 		if !candidate.ExpiresAt.After(now) {
 			delete(a.residentBashApprovals, id)
 			continue
 		}
 		if candidate.Subject == subject &&
+			candidate.OwnerCreatedAt.Equal(ownerCreatedAt) &&
 			candidate.State == residentBashApprovalPending {
 			approval = candidate
 			break
@@ -319,7 +331,9 @@ func (a *app) requestResidentBashApprovalSubject(
 	if approval.ID == "" {
 		approval = ResidentBashApproval{
 			ID: randomID(), Subject: subject, State: residentBashApprovalPending,
-			CreatedAt: now, ExpiresAt: now.Add(residentBashApprovalTTL),
+			OwnerCreatedAt: ownerCreatedAt,
+			CreatedAt:      now,
+			ExpiresAt:      now.Add(residentBashApprovalTTL),
 		}
 		a.residentBashApprovals[approval.ID] = approval
 	}
@@ -377,6 +391,10 @@ func (a *app) resolveResidentBashChoice(projectID, agentID, runID, choiceID stri
 		approval.Subject.AgentID != agentID {
 		return true, errors.New("bash approval belongs to a different project or agent")
 	}
+	if !a.residentApprovalStillOwnedLocked(approval) {
+		delete(a.residentBashApprovals, id)
+		return true, errors.New("bash approval owner is no longer registered")
+	}
 	if approval.State != residentBashApprovalPending {
 		return true, errors.New("bash approval has already been resolved")
 	}
@@ -409,7 +427,8 @@ func (a *app) consumeResidentBashApprovalSubject(
 			continue
 		}
 		if approval.RunID == runID && approval.Subject == subject &&
-			approval.State == residentBashApprovalGranted {
+			approval.State == residentBashApprovalGranted &&
+			a.residentApprovalStillOwnedLocked(approval) {
 			delete(a.residentBashApprovals, id)
 			return true
 		}
@@ -461,4 +480,63 @@ func (a *app) revokeResidentBashApprovalsForRun(runID string) {
 			delete(a.residentBashApprovals, id)
 		}
 	}
+}
+
+func (a *app) revokeResidentBashApprovalsForOwnerLocked(
+	projectID, agentID string,
+) {
+	for id, approval := range a.residentBashApprovals {
+		if approval.Subject.ProjectID == projectID &&
+			approval.Subject.AgentID == agentID {
+			delete(a.residentBashApprovals, id)
+		}
+	}
+}
+
+func (a *app) residentApprovalOwnerLocked(
+	projectID string,
+	requested Agent,
+) (time.Time, bool) {
+	key := projectAgentKey(projectID, requested.ID)
+	if a.backgroundOwnerDeleting[key] {
+		return time.Time{}, false
+	}
+	agents, tracked := a.agents[projectID]
+	if !tracked {
+		return requested.CreatedAt, true
+	}
+	for _, current := range agents {
+		if current.ID != requested.ID {
+			continue
+		}
+		if !requested.CreatedAt.IsZero() &&
+			!current.CreatedAt.IsZero() &&
+			!requested.CreatedAt.Equal(current.CreatedAt) {
+			return time.Time{}, false
+		}
+		return current.CreatedAt, true
+	}
+	return time.Time{}, false
+}
+
+func (a *app) residentApprovalStillOwnedLocked(
+	approval ResidentBashApproval,
+) bool {
+	key := projectAgentKey(
+		approval.Subject.ProjectID,
+		approval.Subject.AgentID,
+	)
+	if a.backgroundOwnerDeleting[key] {
+		return false
+	}
+	agents, tracked := a.agents[approval.Subject.ProjectID]
+	if !tracked {
+		return true
+	}
+	for _, current := range agents {
+		if current.ID == approval.Subject.AgentID {
+			return current.CreatedAt.Equal(approval.OwnerCreatedAt)
+		}
+	}
+	return false
 }

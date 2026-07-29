@@ -41,7 +41,7 @@ func newApp(settings Settings) *app {
 		agentRunLedgers:          map[string]*agentRunLedger{},
 		agentRunFinishedWatchers: map[string]map[chan struct{}]struct{}{},
 		residentBashApprovals:    map[string]ResidentBashApproval{},
-		processTerminalDelivered: map[string]bool{},
+		backgroundOwnerDeleting:  map[string]bool{},
 		processTerminalWake:      make(chan struct{}, 1),
 		schedulerQueue:           runtimedomain.NewSchedulerQueue(),
 		schedulerExecutors:       map[ScheduledRunKind]ScheduledRunExecutor{},

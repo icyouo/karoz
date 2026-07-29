@@ -395,14 +395,59 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	if group, ok := a.groupForAgent(project.ID, agentID); ok && group.CoordinatorAgentID == agentID {
 		return fmt.Errorf("group coordinator cannot be deleted before coordination is transferred")
 	}
-	if err := a.stopOwnedProcesses(project.ID, agentID); err != nil {
-		return fmt.Errorf("stop background processes owned by %s: %w", agentID, err)
-	}
 	key := projectAgentKey(project.ID, agentID)
 	a.mu.Lock()
 	agents := a.agents[project.ID]
-	next := make([]Agent, 0, len(agents))
 	found := false
+	for _, agent := range agents {
+		if agent.ID == agentID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		a.mu.Unlock()
+		return fmt.Errorf("agent %s not found", agentID)
+	}
+	if a.backgroundOwnerDeleting == nil {
+		a.backgroundOwnerDeleting = map[string]bool{}
+	}
+	if a.backgroundOwnerDeleting[key] {
+		a.mu.Unlock()
+		return fmt.Errorf("agent %s deletion is already in progress", agentID)
+	}
+	a.backgroundOwnerDeleting[key] = true
+	a.revokeResidentBashApprovalsForOwnerLocked(project.ID, agentID)
+	cancel := a.agentRunCancels[key]
+	queue := a.schedulerQueue
+	a.mu.Unlock()
+
+	ownerRemoved := false
+	defer func() {
+		if ownerRemoved {
+			return
+		}
+		a.mu.Lock()
+		delete(a.backgroundOwnerDeleting, key)
+		a.mu.Unlock()
+	}()
+	if cancel != nil {
+		cancel()
+	}
+	if queue != nil {
+		queue.CancelAgent(project.ID, agentID, "agent deleted", time.Now().UTC())
+	}
+	if err := a.saveScheduledRuns(); err != nil {
+		return err
+	}
+	if err := a.stopOwnedProcesses(project.ID, agentID); err != nil {
+		return fmt.Errorf("stop background processes owned by %s: %w", agentID, err)
+	}
+
+	a.mu.Lock()
+	agents = a.agents[project.ID]
+	next := make([]Agent, 0, len(agents))
+	found = false
 	for _, agent := range agents {
 		if agent.ID == agentID {
 			found = true
@@ -424,26 +469,22 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	}
 	a.agentRoutes[project.ID] = routes
 	delete(a.agentRuns, key)
-	cancel := a.agentRunCancels[key]
 	delete(a.agentRunCancels, key)
-	queue := a.schedulerQueue
 	a.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	if queue != nil {
-		queue.CancelAgent(project.ID, agentID, "agent deleted", time.Now().UTC())
-	}
-	if err := a.saveScheduledRuns(); err != nil {
-		return err
-	}
+	ownerRemoved = true
 	if err := a.saveAgents(); err != nil {
 		return err
 	}
 	if err := a.saveAgentRoutes(); err != nil {
 		return err
 	}
-	return a.reconcileAgentGroups()
+	if err := a.reconcileAgentGroups(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	delete(a.backgroundOwnerDeleting, key)
+	a.mu.Unlock()
+	return nil
 }
 
 func (a *app) routesForProject(projectID string) []AgentRoute {

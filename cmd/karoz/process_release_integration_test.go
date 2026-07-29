@@ -320,7 +320,8 @@ func TestDeletingAgentStopsItsOwnedBackgroundProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := projectFromPath(projectPath, root, "main")
-	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
+	dataDir := t.TempDir()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
 	agent := Agent{
 		ID:        "deletable",
 		ProjectID: project.ID,
@@ -377,8 +378,114 @@ func TestDeletingAgentStopsItsOwnedBackgroundProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.State != "killed" {
+	if record.State != processdomain.StateKilled ||
+		record.Error != "owner deleted" {
 		t.Fatalf("owned process after agent delete = %+v", record)
+	}
+	shutdownContext, shutdownCancel := context.WithTimeout(
+		context.Background(),
+		3*time.Second,
+	)
+	if err := a.shutdownProcessRuntime(shutdownContext); err != nil {
+		shutdownCancel()
+		t.Fatal(err)
+	}
+	shutdownCancel()
+	restartedApp := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := restartedApp.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := restartedApp.projectAgent(project, agent.ID); exists {
+		t.Fatal("deleted agent returned after restart")
+	}
+	restarted, err := newProcessRuntimePersistence(
+		dataDir,
+		[]Project{project},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var durable processdomain.Process
+	for _, candidate := range restarted.List(project.ID) {
+		if candidate.ID == payload.Process.ID {
+			durable = candidate
+			break
+		}
+	}
+	if durable.ID == "" ||
+		durable.State != processdomain.StateKilled ||
+		durable.Error != "owner deleted" {
+		t.Fatalf("restarted owner-deleted process = %+v", durable)
+	}
+}
+
+func TestDeletingAgentFencesApprovalsAndCancelsBeforeProcessStop(
+	t *testing.T,
+) {
+	fixture := newBackgroundProcessTestFixture(t)
+	enteredFinalize := make(chan struct{})
+	releaseFinalize := make(chan struct{})
+	fixture.app.processSupervisor.config.BeforeFinalize = func() {
+		close(enteredFinalize)
+		<-releaseFinalize
+	}
+	processID := startBackgroundProcessFixture(t, fixture)
+	runCancelled := make(chan struct{})
+	key := projectAgentKey(fixture.project.ID, fixture.agent.ID)
+	fixture.app.mu.Lock()
+	fixture.app.agentRunCancels[key] = func() { close(runCancelled) }
+	fixture.app.mu.Unlock()
+
+	deleteResult := make(chan error, 1)
+	go func() {
+		deleteResult <- fixture.app.deleteProjectAgent(
+			fixture.project,
+			fixture.agent.ID,
+		)
+	}()
+	select {
+	case <-enteredFinalize:
+	case <-time.After(3 * time.Second):
+		t.Fatal("owner deletion did not reach the process terminal barrier")
+	}
+	select {
+	case <-runCancelled:
+	default:
+		t.Fatal("owner run was not cancelled before process stop")
+	}
+	request := fixture.app.requestResidentBashApproval(
+		ResidentToolContext{
+			Project: fixture.project,
+			Agent:   fixture.agent,
+		},
+		"printf stale",
+	)
+	if !strings.Contains(request, `"error":"owner_not_found"`) {
+		t.Fatalf("deleting owner created an approval: %s", request)
+	}
+	fixture.app.mu.Lock()
+	approvalCount := len(fixture.app.residentBashApprovals)
+	fixture.app.mu.Unlock()
+	if approvalCount != 0 {
+		t.Fatalf("deleting owner retained %d approvals", approvalCount)
+	}
+	close(releaseFinalize)
+	select {
+	case err := <-deleteResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("owner deletion did not finish")
+	}
+	record, err := fixture.app.processRecord(fixture.project.ID, processID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != processdomain.StateKilled ||
+		record.Error != "owner deleted" {
+		t.Fatalf("fenced owner process = %+v", record)
 	}
 }
 

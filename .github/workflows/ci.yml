@@ -44,5 +44,5 @@ jobs:
           go-version: "1.22"
           cache: false
 
-      - name: Test Windows Job Object and assignment failure
+      - name: Test Windows background release and Job Object contracts
         run: go test -v ./cmd/karoz -run TestWindows -count=5

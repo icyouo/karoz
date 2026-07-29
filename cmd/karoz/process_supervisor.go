@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -878,6 +879,21 @@ func (supervisor *processSupervisor) RecoveryFaults() []processRecoveryFault {
 }
 
 func (supervisor *processSupervisor) Stop(id string) error {
+	return supervisor.StopWithCause(
+		id,
+		processdomain.StateKilled,
+		"process stopped",
+	)
+}
+
+func (supervisor *processSupervisor) StopWithCause(
+	id string,
+	state processdomain.State,
+	message string,
+) error {
+	if !state.Terminal() || strings.TrimSpace(message) == "" {
+		return errors.New("process stop terminal cause is invalid")
+	}
 	supervisor.mu.Lock()
 	handle := supervisor.handles[id]
 	faulted := supervisor.faulted[id]
@@ -897,7 +913,7 @@ func (supervisor *processSupervisor) Stop(id string) error {
 		return supervisor.recoverExited(ctx, handle)
 	default:
 	}
-	handle.setCause(processdomain.StateKilled, "process stopped")
+	handle.setCause(state, message)
 	if err := handle.signal(syscall.SIGTERM); err != nil {
 		if containErr := supervisor.hardContainLive(handle); containErr != nil {
 			return containErr

@@ -11,7 +11,21 @@ import (
 	processdomain "github.com/karoz/karoz/internal/process"
 )
 
-var errProcessNotFound = errors.New("process not found")
+var (
+	errProcessNotFound           = errors.New("process not found")
+	errProcessRuntimeUnavailable = errors.New("process runtime is unavailable")
+)
+
+func (a *app) requireProcessProject(projectID string) error {
+	if a.processRuntime == nil {
+		return errProcessRuntimeUnavailable
+	}
+	if a.processRuntime.ProjectError(projectID) != nil ||
+		a.processRuntime.projectRuntime(projectID) == nil {
+		return errProcessRuntimeUnavailable
+	}
+	return nil
+}
 
 type processView struct {
 	ID             string              `json:"id"`
@@ -40,8 +54,8 @@ func (a *app) processViews(
 	projectID, agentID string,
 	limit int,
 ) ([]processView, error) {
-	if a.processRuntime == nil {
-		return nil, errors.New("process runtime is unavailable")
+	if err := a.requireProcessProject(projectID); err != nil {
+		return nil, err
 	}
 	if limit < 1 {
 		limit = 1
@@ -125,8 +139,8 @@ func (a *app) readProcessLog(
 	offset, limit int,
 	tail bool,
 ) (processLogWindow, error) {
-	if a.processRuntime == nil {
-		return processLogWindow{}, errors.New("process runtime is unavailable")
+	if err := a.requireProcessProject(projectID); err != nil {
+		return processLogWindow{}, err
 	}
 	reader, record, err := a.processRuntime.OpenLogReader(projectID, processID)
 	if err != nil {
@@ -182,11 +196,18 @@ func (a *app) stopOwnedProcesses(projectID, agentID string) error {
 	if a.processRuntime == nil || a.processSupervisor == nil {
 		return nil
 	}
+	if err := a.requireProcessProject(projectID); err != nil {
+		return err
+	}
 	for _, record := range a.processRuntime.List(projectID) {
 		if record.AgentID != agentID || record.State.Terminal() {
 			continue
 		}
-		if _, err := a.stopProcess(projectID, agentID, record.ID); err != nil {
+		if err := a.processSupervisor.StopWithCause(
+			record.ID,
+			processdomain.StateKilled,
+			"owner deleted",
+		); err != nil {
 			return err
 		}
 	}
