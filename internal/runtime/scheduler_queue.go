@@ -7,20 +7,19 @@ import (
 )
 
 type SchedulerQueue struct {
-	mu                      sync.Mutex
-	queues                  map[string][]string
-	jobs                    map[string]ScheduledRun
-	active                  map[string]bool
-	dedup                   map[string]bool
-	completedMonitorFires   []string
-	completedMonitorFireSet map[string]bool
+	mu                        sync.Mutex
+	queues                    map[string][]string
+	jobs                      map[string]ScheduledRun
+	active                    map[string]bool
+	dedup                     map[string]bool
+	completedMonitorFires     []string
+	completedMonitorFireSet   map[string]bool
+	monitorFirePendingRemoved map[string]bool
 }
-
-const MaxCompletedMonitorFires = 1024
 
 func NewSchedulerQueue() *SchedulerQueue {
 	return &SchedulerQueue{
-		queues: map[string][]string{}, jobs: map[string]ScheduledRun{}, active: map[string]bool{}, dedup: map[string]bool{}, completedMonitorFireSet: map[string]bool{},
+		queues: map[string][]string{}, jobs: map[string]ScheduledRun{}, active: map[string]bool{}, dedup: map[string]bool{}, completedMonitorFireSet: map[string]bool{}, monitorFirePendingRemoved: map[string]bool{},
 	}
 }
 
@@ -144,9 +143,10 @@ func (queue *SchedulerQueue) Complete(jobID string, outcome CompletionOutcome, m
 		delete(queue.jobs, jobID)
 		if job.DedupKey != "" {
 			delete(queue.dedup, job.DedupKey)
-			if job.Kind == ScheduledMonitorEvent {
+			if job.Kind == ScheduledMonitorEvent && !queue.monitorFirePendingRemoved[job.DedupKey] {
 				queue.rememberCompletedMonitorFireLocked(job.DedupKey)
 			}
+			delete(queue.monitorFirePendingRemoved, job.DedupKey)
 		}
 	case CompletionCancelled:
 		job.Status = ScheduledCancelled
@@ -199,6 +199,7 @@ func (queue *SchedulerQueue) Recover(jobs []ScheduledRun, now time.Time) Recover
 	queue.dedup = map[string]bool{}
 	queue.completedMonitorFires = nil
 	queue.completedMonitorFireSet = map[string]bool{}
+	queue.monitorFirePendingRemoved = map[string]bool{}
 	sort.SliceStable(jobs, func(i, j int) bool {
 		if jobs[i].CreatedAt.Equal(jobs[j].CreatedAt) {
 			return jobs[i].ID < jobs[j].ID
@@ -370,11 +371,6 @@ func (queue *SchedulerQueue) rememberCompletedMonitorFireLocked(key string) {
 	}
 	queue.completedMonitorFireSet[key] = true
 	queue.completedMonitorFires = append(queue.completedMonitorFires, key)
-	if len(queue.completedMonitorFires) > MaxCompletedMonitorFires {
-		oldest := queue.completedMonitorFires[0]
-		queue.completedMonitorFires = queue.completedMonitorFires[1:]
-		delete(queue.completedMonitorFireSet, oldest)
-	}
 }
 
 func (queue *SchedulerQueue) CompletedMonitorFires() []string {
@@ -391,6 +387,54 @@ func (queue *SchedulerQueue) RecoverCompletedMonitorFires(keys []string) {
 	}
 	for _, key := range keys {
 		queue.rememberCompletedMonitorFireLocked(key)
+	}
+}
+
+func (queue *SchedulerQueue) ConfirmMonitorFirePendingRemoval(key string) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if key == "" {
+		return
+	}
+	if queue.completedMonitorFireSet[key] {
+		delete(queue.completedMonitorFireSet, key)
+		for i, value := range queue.completedMonitorFires {
+			if value == key {
+				queue.completedMonitorFires = append(queue.completedMonitorFires[:i], queue.completedMonitorFires[i+1:]...)
+				break
+			}
+		}
+	}
+	for _, job := range queue.jobs {
+		if job.Kind == ScheduledMonitorEvent && job.DedupKey == key {
+			queue.monitorFirePendingRemoved[key] = true
+			return
+		}
+	}
+	delete(queue.monitorFirePendingRemoved, key)
+}
+
+func (queue *SchedulerQueue) PendingRemovalProofs() []string {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	keys := make([]string, 0, len(queue.monitorFirePendingRemoved))
+	for key := range queue.monitorFirePendingRemoved {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (queue *SchedulerQueue) RecoverPendingRemovalProofs(keys []string) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if queue.monitorFirePendingRemoved == nil {
+		queue.monitorFirePendingRemoved = map[string]bool{}
+	}
+	for _, key := range keys {
+		if key != "" {
+			queue.monitorFirePendingRemoved[key] = true
+		}
 	}
 }
 

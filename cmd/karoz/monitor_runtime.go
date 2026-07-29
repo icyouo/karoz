@@ -31,12 +31,16 @@ func (a *app) loadMonitors() error {
 	}
 	for projectID, items := range a.monitors {
 		for _, item := range items {
-			if item.ProjectID != projectID || monitordomain.ValidateMonitor(item) != nil {
+			if item.ProjectID != projectID || !gate3MonitorTrigger(item.Trigger.Kind) || monitordomain.ValidateMonitor(item) != nil {
 				return fmt.Errorf("invalid monitor %s", item.ID)
 			}
 		}
 	}
 	return nil
+}
+
+func gate3MonitorTrigger(kind monitordomain.TriggerKind) bool {
+	return kind == monitordomain.TriggerRuntimeEvent || kind == monitordomain.TriggerProcessExit
 }
 
 func (a *app) saveMonitorsLocked() error {
@@ -81,6 +85,8 @@ func cloneMonitorList(items []Monitor) []Monitor {
 }
 
 func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
+	a.backgroundOwnerMu.Lock()
+	defer a.backgroundOwnerMu.Unlock()
 	item.ProjectID = project.ID
 	item.ID = strings.TrimSpace(item.ID)
 	if item.ID == "" {
@@ -99,7 +105,7 @@ func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
 	if item.State == "" {
 		item.State = monitordomain.StateActive
 	}
-	if item.Trigger.Kind != monitordomain.TriggerRuntimeEvent && item.Trigger.Kind != monitordomain.TriggerProcessExit {
+	if !gate3MonitorTrigger(item.Trigger.Kind) {
 		return Monitor{}, errors.New("trigger kind is not available in Gate3")
 	}
 	now := time.Now().UTC()
@@ -137,6 +143,8 @@ func (a *app) setMonitorState(project Project, id string, state monitordomain.St
 	if state != monitordomain.StateActive && state != monitordomain.StateDisabled {
 		return Monitor{}, errors.New("invalid monitor state")
 	}
+	a.backgroundOwnerMu.Lock()
+	defer a.backgroundOwnerMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	items := a.monitors[project.ID]
@@ -161,6 +169,8 @@ func (a *app) setMonitorState(project Project, id string, state monitordomain.St
 }
 
 func (a *app) deleteMonitor(project Project, id string) error {
+	a.backgroundOwnerMu.Lock()
+	defer a.backgroundOwnerMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	items := a.monitors[project.ID]
@@ -335,7 +345,13 @@ func (a *app) dispatchMonitorPending(ref monitorFireRef) {
 		return
 	}
 	retry := admission == monitordomain.AdmissionFailed && pending.Attempts < 2
+	confirmed := admission != monitordomain.AdmissionFailed
 	a.mu.Unlock()
+	if confirmed {
+		queue := a.ensureSchedulerQueue()
+		queue.ConfirmMonitorFirePendingRemoval(pending.DedupKey)
+		a.saveOrLog("scheduled monitor fire receipt", a.saveScheduledRuns())
+	}
 	if retry {
 		time.AfterFunc(time.Second, func() { a.dispatchMonitorPending(ref) })
 	}
