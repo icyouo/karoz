@@ -3,13 +3,14 @@
       const projectID = state.project.id;
       const agentID = currentAgentID();
       const agentPath = '/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID);
-      const [inbox, memory, blackboard, artifactPayload, groupPayload, planPayload] = await Promise.all([
+      const [inbox, memory, blackboard, artifactPayload, groupPayload, planPayload, backgroundPayload] = await Promise.all([
         api(agentPath + '/inbox').catch(() => []),
         api(agentPath + '/memory').catch(() => []),
         api('/api/projects/' + projectID + '/agent-blackboard').catch(() => []),
 		api('/api/projects/' + projectID + '/artifacts').catch(() => ({ artifacts: [] })),
         api('/api/projects/' + projectID + '/groups').catch(() => ({ groups: [] })),
         api('/api/projects/' + projectID + '/plans').catch(() => ({ plans: [] })),
+        loadBackgroundActivityState({ render: false }).catch(() => null),
       ]);
       if (!state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       state.inbox = inbox || [];
@@ -18,6 +19,7 @@
 	  state.artifacts = (artifactPayload && artifactPayload.artifacts) || [];
       state.groups = (groupPayload && groupPayload.groups) || [];
       state.plans = (planPayload && planPayload.plans) || [];
+      void backgroundPayload;
       renderRuntimeStrip();
     }
     function renderRuntimeStrip() {
@@ -25,16 +27,18 @@
       const boardCount = (state.blackboard || []).length;
       const role = titleCaseCompact(shortAgentRole());
       const workText = currentAgentWorking() ? ' · Working' : '';
-      const chip = (panel, label, count, title, attention = 0) => '<button class="runtime-tool secondary ' + (state.sidePanel === panel ? 'active' : '') + '" data-side-panel="' + panel + '" title="' + escapeHTML(title || ('Open ' + label)) + '"><span>' + label + '</span><strong>' + count + '</strong>' + (attention > 0 ? '<i title="' + attention + ' pending" aria-label="' + attention + ' pending"></i>' : '') + '</button>';
+      const chip = (panel, label, count, title, attention = 0) => '<button class="runtime-tool secondary ' + (state.sidePanel === panel ? 'active' : '') + '" data-side-panel="' + panel + '" aria-label="' + escapeHTML(label + ' ' + count) + '" title="' + escapeHTML(title || ('Open ' + label)) + '"><span>' + label + '</span><strong>' + count + '</strong>' + (attention > 0 ? '<i title="' + attention + ' pending" aria-label="' + attention + ' pending"></i>' : '') + '</button>';
       $('agentHeaderMeta').textContent = role + workText;
       $('agentRuntimeTools').innerHTML = chip('inbox', 'Inbox', (state.inbox || []).length)
         + chip('plans', 'Plans', (state.plans || []).filter(item => !['completed', 'cancelled'].includes(item.status)).length, 'Open WorkPlans')
 		+ chip('artifacts', 'Artifacts', (state.artifacts || []).filter(item => item.status !== 'superseded').length)
         + chip('memory', 'Memory', (state.memory || []).length, pending > 0 ? ('Open Memory · ' + pending + ' pending') : 'Open Memory', pending)
-        + chip('blackboard', 'Activity', boardCount, 'Open agent activity');
+        + chip('blackboard', 'Activity', boardCount, 'Open agent activity')
+        + chip('background', 'Background', (state.backgroundProcesses || []).length + (state.backgroundMonitors || []).length, (state.backgroundProcesses || []).length + ' processes · ' + (state.backgroundMonitors || []).length + ' monitors');
       $('agentHeaderMeta').title = 'inbox ' + (state.inbox || []).length + ' · memory ' + (state.memory || []).length + ' · pending ' + pending + ' · blackboard ' + boardCount + ' · archived ' + (state.archive || []).length;
       renderAgentWorkingState();
-      if (['blackboard', 'artifacts', 'plans', 'inbox', 'memory', 'pending'].includes(state.sidePanel)) renderSidePane();
+      if (['blackboard', 'artifacts', 'plans', 'inbox', 'memory', 'pending', 'background'].includes(state.sidePanel) &&
+          !(state.sidePanel === 'background' && state.backgroundEditor)) renderSidePane();
     }
     async function loadWorkspaceFiles() {
       if (!state.project || !state.agent) return;
@@ -60,7 +64,8 @@
       }
       state.sidePanel = panel;
       renderSidePane();
-      await loadResidentRuntimeState();
+      if (panel === 'background') await loadBackgroundActivityState();
+      else await loadResidentRuntimeState();
       state.sidePanel = panel;
       renderSidePane();
       renderRuntimeStrip();
@@ -102,6 +107,10 @@
         }
         if (state.sidePanel === 'pending') {
           renderRuntimeListPane(body, 'Pending', (state.memory || []).filter(item => item.layer === 'pending'), renderMemoryEntry);
+          return;
+        }
+        if (state.sidePanel === 'background') {
+          renderBackgroundActivityPane(body);
           return;
         }
         renderPreviewPane(body);

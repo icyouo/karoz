@@ -12,7 +12,10 @@ func (a *app) handleMonitors(w http.ResponseWriter, r *http.Request, project Pro
 	if len(parts) == 0 {
 		switch r.Method {
 		case http.MethodGet:
-			writeJSON(w, map[string]any{"monitors": publicMonitors(a.monitorsForProject(project.ID))})
+			writeJSON(w, map[string]any{
+				"monitors":               publicMonitors(a.monitorsForProject(project.ID)),
+				"script_probe_supported": scriptProbeSupported,
+			})
 		case http.MethodPost:
 			var item Monitor
 			if err := readJSON(r, &item); err != nil {
@@ -77,7 +80,26 @@ func (a *app) handleMonitors(w http.ResponseWriter, r *http.Request, project Pro
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, item)
+		writeJSON(w, publicMonitor(item))
+		return
+	}
+	if r.Method == http.MethodPost && operation == "acknowledge-gap" {
+		var request monitorGapAcknowledgement
+		if err := readJSON(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		item, err := a.acknowledgeMonitorGap(
+			project,
+			id,
+			request,
+			"user",
+		)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, publicMonitor(item))
 		return
 	}
 	if r.Method == http.MethodDelete && operation == "delete" {

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	monitordomain "github.com/karoz/karoz/internal/monitor"
 )
 
 func (a *app) buildResidentAgentPrompt(project Project, agent Agent, userText, turnType string) string {
@@ -84,6 +86,7 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 	b.WriteString("- branch: " + project.DefaultBranch + "\n")
 	b.WriteString("- resident_agent: " + agentID + "\n")
 	a.renderResidentProcessObservation(&b, project.ID, agentID)
+	a.renderResidentMonitorObservation(&b, project.ID, agentID)
 	if skillPrompt := a.renderSkillsPrompt(project); skillPrompt != "" {
 		b.WriteString(limitString(skillPrompt, 6000))
 		b.WriteString("\n")
@@ -251,6 +254,49 @@ func (a *app) renderResidentProcessObservation(
 				strings.ReplaceAll(process.LastLine, "\n", " "),
 				240,
 			))
+		}
+		b.WriteString("\n")
+	}
+}
+
+func (a *app) renderResidentMonitorObservation(
+	b *strings.Builder,
+	projectID, agentID string,
+) {
+	if b == nil {
+		return
+	}
+	items := a.monitorsForOwner(projectID, agentID)
+	active := make([]Monitor, 0, 5)
+	for _, item := range items {
+		if item.State != monitordomain.StateActive {
+			continue
+		}
+		active = append(active, item)
+		if len(active) == 5 {
+			break
+		}
+	}
+	if len(active) == 0 {
+		return
+	}
+	b.WriteString("\n### Active monitors (bounded observation)\n")
+	for _, item := range active {
+		b.WriteString("- id: ")
+		b.WriteString(limitString(item.ID, 128))
+		b.WriteString("; name: ")
+		b.WriteString(limitString(strings.ReplaceAll(item.Name, "\n", " "), 160))
+		b.WriteString("; trigger: ")
+		b.WriteString(string(item.Trigger.Kind))
+		b.WriteString("; matches: ")
+		b.WriteString(fmt.Sprintf("%d", item.TriggerCount))
+		if item.LastCheckedAt != nil {
+			b.WriteString("; last_checked: ")
+			b.WriteString(item.LastCheckedAt.UTC().Format(time.RFC3339))
+		}
+		if item.NextCheckAt != nil {
+			b.WriteString("; next_check: ")
+			b.WriteString(item.NextCheckAt.UTC().Format(time.RFC3339))
 		}
 		b.WriteString("\n")
 	}

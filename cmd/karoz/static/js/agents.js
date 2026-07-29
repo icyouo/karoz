@@ -42,6 +42,10 @@
 		clearTimeout(runtimeStateRefreshTimer);
 		runtimeStateRefreshTimer = null;
 	  }
+      if (backgroundActivityRefreshTimer) {
+        clearTimeout(backgroundActivityRefreshTimer);
+        backgroundActivityRefreshTimer = null;
+      }
       if (agentPollTimer) {
         clearInterval(agentPollTimer);
         agentPollTimer = null;
@@ -149,6 +153,7 @@
           // be reflected in the agents snapshot.
           requestActiveRunSync();
           scheduleChatRefresh();
+          scheduleBackgroundActivityRefresh();
         } catch {}
       });
       runtimeEvents.addEventListener('runtime', event => {
@@ -161,6 +166,7 @@
 		  if (payload && payload.event) maybeAnimateHandoff(payload.event);
 		  clearTimeout(runtimeStateRefreshTimer);
 		  runtimeStateRefreshTimer = setTimeout(() => loadResidentRuntimeState(), 120);
+		  scheduleBackgroundActivityRefresh();
 		  scheduleChatRefresh();
 		} catch {}
       });

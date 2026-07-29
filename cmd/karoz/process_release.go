@@ -28,26 +28,31 @@ func (a *app) requireProcessProject(projectID string) error {
 }
 
 type processView struct {
-	ID             string              `json:"id"`
-	ProjectID      string              `json:"project_id"`
-	AgentID        string              `json:"agent_id"`
-	State          processdomain.State `json:"state"`
-	Terminal       bool                `json:"terminal"`
-	Succeeded      bool                `json:"succeeded"`
-	ExitCode       int                 `json:"exit_code"`
-	Error          string              `json:"error,omitempty"`
-	Description    string              `json:"description,omitempty"`
-	CommandSummary string              `json:"command_summary"`
-	CommandSHA256  string              `json:"command_sha256"`
-	RuntimeMS      int64               `json:"runtime_ms"`
-	LifetimeMS     int64               `json:"lifetime_ms"`
-	LogBytes       int64               `json:"log_bytes"`
-	LogLines       int64               `json:"log_lines"`
-	LogTruncated   bool                `json:"log_truncated"`
-	LastLine       string              `json:"last_line,omitempty"`
-	StartedAt      time.Time           `json:"started_at"`
-	UpdatedAt      time.Time           `json:"updated_at"`
-	EndedAt        *time.Time          `json:"ended_at,omitempty"`
+	ID                 string                   `json:"id"`
+	ProjectID          string                   `json:"project_id"`
+	AgentID            string                   `json:"agent_id"`
+	State              processdomain.State      `json:"state"`
+	Terminal           bool                     `json:"terminal"`
+	Succeeded          bool                     `json:"succeeded"`
+	ExitCode           int                      `json:"exit_code"`
+	Error              string                   `json:"error,omitempty"`
+	Description        string                   `json:"description,omitempty"`
+	CommandSummary     string                   `json:"command_summary"`
+	CommandSHA256      string                   `json:"command_sha256"`
+	RuntimeMS          int64                    `json:"runtime_ms"`
+	LifetimeMS         int64                    `json:"lifetime_ms"`
+	LogBytes           int64                    `json:"log_bytes"`
+	LogLines           int64                    `json:"log_lines"`
+	LogTruncated       bool                     `json:"log_truncated"`
+	LastLine           string                   `json:"last_line,omitempty"`
+	OutputGaps         []processdomain.SeqRange `json:"output_gaps,omitempty"`
+	OutputGapCount     uint64                   `json:"output_gap_count"`
+	OutputLostLines    uint64                   `json:"output_lost_lines"`
+	OutputGapOldestSeq uint64                   `json:"output_gap_oldest_seq"`
+	OutputGapNewestSeq uint64                   `json:"output_gap_newest_seq"`
+	StartedAt          time.Time                `json:"started_at"`
+	UpdatedAt          time.Time                `json:"updated_at"`
+	EndedAt            *time.Time               `json:"ended_at,omitempty"`
 }
 
 func (a *app) processViews(
@@ -240,9 +245,14 @@ func newProcessView(
 		CommandSHA256: hex.EncodeToString(sum[:]),
 		RuntimeMS:     runtime.Milliseconds(), LifetimeMS: record.LifetimeMS,
 		LogBytes: record.LogBytes, LogLines: record.LogLines,
-		LogTruncated: record.LogTruncated,
-		LastLine:     redactSensitiveProcessText(limitString(lastLine, 1000)),
-		StartedAt:    record.StartedAt, UpdatedAt: record.UpdatedAt,
+		LogTruncated:       record.LogTruncated,
+		LastLine:           redactSensitiveProcessText(limitString(lastLine, 1000)),
+		OutputGaps:         append([]processdomain.SeqRange(nil), record.OutputGaps...),
+		OutputGapCount:     record.OutputGapCount,
+		OutputLostLines:    record.OutputLostLines,
+		OutputGapOldestSeq: record.OutputGapOldestSeq,
+		OutputGapNewestSeq: record.OutputGapNewestSeq,
+		StartedAt:          record.StartedAt, UpdatedAt: record.UpdatedAt,
 		EndedAt: record.EndedAt,
 	}
 }

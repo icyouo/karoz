@@ -40,6 +40,12 @@
       state.chatNextBeforeSeq = 0;
       state.preview = null;
       state.sidePanel = null;
+      state.backgroundProcesses = [];
+      state.backgroundMonitors = [];
+      state.backgroundEditor = null;
+      state.backgroundLog = null;
+      state.backgroundProbeApproval = null;
+      state.backgroundCheckResults = {};
       state.skills = [];
       state.skillsProjectID = '';
       closeSkillSuggest();

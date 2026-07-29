@@ -496,6 +496,7 @@ func (a *app) setMonitorState(project Project, id string, state monitordomain.St
 		if items[i].ID != id {
 			continue
 		}
+		before := items[i]
 		if state == monitordomain.StateActive && items[i].ErrorCode == "owner_deleted" {
 			a.mu.Unlock()
 			return Monitor{}, errors.New("owner-deleted monitor cannot be resumed")
@@ -506,6 +507,23 @@ func (a *app) setMonitorState(project Project, id string, state monitordomain.St
 			return Monitor{}, errors.New(
 				"probe authorization error requires a newly approved trigger revision",
 			)
+		}
+		if state == monitordomain.StateActive &&
+			items[i].ErrorCode == "source_gap" {
+			barriers := make(map[string]uint64, len(items[i].SourceGaps))
+			for key, gap := range items[i].SourceGaps {
+				barriers[key] = gap.ResumeAfterVersion
+			}
+			enabled, err := monitordomain.EnableAfterSourceGaps(
+				items[i],
+				barriers,
+				time.Now().UTC(),
+			)
+			if err != nil {
+				a.mu.Unlock()
+				return Monitor{}, err
+			}
+			items[i] = enabled
 		}
 		if items[i].Trigger.Kind == monitordomain.TriggerScriptProbe &&
 			state == monitordomain.StateActive {
@@ -530,7 +548,6 @@ func (a *app) setMonitorState(project Project, id string, state monitordomain.St
 			items[i].LastError = ""
 			items[i].ConsecutiveProbeErrors = 0
 		}
-		before := items[i]
 		items[i].State, items[i].UpdatedAt = state, time.Now().UTC()
 		if items[i].Trigger.Kind == monitordomain.TriggerScriptProbe {
 			next := time.Now().UTC().Add(
@@ -958,7 +975,7 @@ func (a *app) setMonitorFromTool(toolCtx ResidentToolContext, args map[string]an
 	if err != nil {
 		return toolJSON(map[string]any{"error": "monitor_error", "message": err.Error()})
 	}
-	return toolJSON(map[string]any{"monitor": updated})
+	return toolJSON(map[string]any{"monitor": publicMonitor(updated)})
 }
 
 func (a *app) deleteMonitorFromTool(toolCtx ResidentToolContext, args map[string]any) string {
