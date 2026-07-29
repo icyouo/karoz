@@ -10,7 +10,7 @@ import (
 // RegisterProject extends the dormant runtime in place. It never rebuilds the
 // supervisor, so existing process handles keep their server-owned contexts.
 func (runtime *processRuntimePersistence) RegisterProject(project Project) error {
-	return runtime.RegisterProjectPrepared(project, nil)
+	return runtime.RegisterProjectPrepared(project, nil, nil)
 }
 
 // RegisterProjectPrepared validates identity admission before invoking prepare,
@@ -18,6 +18,7 @@ func (runtime *processRuntimePersistence) RegisterProject(project Project) error
 // committed. A rejected identity therefore cannot mutate application config.
 func (runtime *processRuntimePersistence) RegisterProjectPrepared(
 	project Project,
+	importIntent *runtimeProjectImportIntent,
 	prepare func() (bool, error),
 ) error {
 	identities, err := resolveRuntimeProjectIdentities(runtime.store.root, []Project{project})
@@ -29,7 +30,9 @@ func (runtime *processRuntimePersistence) RegisterProjectPrepared(
 	defer runtime.registryMu.Unlock()
 
 	runtime.indexMu.Lock()
-	alreadyRegistered, candidate, err := runtime.validateProjectRegistrationLocked(identity)
+	alreadyRegistered, candidate, err := runtime.validateProjectRegistrationLocked(
+		identity, importIntent,
+	)
 	if err != nil {
 		runtime.indexMu.Unlock()
 		return err
@@ -102,6 +105,9 @@ func (runtime *processRuntimePersistence) RegisterProjectPrepared(
 	}
 	entry.State = "ready"
 	entry.Generation++
+	if entry.Import != nil && entry.Import.Progress == projectImportAliasesCommitted {
+		entry.Import = nil
+	}
 	runtime.index.Projects[identity.SafeProjectKey] = entry
 	if err := runtime.store.saveJSON(
 		filepath.Join("project-runtime", "index.json"), runtime.index,
@@ -122,8 +128,77 @@ func (runtime *processRuntimePersistence) RegisterProjectPrepared(
 	return nil
 }
 
+func (runtime *processRuntimePersistence) advanceProjectImport(
+	projectID, expected, next string,
+) error {
+	key := monitordomain.SafeProjectKey(projectID)
+	runtime.indexMu.Lock()
+	defer runtime.indexMu.Unlock()
+	entry, exists := runtime.index.Projects[key]
+	if !exists || entry.Project.ProjectID != projectID || entry.Import == nil ||
+		entry.Import.Progress != expected {
+		return errors.New("runtime project import progress comparison failed")
+	}
+	candidate := cloneRuntimeProjectIndex(runtime.index)
+	entry = candidate.Projects[key]
+	intent := *entry.Import
+	intent.Progress = next
+	entry.Import = &intent
+	entry.Generation++
+	candidate.Projects[key] = entry
+	if err := validateRuntimeProjectIndex(candidate); err != nil {
+		return err
+	}
+	if err := runtime.store.saveJSON(
+		filepath.Join("project-runtime", "index.json"), candidate,
+	); err != nil {
+		return err
+	}
+	runtime.index = candidate
+	return nil
+}
+
+func (runtime *processRuntimePersistence) pendingProjectImports() map[string]runtimeProjectImportIntent {
+	runtime.indexMu.Lock()
+	defer runtime.indexMu.Unlock()
+	pending := make(map[string]runtimeProjectImportIntent)
+	for _, entry := range runtime.index.Projects {
+		if entry.State == "ready" && entry.Import != nil {
+			pending[entry.Project.ProjectID] = *entry.Import
+		}
+	}
+	return pending
+}
+
+func (runtime *processRuntimePersistence) completeProjectImport(projectID string) error {
+	key := monitordomain.SafeProjectKey(projectID)
+	runtime.indexMu.Lock()
+	defer runtime.indexMu.Unlock()
+	entry, exists := runtime.index.Projects[key]
+	if !exists || entry.Project.ProjectID != projectID ||
+		entry.State != "ready" || entry.Import == nil {
+		return errors.New("runtime project import completion comparison failed")
+	}
+	candidate := cloneRuntimeProjectIndex(runtime.index)
+	entry = candidate.Projects[key]
+	entry.Import = nil
+	entry.Generation++
+	candidate.Projects[key] = entry
+	if err := validateRuntimeProjectIndex(candidate); err != nil {
+		return err
+	}
+	if err := runtime.store.saveJSON(
+		filepath.Join("project-runtime", "index.json"), candidate,
+	); err != nil {
+		return err
+	}
+	runtime.index = candidate
+	return nil
+}
+
 func (runtime *processRuntimePersistence) validateProjectRegistrationLocked(
 	identity monitordomain.RuntimeProjectIdentity,
+	importIntent *runtimeProjectImportIntent,
 ) (bool, runtimeProjectIndex, error) {
 	if existing := runtime.projects[identity.ProjectID]; existing != nil {
 		if existing.identity != identity {
@@ -147,6 +222,10 @@ func (runtime *processRuntimePersistence) validateProjectRegistrationLocked(
 	}
 	entry = runtimeProjectIndexEntry{
 		Project: identity, State: "initializing", Generation: 1,
+	}
+	if importIntent != nil {
+		copyIntent := *importIntent
+		entry.Import = &copyIntent
 	}
 	candidate := cloneRuntimeProjectIndex(runtime.index)
 	candidate.Projects[identity.SafeProjectKey] = entry

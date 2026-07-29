@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -183,7 +186,27 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 	project.Name = name
 	a.projectRegistrationMu.Lock()
 	defer a.projectRegistrationMu.Unlock()
-	if err := a.registerProcessRuntimeProjectPrepared(project, func() (bool, error) {
+	a.mu.Lock()
+	previousSettings := a.settings
+	previousSettings.ExtraProjectsRoots = append(
+		[]string(nil), a.settings.ExtraProjectsRoots...,
+	)
+	previousAliases := cloneProjectAliases(a.projectAliases)
+	desiredSettings := previousSettings
+	desiredSettings.ExtraProjectsRoots = normalizeWorkspaceRoots(
+		append(append([]string(nil), previousSettings.ExtraProjectsRoots...), projectPath),
+		previousSettings.ProjectsRoot,
+	)
+	desiredAliases := cloneProjectAliases(previousAliases)
+	desiredAliases[project.ID] = name
+	a.mu.Unlock()
+	intent, err := a.buildProjectImportIntent(
+		projectPath, name, desiredSettings, desiredAliases,
+	)
+	if err != nil {
+		return Project{}, err
+	}
+	if err := a.registerProcessRuntimeProjectPrepared(project, intent, func() (bool, error) {
 		if err := initializeProjectKaroz(project.Path); err != nil {
 			return false, err
 		}
@@ -191,19 +214,8 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 			return false, err
 		}
 		a.mu.Lock()
-		previousSettings := a.settings
-		previousSettings.ExtraProjectsRoots = append(
-			[]string(nil), a.settings.ExtraProjectsRoots...,
-		)
-		previousAliases := cloneProjectAliases(a.projectAliases)
-		if a.projectAliases == nil {
-			a.projectAliases = map[string]string{}
-		}
-		a.projectAliases[project.ID] = name
-		a.settings.ExtraProjectsRoots = normalizeWorkspaceRoots(
-			append(a.settings.ExtraProjectsRoots, projectPath),
-			a.settings.ProjectsRoot,
-		)
+		a.settings = desiredSettings
+		a.projectAliases = cloneProjectAliases(desiredAliases)
 		a.mu.Unlock()
 		var settingsErr error
 		if a.projectImportSettingsSave != nil {
@@ -212,22 +224,67 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 			settingsErr = a.saveSettings()
 		}
 		if settingsErr != nil {
-			if rollbackErr := a.restoreImportedProjectConfig(
-				previousSettings, previousAliases,
-			); rollbackErr != nil {
-				// Recovery must retain the initializing claim when config
-				// rollback cannot be proven durable.
-				return true, errors.Join(settingsErr, rollbackErr)
+			actualDigest, digestErr := configFileSHA256(
+				filepath.Join(a.settings.DataDir, "settings.json"),
+			)
+			if digestErr != nil {
+				return true, errors.Join(settingsErr, digestErr)
 			}
+			if actualDigest == intent.SettingsAfterSHA256 {
+				return true, settingsErr
+			}
+			if actualDigest != intent.SettingsBeforeSHA256 {
+				return true, errors.Join(
+					settingsErr, errors.New("project import settings commit is ambiguous"),
+				)
+			}
+			a.mu.Lock()
+			a.settings = previousSettings
+			a.projectAliases = cloneProjectAliases(previousAliases)
+			a.mu.Unlock()
 			return false, settingsErr
 		}
+		settingsDigest, err := configFileSHA256(
+			filepath.Join(a.settings.DataDir, "settings.json"),
+		)
+		if err != nil {
+			return true, err
+		}
+		if settingsDigest != intent.SettingsAfterSHA256 {
+			return true, errors.New("project import settings commit digest mismatch")
+		}
 		if err := a.processRuntimePersistenceFail(processPersistAfterImportSettings); err != nil {
+			return true, err
+		}
+		if err := a.advanceProcessRuntimeProjectImport(
+			project.ID, projectImportClaimed, projectImportSettingsCommitted,
+		); err != nil {
+			return true, err
+		}
+		if err := a.processRuntimePersistenceFail(processPersistAfterImportSettingsState); err != nil {
 			return true, err
 		}
 		if err := a.saveProjectAliases(); err != nil {
 			return true, err
 		}
+		aliasesDigest, err := configFileSHA256(
+			filepath.Join(a.settings.DataDir, "project-aliases.json"),
+		)
+		if err != nil {
+			return true, err
+		}
+		if aliasesDigest != intent.AliasesAfterSHA256 {
+			return true, errors.New("project import aliases commit digest mismatch")
+		}
 		if err := a.processRuntimePersistenceFail(processPersistAfterImportAliases); err != nil {
+			return true, err
+		}
+		if err := a.advanceProcessRuntimeProjectImport(
+			project.ID, projectImportSettingsCommitted, projectImportAliasesCommitted,
+		); err != nil {
+			return true, err
+		}
+		if err := a.processRuntimePersistenceFail(processPersistAfterImportAliasesState); err != nil {
 			return true, err
 		}
 		return true, nil
@@ -237,23 +294,64 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 	return project, nil
 }
 
+func (a *app) buildProjectImportIntent(
+	root, alias string,
+	settings Settings,
+	aliases map[string]string,
+) (runtimeProjectImportIntent, error) {
+	settingsBefore, err := configFileSHA256(filepath.Join(a.settings.DataDir, "settings.json"))
+	if err != nil {
+		return runtimeProjectImportIntent{}, err
+	}
+	aliasesBefore, err := configFileSHA256(filepath.Join(a.settings.DataDir, "project-aliases.json"))
+	if err != nil {
+		return runtimeProjectImportIntent{}, err
+	}
+	settingsAfter, err := configValueSHA256(settings)
+	if err != nil {
+		return runtimeProjectImportIntent{}, err
+	}
+	aliasesAfter, err := configValueSHA256(aliases)
+	if err != nil {
+		return runtimeProjectImportIntent{}, err
+	}
+	intent := runtimeProjectImportIntent{
+		DesiredRoot: filepath.Clean(root), DesiredAlias: alias,
+		SettingsBeforeSHA256: settingsBefore, SettingsAfterSHA256: settingsAfter,
+		AliasesBeforeSHA256: aliasesBefore, AliasesAfterSHA256: aliasesAfter,
+		Progress: projectImportClaimed,
+	}
+	return intent, validateRuntimeProjectImportIntent(intent)
+}
+
+func configValueSHA256(value any) (string, error) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	data = append(data, '\n')
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func configFileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return missingConfigDigest, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func cloneProjectAliases(aliases map[string]string) map[string]string {
 	cloned := make(map[string]string, len(aliases))
 	for id, name := range aliases {
 		cloned[id] = name
 	}
 	return cloned
-}
-
-func (a *app) restoreImportedProjectConfig(
-	settings Settings,
-	aliases map[string]string,
-) error {
-	a.mu.Lock()
-	a.settings = settings
-	a.projectAliases = cloneProjectAliases(aliases)
-	a.mu.Unlock()
-	return errors.Join(a.saveProjectAliases(), a.saveSettings())
 }
 
 func initializeProjectKaroz(projectPath string) error {

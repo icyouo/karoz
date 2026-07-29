@@ -66,6 +66,9 @@ func (a *app) bootstrap() error {
 	if err := a.loadProjectAliases(); err != nil {
 		return err
 	}
+	if err := a.reconcileProjectImportIntents(); err != nil {
+		return err
+	}
 	if err := a.loadScheduledRuns(); err != nil {
 		return err
 	}

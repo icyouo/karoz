@@ -260,6 +260,18 @@ func (runtime *processRuntimePersistence) validateProjectBijection(
 			operation.ReservationToken != reservation.Token {
 			return fmt.Errorf("process %s reservation lacks its exact committed admission operation", id)
 		}
+		release, releaseExists := operations["process/"+id+"/release"]
+		if releaseExists {
+			if release.Kind != "process_terminal_release" ||
+				release.EntityID != id ||
+				release.ReservationToken != reservation.Token {
+				return fmt.Errorf("process %s release operation binding mismatch", id)
+			}
+		}
+		if record.Event == nil && record.AcknowledgedEventID != "" &&
+			!releaseExists {
+			return fmt.Errorf("process %s acknowledged reservation lacks its release operation", id)
+		}
 		ledgerReservation, exists := ledger.Slots[reservation.Slot]
 		if !exists || !monitordomain.SameTerminalReservation(
 			project.identity, reservation, ledgerReservation,

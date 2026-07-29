@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"time"
 
 	processdomain "github.com/karoz/karoz/internal/process"
@@ -82,13 +83,14 @@ func (a *app) registerProcessRuntimeProject(project Project) error {
 
 func (a *app) registerProcessRuntimeProjectPrepared(
 	project Project,
+	intent runtimeProjectImportIntent,
 	prepare func() (bool, error),
 ) error {
 	if a.processRuntime == nil {
 		_, err := prepare()
 		return err
 	}
-	return a.processRuntime.RegisterProjectPrepared(project, prepare)
+	return a.processRuntime.RegisterProjectPrepared(project, &intent, prepare)
 }
 
 func (a *app) processRuntimePersistenceFail(point processPersistenceFailpoint) error {
@@ -96,4 +98,58 @@ func (a *app) processRuntimePersistenceFail(point processPersistenceFailpoint) e
 		return nil
 	}
 	return a.processRuntime.persistenceFail(point)
+}
+
+func (a *app) advanceProcessRuntimeProjectImport(
+	projectID, expected, next string,
+) error {
+	if a.processRuntime == nil {
+		return nil
+	}
+	return a.processRuntime.advanceProjectImport(projectID, expected, next)
+}
+
+func (a *app) reconcileProjectImportIntents() error {
+	if a.processRuntime == nil {
+		return nil
+	}
+	for projectID, intent := range a.processRuntime.pendingProjectImports() {
+		settingsDigest, err := configFileSHA256(
+			filepath.Join(a.settings.DataDir, "settings.json"),
+		)
+		if err != nil {
+			return err
+		}
+		if settingsDigest != intent.SettingsAfterSHA256 {
+			return errors.New("project import settings digest mismatch")
+		}
+		aliasesPath := filepath.Join(a.settings.DataDir, "project-aliases.json")
+		aliasesDigest, err := configFileSHA256(aliasesPath)
+		if err != nil {
+			return err
+		}
+		switch aliasesDigest {
+		case intent.AliasesAfterSHA256:
+		case intent.AliasesBeforeSHA256:
+			a.mu.Lock()
+			a.projectAliases[projectID] = intent.DesiredAlias
+			a.mu.Unlock()
+			if err := a.saveProjectAliases(); err != nil {
+				return err
+			}
+			aliasesDigest, err = configFileSHA256(aliasesPath)
+			if err != nil {
+				return err
+			}
+			if aliasesDigest != intent.AliasesAfterSHA256 {
+				return errors.New("project import alias completion digest mismatch")
+			}
+		default:
+			return errors.New("project import aliases digest mismatch")
+		}
+		if err := a.processRuntime.completeProjectImport(projectID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

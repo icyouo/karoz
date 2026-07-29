@@ -492,12 +492,14 @@ func TestAdmissionRecoveryRejectsPersistedImpossibleState(t *testing.T) {
 }
 
 func TestTerminalReleaseRecoveryRejectsTokenEventAndAckMismatch(t *testing.T) {
-	for _, mutation := range []string{"operation-token", "event-token", "ack-id"} {
+	for _, mutation := range []string{
+		"missing-release", "operation-token", "event-token", "ack-id",
+	} {
 		t.Run(mutation, func(t *testing.T) {
 			dataDir := t.TempDir()
 			project := runtimeTestProject(t, "release-binding-"+mutation)
 			var failPoint processPersistenceFailpoint
-			if mutation == "ack-id" {
+			if mutation == "ack-id" || mutation == "missing-release" {
 				failPoint = processPersistAfterAck
 			} else {
 				failPoint = processPersistAfterReleaseIntent
@@ -531,6 +533,10 @@ func TestTerminalReleaseRecoveryRejectsTokenEventAndAckMismatch(t *testing.T) {
 			}
 			state := runtime.projects[project.ID]
 			switch mutation {
+			case "missing-release":
+				err = runtime.deleteOperation(
+					state, "process/"+record.ID+"/release",
+				)
 			case "operation-token":
 				state.journalMu.Lock()
 				operation := state.journal.Operations["process/"+record.ID+"/release"]
@@ -1391,19 +1397,66 @@ func TestImportProjectSettingsFailureAbortsClaimAndRollsBackConfig(t *testing.T)
 	}
 }
 
+func TestImportProjectSettingsFailurePreservesMissingConfigFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "existing", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
+	if err := a.bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := a.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown process runtime: %v", err)
+		}
+	})
+	externalPath := filepath.Join(t.TempDir(), "external")
+	if err := os.MkdirAll(filepath.Join(externalPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	external := projectFromPath(externalPath, externalPath, "extra")
+	a.projectImportSettingsSave = func() error {
+		return errors.New("settings save failed")
+	}
+	if _, err := a.importProject(ProjectCreateRequest{Path: externalPath}); err == nil {
+		t.Fatal("settings failure did not reject import")
+	}
+	for _, name := range []string{"settings.json", "project-aliases.json"} {
+		if _, err := os.Stat(filepath.Join(dataDir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("precommit rollback created %s: %v", name, err)
+		}
+	}
+	a.processRuntime.indexMu.Lock()
+	_, exists := a.processRuntime.index.Projects[monitordomain.SafeProjectKey(external.ID)]
+	a.processRuntime.indexMu.Unlock()
+	if exists {
+		t.Fatal("precommit failure retained its import claim")
+	}
+}
+
 func TestImportProjectClaimCrashRecovery(t *testing.T) {
 	tests := []struct {
-		point     processPersistenceFailpoint
-		committed bool
+		point           processPersistenceFailpoint
+		committed       bool
+		settingsWritten bool
+		aliasesWritten  bool
+		progress        string
+		intentCleared   bool
 	}{
-		{point: processPersistAfterIndexInitializing},
-		{point: processPersistAfterImportWorkspace},
-		{point: processPersistAfterImportSettings, committed: true},
-		{point: processPersistAfterImportAliases, committed: true},
-		{point: processPersistAfterAuthorityInitialize, committed: true},
-		{point: processPersistAfterLedgerInitialize, committed: true},
-		{point: processPersistAfterJournalInitialize, committed: true},
-		{point: processPersistAfterIndexReady, committed: true},
+		{point: processPersistAfterIndexInitializing, progress: projectImportClaimed},
+		{point: processPersistAfterImportWorkspace, progress: projectImportClaimed},
+		{point: processPersistAfterImportSettings, committed: true, settingsWritten: true, progress: projectImportClaimed},
+		{point: processPersistAfterImportSettingsState, committed: true, settingsWritten: true, progress: projectImportSettingsCommitted},
+		{point: processPersistAfterImportAliases, committed: true, settingsWritten: true, aliasesWritten: true, progress: projectImportSettingsCommitted},
+		{point: processPersistAfterImportAliasesState, committed: true, settingsWritten: true, aliasesWritten: true, progress: projectImportAliasesCommitted},
+		{point: processPersistAfterAuthorityInitialize, committed: true, settingsWritten: true, aliasesWritten: true, progress: projectImportAliasesCommitted},
+		{point: processPersistAfterLedgerInitialize, committed: true, settingsWritten: true, aliasesWritten: true, progress: projectImportAliasesCommitted},
+		{point: processPersistAfterJournalInitialize, committed: true, settingsWritten: true, aliasesWritten: true, progress: projectImportAliasesCommitted},
+		{point: processPersistAfterIndexReady, committed: true, settingsWritten: true, aliasesWritten: true, intentCleared: true},
 	}
 	for _, test := range tests {
 		t.Run(string(test.point), func(t *testing.T) {
@@ -1429,6 +1482,32 @@ func TestImportProjectClaimCrashRecovery(t *testing.T) {
 			if err := a.saveProjectAliases(); err != nil {
 				t.Fatal(err)
 			}
+			settingsPath := filepath.Join(dataDir, "settings.json")
+			aliasesPath := filepath.Join(dataDir, "project-aliases.json")
+			settingsBefore, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliasesBefore, err := os.ReadFile(aliasesPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			desiredSettings := a.settings
+			desiredSettings.ExtraProjectsRoots = normalizeWorkspaceRoots(
+				append([]string(nil), externalPath), desiredSettings.ProjectsRoot,
+			)
+			desiredAliases := cloneProjectAliases(a.projectAliases)
+			desiredAliases[external.ID] = "external"
+			settingsAfter, err := json.MarshalIndent(desiredSettings, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			settingsAfter = append(settingsAfter, '\n')
+			aliasesAfter, err := json.MarshalIndent(desiredAliases, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliasesAfter = append(aliasesAfter, '\n')
 			var fired atomic.Bool
 			a.processRuntime.fail = func(point processPersistenceFailpoint) error {
 				if point == test.point && fired.CompareAndSwap(false, true) {
@@ -1443,6 +1522,45 @@ func TestImportProjectClaimCrashRecovery(t *testing.T) {
 			}
 			if !fired.Load() {
 				t.Fatalf("failpoint %s was not reached", test.point)
+			}
+			settingsAtCrash, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliasesAtCrash, err := os.ReadFile(aliasesPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedSettings := settingsBefore
+			if test.settingsWritten {
+				expectedSettings = settingsAfter
+			}
+			expectedAliases := aliasesBefore
+			if test.aliasesWritten {
+				expectedAliases = aliasesAfter
+			}
+			if string(settingsAtCrash) != string(expectedSettings) ||
+				string(aliasesAtCrash) != string(expectedAliases) {
+				t.Fatalf(
+					"crash bytes settings_match=%v aliases_match=%v",
+					string(settingsAtCrash) == string(expectedSettings),
+					string(aliasesAtCrash) == string(expectedAliases),
+				)
+			}
+			externalKey := monitordomain.SafeProjectKey(external.ID)
+			a.processRuntime.indexMu.Lock()
+			crashEntry := a.processRuntime.index.Projects[externalKey]
+			a.processRuntime.indexMu.Unlock()
+			if test.intentCleared {
+				if crashEntry.Import != nil {
+					t.Fatalf("ready import retained intent: %+v", crashEntry.Import)
+				}
+			} else if crashEntry.Import == nil ||
+				crashEntry.Import.Progress != test.progress {
+				t.Fatalf(
+					"crash import progress=%+v, want %q",
+					crashEntry.Import, test.progress,
+				)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := a.shutdownProcessRuntime(ctx); err != nil {
@@ -1469,7 +1587,6 @@ func TestImportProjectClaimCrashRecovery(t *testing.T) {
 				t.Fatal("recovery lost the existing project runtime")
 			}
 			externalRuntime := restarted.processRuntime.projectRuntime(external.ID)
-			externalKey := monitordomain.SafeProjectKey(external.ID)
 			restarted.processRuntime.indexMu.Lock()
 			entry, claimExists := restarted.processRuntime.index.Projects[externalKey]
 			restarted.processRuntime.indexMu.Unlock()
@@ -1495,6 +1612,34 @@ func TestImportProjectClaimCrashRecovery(t *testing.T) {
 			}
 			if configured != test.committed {
 				t.Fatalf("configured=%v, want %v after %s", configured, test.committed, test.point)
+			}
+			settingsRecovered, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliasesRecovered, err := os.ReadFile(aliasesPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedSettings = settingsBefore
+			expectedAliases = aliasesBefore
+			if test.committed {
+				expectedSettings = settingsAfter
+				expectedAliases = aliasesAfter
+			}
+			if string(settingsRecovered) != string(expectedSettings) ||
+				string(aliasesRecovered) != string(expectedAliases) {
+				t.Fatalf(
+					"recovery bytes settings_match=%v aliases_match=%v",
+					string(settingsRecovered) == string(expectedSettings),
+					string(aliasesRecovered) == string(expectedAliases),
+				)
+			}
+			restarted.mu.Lock()
+			recoveredAlias := restarted.projectAliases[external.ID]
+			restarted.mu.Unlock()
+			if test.committed && recoveredAlias != "external" {
+				t.Fatalf("recovered alias=%q, want external", recoveredAlias)
 			}
 		})
 	}

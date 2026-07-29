@@ -48,6 +48,8 @@ const (
 	processPersistAfterImportWorkspace     processPersistenceFailpoint = "after_import_workspace"
 	processPersistAfterImportAliases       processPersistenceFailpoint = "after_import_aliases"
 	processPersistAfterImportSettings      processPersistenceFailpoint = "after_import_settings"
+	processPersistAfterImportSettingsState processPersistenceFailpoint = "after_import_settings_state"
+	processPersistAfterImportAliasesState  processPersistenceFailpoint = "after_import_aliases_state"
 	processPersistAfterIntent              processPersistenceFailpoint = "after_intent"
 	processPersistAfterTokenSelection      processPersistenceFailpoint = "after_token_selection"
 	processPersistAfterLedgerAllocate      processPersistenceFailpoint = "after_ledger_allocate"
@@ -79,7 +81,25 @@ type runtimeProjectIndexEntry struct {
 	Project    monitordomain.RuntimeProjectIdentity `json:"project"`
 	State      string                               `json:"state"`
 	Generation uint64                               `json:"generation"`
+	Import     *runtimeProjectImportIntent          `json:"import,omitempty"`
 }
+
+type runtimeProjectImportIntent struct {
+	DesiredRoot          string `json:"desired_root"`
+	DesiredAlias         string `json:"desired_alias"`
+	SettingsBeforeSHA256 string `json:"settings_before_sha256"`
+	SettingsAfterSHA256  string `json:"settings_after_sha256"`
+	AliasesBeforeSHA256  string `json:"aliases_before_sha256"`
+	AliasesAfterSHA256   string `json:"aliases_after_sha256"`
+	Progress             string `json:"progress"`
+}
+
+const (
+	projectImportClaimed           = "claimed"
+	projectImportSettingsCommitted = "settings_committed"
+	projectImportAliasesCommitted  = "aliases_committed"
+	missingConfigDigest            = "missing"
+)
 
 type processAuthoritySnapshot struct {
 	SchemaVersion int                                `json:"schema_version"`
@@ -302,6 +322,27 @@ func (runtime *processRuntimePersistence) bootstrap(
 					return journalErr
 				}
 				if !authorityExists && !ledgerFound && !journalFound {
+					if entry.Import != nil {
+						if entry.Import.Progress != projectImportClaimed {
+							return errors.New("uncommitted project import has committed progress")
+						}
+						settingsDigest, digestErr := configFileSHA256(
+							filepath.Join(runtime.store.root, "settings.json"),
+						)
+						if digestErr != nil {
+							return digestErr
+						}
+						aliasesDigest, digestErr := configFileSHA256(
+							filepath.Join(runtime.store.root, "project-aliases.json"),
+						)
+						if digestErr != nil {
+							return digestErr
+						}
+						if settingsDigest != entry.Import.SettingsBeforeSHA256 ||
+							aliasesDigest != entry.Import.AliasesBeforeSHA256 {
+							return errors.New("uncommitted project import config digest mismatch")
+						}
+					}
 					delete(index.Projects, key)
 					indexNeedsSave = true
 					continue
@@ -377,6 +418,37 @@ func (runtime *processRuntimePersistence) bootstrap(
 				return errors.New("runtime project index identity/state mismatch")
 			}
 		}
+		if entry.Import != nil {
+			settingsDigest, digestErr := configFileSHA256(
+				filepath.Join(runtime.store.root, "settings.json"),
+			)
+			if digestErr != nil {
+				runtime.disableProject(identity, digestErr)
+				continue
+			}
+			aliasesDigest, digestErr := configFileSHA256(
+				filepath.Join(runtime.store.root, "project-aliases.json"),
+			)
+			if digestErr != nil {
+				runtime.disableProject(identity, digestErr)
+				continue
+			}
+			if settingsDigest != entry.Import.SettingsAfterSHA256 ||
+				(aliasesDigest != entry.Import.AliasesBeforeSHA256 &&
+					aliasesDigest != entry.Import.AliasesAfterSHA256) {
+				runtime.disableProject(
+					identity, errors.New("committed project import config digest mismatch"),
+				)
+				continue
+			}
+			if entry.Import.Progress == projectImportAliasesCommitted &&
+				aliasesDigest != entry.Import.AliasesAfterSHA256 {
+				runtime.disableProject(
+					identity, errors.New("project import alias progress/digest mismatch"),
+				)
+				continue
+			}
+		}
 		if partitionErr := invalidAuthority[identity.SafeProjectKey]; partitionErr != nil {
 			runtime.disableProject(identity, partitionErr)
 			continue
@@ -426,6 +498,10 @@ func (runtime *processRuntimePersistence) bootstrap(
 		if entry.State == "initializing" && initializedKeys[key] {
 			entry.State = "ready"
 			entry.Generation++
+			if entry.Import != nil &&
+				entry.Import.Progress == projectImportAliasesCommitted {
+				entry.Import = nil
+			}
 			index.Projects[key] = entry
 		}
 	}
@@ -547,12 +623,46 @@ func validateRuntimeProjectIndex(index runtimeProjectIndex) error {
 			entry.Generation == 0 {
 			return errors.New("invalid runtime project index entry")
 		}
+		if entry.Import != nil {
+			if err := validateRuntimeProjectImportIntent(*entry.Import); err != nil {
+				return err
+			}
+		}
 		if other := paths[entry.Project.CanonicalProjectPath]; other != "" && other != entry.Project.ProjectID {
 			return errors.New("runtime project index canonical path collision")
 		}
 		paths[entry.Project.CanonicalProjectPath] = entry.Project.ProjectID
 	}
 	return nil
+}
+
+func validateRuntimeProjectImportIntent(intent runtimeProjectImportIntent) error {
+	if strings.TrimSpace(intent.DesiredRoot) == "" ||
+		filepath.Clean(intent.DesiredRoot) != intent.DesiredRoot ||
+		strings.TrimSpace(intent.DesiredAlias) == "" ||
+		!validConfigDigest(intent.SettingsBeforeSHA256) ||
+		!validConfigDigest(intent.SettingsAfterSHA256) ||
+		!validConfigDigest(intent.AliasesBeforeSHA256) ||
+		!validConfigDigest(intent.AliasesAfterSHA256) {
+		return errors.New("invalid runtime project import intent")
+	}
+	switch intent.Progress {
+	case projectImportClaimed, projectImportSettingsCommitted, projectImportAliasesCommitted:
+		return nil
+	default:
+		return errors.New("invalid runtime project import progress")
+	}
+}
+
+func validConfigDigest(value string) bool {
+	if value == missingConfigDigest {
+		return true
+	}
+	if len(value) != 64 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func validateProcessAuthoritySnapshot(snapshot processAuthoritySnapshot) error {
