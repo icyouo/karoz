@@ -70,6 +70,16 @@ func (a *app) monitorsForOwner(projectID, agentID string) []Monitor {
 	return out
 }
 
+func cloneMonitorList(items []Monitor) []Monitor {
+	if len(items) == 0 {
+		return nil
+	}
+	raw, _ := json.Marshal(items)
+	var copied []Monitor
+	_ = json.Unmarshal(raw, &copied)
+	return copied
+}
+
 func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
 	item.ProjectID = project.ID
 	item.ID = strings.TrimSpace(item.ID)
@@ -89,6 +99,9 @@ func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
 	if item.State == "" {
 		item.State = monitordomain.StateActive
 	}
+	if item.Trigger.Kind != monitordomain.TriggerRuntimeEvent && item.Trigger.Kind != monitordomain.TriggerProcessExit {
+		return Monitor{}, errors.New("trigger kind is not available in Gate3")
+	}
 	now := time.Now().UTC()
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = now
@@ -96,6 +109,11 @@ func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
 	item.UpdatedAt = now
 	if err := a.requireMonitorOwner(project, item.AgentID); err != nil {
 		return Monitor{}, err
+	}
+	if item.Action.Kind == monitordomain.ActionNotifyAgent {
+		if _, ok := a.projectAgent(project, item.Action.AgentID); !ok {
+			return Monitor{}, errors.New("monitor notify target agent not found")
+		}
 	}
 	if err := monitordomain.ValidateMonitor(item); err != nil {
 		return Monitor{}, err
@@ -126,9 +144,15 @@ func (a *app) setMonitorState(project Project, id string, state monitordomain.St
 		if items[i].ID != id {
 			continue
 		}
+		if state == monitordomain.StateActive && items[i].ErrorCode == "owner_deleted" {
+			return Monitor{}, errors.New("owner-deleted monitor cannot be resumed")
+		}
+		before := items[i]
 		items[i].State, items[i].UpdatedAt = state, time.Now().UTC()
 		a.monitors[project.ID] = items
 		if err := a.saveMonitorsLocked(); err != nil {
+			items[i] = before
+			a.monitors[project.ID] = items
 			return Monitor{}, err
 		}
 		return items[i], nil
@@ -171,6 +195,7 @@ func (a *app) evaluateRuntimeMonitorEvent(event RuntimeEvent) {
 	var fires []monitorFireRef
 	a.mu.Lock()
 	items := a.monitors[event.ProjectID]
+	before := cloneMonitorList(items)
 	changed := false
 	for i := range items {
 		item := items[i]
@@ -188,7 +213,11 @@ func (a *app) evaluateRuntimeMonitorEvent(event RuntimeEvent) {
 			continue
 		}
 		briefing, _ := json.Marshal(map[string]any{"event_id": event.ID, "kind": event.Kind, "entity_id": event.EntityID, "from": event.From, "to": event.To, "reason": event.Reason})
-		pending, err := monitordomain.FreezePendingFire(items[i], monitorEvent, detail, briefing, json.RawMessage(`{}`), event.CreatedAt)
+		renderedBriefing := strings.TrimSpace(items[i].Action.Template)
+		if renderedBriefing == "" {
+			renderedBriefing = detail
+		}
+		pending, err := monitordomain.FreezePendingFire(items[i], monitorEvent, renderedBriefing, briefing, json.RawMessage(`{}`), event.CreatedAt)
 		if err != nil {
 			items[i].State = monitordomain.StateError
 			items[i].ErrorCode = "pending_freeze"
@@ -211,6 +240,7 @@ func (a *app) evaluateRuntimeMonitorEvent(event RuntimeEvent) {
 	if changed {
 		a.monitors[event.ProjectID] = items
 		if err := a.saveMonitorsLocked(); err != nil {
+			a.monitors[event.ProjectID] = before
 			a.mu.Unlock()
 			return
 		}
@@ -249,6 +279,7 @@ func monitorProcessExit(event RuntimeEvent) *monitordomain.ProcessExit {
 func (a *app) dispatchMonitorPending(ref monitorFireRef) {
 	a.mu.Lock()
 	items := a.monitors[ref.ProjectID]
+	before := cloneMonitorList(items)
 	var pending monitordomain.PendingFire
 	found := false
 	for i := range items {
@@ -271,6 +302,7 @@ func (a *app) dispatchMonitorPending(ref monitorFireRef) {
 	}
 	a.monitors[ref.ProjectID] = items
 	if err := a.saveMonitorsLocked(); err != nil {
+		a.monitors[ref.ProjectID] = before
 		a.mu.Unlock()
 		return
 	}
@@ -279,6 +311,7 @@ func (a *app) dispatchMonitorPending(ref monitorFireRef) {
 	admission := a.admitMonitorPending(ref.ProjectID, ref.MonitorID, pending)
 	a.mu.Lock()
 	items = a.monitors[ref.ProjectID]
+	before = cloneMonitorList(items)
 	for i := range items {
 		for j := range items[i].PendingFires {
 			p := &items[i].PendingFires[j]
@@ -296,8 +329,16 @@ func (a *app) dispatchMonitorPending(ref monitorFireRef) {
 		}
 	}
 	a.monitors[ref.ProjectID] = items
-	_ = a.saveMonitorsLocked()
+	if err := a.saveMonitorsLocked(); err != nil {
+		a.monitors[ref.ProjectID] = before
+		a.mu.Unlock()
+		return
+	}
+	retry := admission == monitordomain.AdmissionFailed && pending.Attempts < 2
 	a.mu.Unlock()
+	if retry {
+		time.AfterFunc(time.Second, func() { a.dispatchMonitorPending(ref) })
+	}
 }
 
 func (a *app) admitMonitorPending(projectID, monitorID string, pending monitordomain.PendingFire) monitordomain.Admission {
@@ -332,6 +373,9 @@ func (a *app) admitMonitorPending(projectID, monitorID string, pending monitordo
 		if existing.DedupKey == pending.DedupKey {
 			return monitordomain.AdmissionAlreadyPresent
 		}
+	}
+	if a.ensureSchedulerQueue().HasCompletedMonitorFire(pending.DedupKey) {
+		return monitordomain.AdmissionAlreadyPresent
 	}
 	return monitordomain.AdmissionFailed
 }

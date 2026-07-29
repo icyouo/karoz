@@ -185,7 +185,7 @@ func (a *app) drainProcessTerminalOutbox() {
 	}
 	for _, event := range events {
 		runtimeEvent := event.runtimeEvent()
-		accepted, err := a.admitProcessTerminalMessage(runtimeEvent)
+		_, err := a.admitProcessTerminalMessage(runtimeEvent)
 		if err != nil {
 			log.Printf(
 				"process terminal outbox delivery %s failed: %v",
@@ -194,9 +194,10 @@ func (a *app) drainProcessTerminalOutbox() {
 			)
 			continue
 		}
-		if accepted {
-			a.emitRuntimeStateChanged(runtimeEvent)
-		}
+		// A durable message can predate a crash between its save and the source
+		// acknowledgement. Re-evaluate the stable terminal event on retry; the
+		// monitor fire ID is derived from this event ID.
+		a.emitRuntimeStateChanged(runtimeEvent)
 		if err := runtime.AcknowledgeTerminal(
 			event.ProjectID,
 			event.ProcessID,

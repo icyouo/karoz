@@ -36,6 +36,11 @@ func TestRuntimeMonitorFreezesAndDeliversBlackboardAction(t *testing.T) {
 	if delivered != 1 {
 		t.Fatalf("monitor delivery count=%d entries=%+v", delivered, entries)
 	}
+	for _, entry := range entries {
+		if entry.SourceType == "monitor" && entry.Detail != "task changed" {
+			t.Fatalf("configured action template was not delivered: %+v", entry)
+		}
+	}
 	// Stable fire identity makes a duplicate runtime emission idempotent.
 	a.emitRuntimeStateChanged(RuntimeEvent{ID: "event-1", ProjectID: project.ID, Kind: "task_changed", EntityID: "task-1", To: "done", CreatedAt: time.Now().UTC()})
 	entries = a.blackboardFor(project.ID, 20)
@@ -99,5 +104,23 @@ func TestDeletingOwnerDisablesAndClearsMonitorWork(t *testing.T) {
 	got := a.monitorsForProject(project.ID)
 	if len(got) != 1 || got[0].State != monitordomain.StateDisabled || got[0].ErrorCode != "owner_deleted" || len(got[0].PendingFires) != 0 {
 		t.Fatalf("deleted owner monitor = %+v", got)
+	}
+	// Recreating the ID must not reactivate a monitor created by the deleted
+	// owner identity.
+	a.agents[project.ID] = append(a.agents[project.ID], Agent{ID: "owner", ProjectID: project.ID})
+	if _, err := a.setMonitorState(project, "m-delete", monitordomain.StateActive); err == nil {
+		t.Fatal("recreated owner resumed owner-deleted monitor")
+	}
+}
+
+func TestGate3CreateMonitorRejectsUnavailableTriggerAndMissingTarget(t *testing.T) {
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	project := Project{ID: "p1", Name: "p1", Path: t.TempDir()}
+	a.agents[project.ID] = []Agent{{ID: "owner", ProjectID: project.ID}}
+	if _, err := a.createMonitor(project, Monitor{AgentID: "owner", Name: "output", Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerProcessOutput, ProcessID: "p", Pattern: "x"}, Action: monitordomain.Action{Kind: monitordomain.ActionBlackboard, Topic: "x"}}); err == nil {
+		t.Fatal("process_output was accepted in Gate3")
+	}
+	if _, err := a.createMonitor(project, Monitor{AgentID: "owner", Name: "target", Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerRuntimeEvent, EventKinds: []string{"task_changed"}}, Action: monitordomain.Action{Kind: monitordomain.ActionNotifyAgent, AgentID: "missing", TurnType: "ask"}}); err == nil {
+		t.Fatal("missing notify target was accepted")
 	}
 }

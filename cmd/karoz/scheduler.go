@@ -54,7 +54,8 @@ type IdleReconcileRunPayload struct {
 type ScheduledRunExecutor func(context.Context, ScheduledRun) error
 
 type scheduledRunSnapshot struct {
-	Jobs []ScheduledRun `json:"jobs"`
+	Jobs                  []ScheduledRun `json:"jobs"`
+	CompletedMonitorFires []string       `json:"completed_monitor_fires,omitempty"`
 }
 
 const defaultScheduledRunStartWait = 3 * time.Minute
@@ -303,7 +304,8 @@ func (a *app) scheduledAgentWorkerActive(projectID, agentID string) bool {
 func (a *app) saveScheduledRuns() error {
 	a.schedulerPersistMu.Lock()
 	defer a.schedulerPersistMu.Unlock()
-	snapshot := scheduledRunSnapshot{Jobs: a.ensureSchedulerQueue().Jobs()}
+	queue := a.ensureSchedulerQueue()
+	snapshot := scheduledRunSnapshot{Jobs: queue.Jobs(), CompletedMonitorFires: queue.CompletedMonitorFires()}
 	if a.scheduledRunsSaveOverride != nil {
 		return a.scheduledRunsSaveOverride(snapshot)
 	}
@@ -336,11 +338,12 @@ func (a *app) loadScheduledRuns() error {
 		// minute value for every turn, including plan/dev. Preserve explicitly
 		// supplied non-default values, while upgrading that legacy default to
 		// the selected resident execution total and recording a separate wait.
-		if err := persistenceadapter.NewJSONStore(a.settings.DataDir).Save("agent-run-queue.json", scheduledRunSnapshot{Jobs: snapshot.Jobs}, 0644); err != nil {
+		if err := persistenceadapter.NewJSONStore(a.settings.DataDir).Save("agent-run-queue.json", scheduledRunSnapshot{Jobs: snapshot.Jobs, CompletedMonitorFires: snapshot.CompletedMonitorFires}, 0644); err != nil {
 			return err
 		}
 	}
 	recovery := a.ensureSchedulerQueue().Recover(snapshot.Jobs, time.Now().UTC())
+	a.ensureSchedulerQueue().RecoverCompletedMonitorFires(snapshot.CompletedMonitorFires)
 	for _, job := range recovery.TerminalFailures {
 		if job.Kind == ScheduledRunHandoff {
 			a.notifyFailedHandoff(job)

@@ -7,16 +7,20 @@ import (
 )
 
 type SchedulerQueue struct {
-	mu     sync.Mutex
-	queues map[string][]string
-	jobs   map[string]ScheduledRun
-	active map[string]bool
-	dedup  map[string]bool
+	mu                      sync.Mutex
+	queues                  map[string][]string
+	jobs                    map[string]ScheduledRun
+	active                  map[string]bool
+	dedup                   map[string]bool
+	completedMonitorFires   []string
+	completedMonitorFireSet map[string]bool
 }
+
+const MaxCompletedMonitorFires = 1024
 
 func NewSchedulerQueue() *SchedulerQueue {
 	return &SchedulerQueue{
-		queues: map[string][]string{}, jobs: map[string]ScheduledRun{}, active: map[string]bool{}, dedup: map[string]bool{},
+		queues: map[string][]string{}, jobs: map[string]ScheduledRun{}, active: map[string]bool{}, dedup: map[string]bool{}, completedMonitorFireSet: map[string]bool{},
 	}
 }
 
@@ -30,7 +34,7 @@ type EnqueueResult struct {
 func (queue *SchedulerQueue) Enqueue(job ScheduledRun) EnqueueResult {
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
-	if job.DedupKey != "" && queue.dedup[job.DedupKey] {
+	if job.DedupKey != "" && (queue.dedup[job.DedupKey] || queue.completedMonitorFireSet[job.DedupKey]) {
 		return EnqueueResult{}
 	}
 	if _, exists := queue.jobs[job.ID]; exists {
@@ -140,6 +144,9 @@ func (queue *SchedulerQueue) Complete(jobID string, outcome CompletionOutcome, m
 		delete(queue.jobs, jobID)
 		if job.DedupKey != "" {
 			delete(queue.dedup, job.DedupKey)
+			if job.Kind == ScheduledMonitorEvent {
+				queue.rememberCompletedMonitorFireLocked(job.DedupKey)
+			}
 		}
 	case CompletionCancelled:
 		job.Status = ScheduledCancelled
@@ -190,6 +197,8 @@ func (queue *SchedulerQueue) Recover(jobs []ScheduledRun, now time.Time) Recover
 	queue.jobs = map[string]ScheduledRun{}
 	queue.active = map[string]bool{}
 	queue.dedup = map[string]bool{}
+	queue.completedMonitorFires = nil
+	queue.completedMonitorFireSet = map[string]bool{}
 	sort.SliceStable(jobs, func(i, j int) bool {
 		if jobs[i].CreatedAt.Equal(jobs[j].CreatedAt) {
 			return jobs[i].ID < jobs[j].ID
@@ -353,4 +362,40 @@ func (queue *SchedulerQueue) HasDedup(key string) bool {
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
 	return queue.dedup[key]
+}
+
+func (queue *SchedulerQueue) rememberCompletedMonitorFireLocked(key string) {
+	if key == "" || queue.completedMonitorFireSet[key] {
+		return
+	}
+	queue.completedMonitorFireSet[key] = true
+	queue.completedMonitorFires = append(queue.completedMonitorFires, key)
+	if len(queue.completedMonitorFires) > MaxCompletedMonitorFires {
+		oldest := queue.completedMonitorFires[0]
+		queue.completedMonitorFires = queue.completedMonitorFires[1:]
+		delete(queue.completedMonitorFireSet, oldest)
+	}
+}
+
+func (queue *SchedulerQueue) CompletedMonitorFires() []string {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	return append([]string(nil), queue.completedMonitorFires...)
+}
+
+func (queue *SchedulerQueue) RecoverCompletedMonitorFires(keys []string) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if queue.completedMonitorFireSet == nil {
+		queue.completedMonitorFireSet = map[string]bool{}
+	}
+	for _, key := range keys {
+		queue.rememberCompletedMonitorFireLocked(key)
+	}
+}
+
+func (queue *SchedulerQueue) HasCompletedMonitorFire(key string) bool {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	return queue.completedMonitorFireSet[key]
 }
