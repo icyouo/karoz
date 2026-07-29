@@ -176,6 +176,20 @@ func newProcessRuntimePersistence(
 	projects []Project,
 	fail func(processPersistenceFailpoint) error,
 ) (*processRuntimePersistence, error) {
+	return newProcessRuntimePersistenceWithRetention(
+		dataDir,
+		projects,
+		fail,
+		defaultProcessRetentionPolicy(),
+	)
+}
+
+func newProcessRuntimePersistenceWithRetention(
+	dataDir string,
+	projects []Project,
+	fail func(processPersistenceFailpoint) error,
+	retention processdomain.RetentionPolicy,
+) (*processRuntimePersistence, error) {
 	store, err := newSecureRuntimeStore(dataDir)
 	if err != nil {
 		return nil, err
@@ -189,7 +203,7 @@ func newProcessRuntimePersistence(
 		projectErrs: make(map[string]error), disabledKeys: make(map[string]bool),
 		openReaders: make(map[string]map[string]int),
 		fail:        fail, now: func() time.Time { return time.Now().UTC() },
-		retention: defaultProcessRetentionPolicy(),
+		retention: retention,
 	}
 	if err := runtime.bootstrap(identities); err != nil {
 		return nil, err

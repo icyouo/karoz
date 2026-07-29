@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1191,6 +1192,346 @@ func TestProcessRetentionPinsOpenLogReaderThenReturnsGone(t *testing.T) {
 		record.ID,
 	); !errors.Is(err, errProcessLogGone) {
 		t.Fatalf("retired log error = %v, want gone", err)
+	}
+}
+
+func processRetentionRestartProjects(
+	t *testing.T,
+	names ...string,
+) (string, []Project) {
+	t.Helper()
+	root := t.TempDir()
+	projects := make([]Project, 0, len(names))
+	for _, name := range names {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		projects = append(projects, projectFromPath(path, root, "main"))
+	}
+	return root, projects
+}
+
+func persistAcknowledgedTerminalProcess(
+	t *testing.T,
+	runtime *processRuntimePersistence,
+	project Project,
+	id string,
+	endedAt time.Time,
+	logBody string,
+) processdomain.Process {
+	t.Helper()
+	record := processdomain.Process{
+		ID: id, ProjectID: project.ID, AgentID: "agent",
+		Command: "true", Workdir: project.Path,
+		State: processdomain.StateStarting, LifetimeMS: 60_000,
+		StartedAt: endedAt.Add(-2 * time.Second),
+		UpdatedAt: endedAt.Add(-2 * time.Second),
+	}
+	prepared, err := runtime.PrepareRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := runtime.OpenLog(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte(logBody)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	admitRuntimeRecord(t, runtime, prepared)
+	prepared.State = processdomain.StateRunning
+	prepared.UpdatedAt = endedAt.Add(-time.Second)
+	if err := runtime.MarkRunning(prepared); err != nil {
+		t.Fatal(err)
+	}
+	prepared.State = processdomain.StateSucceeded
+	prepared.UpdatedAt = endedAt
+	prepared.EndedAt = timePointer(endedAt)
+	prepared.LogBytes = int64(len(logBody))
+	prepared.LogLines = int64(strings.Count(logBody, "\n"))
+	if err := runtime.MarkTerminal(prepared); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.AcknowledgeTerminal(
+		project.ID,
+		prepared.ID,
+		processTerminalEventID(prepared.ID),
+	); err != nil {
+		t.Fatal(err)
+	}
+	return prepared
+}
+
+func setProcessRetentionEnv(
+	t *testing.T,
+	maxRecords int,
+	maxAge time.Duration,
+	maxTotalBytes int64,
+) {
+	t.Helper()
+	t.Setenv("KAROZ_PROCESS_TERMINAL_MAX_RECORDS", fmt.Sprintf("%d", maxRecords))
+	t.Setenv("KAROZ_PROCESS_TERMINAL_RETENTION", maxAge.String())
+	t.Setenv("KAROZ_PROCESS_LOG_TOTAL_BYTES", fmt.Sprintf("%d", maxTotalBytes))
+}
+
+func bootstrapRetentionTestApp(
+	t *testing.T,
+	dataDir, projectsRoot string,
+) *app {
+	t.Helper()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: projectsRoot})
+	if err := a.bootstrapProcessRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	if !a.processRuntimeReady() {
+		t.Fatal("process runtime was exposed before configured retention completed")
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := a.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown process runtime: %v", err)
+		}
+	})
+	return a
+}
+
+func assertRetainedProcessIDs(
+	t *testing.T,
+	runtime *processRuntimePersistence,
+	projectID string,
+	want ...string,
+) {
+	t.Helper()
+	got := runtime.List(projectID)
+	if len(got) != len(want) {
+		t.Fatalf("%s retained %d records, want %d: %+v", projectID, len(got), len(want), got)
+	}
+	wantIDs := make(map[string]bool, len(want))
+	for _, id := range want {
+		wantIDs[id] = true
+	}
+	for _, record := range got {
+		if !wantIDs[record.ID] {
+			t.Fatalf("%s retained unexpected process %s: %+v", projectID, record.ID, got)
+		}
+	}
+}
+
+func TestConfiguredProcessRetentionAppliesDuringBootstrap(t *testing.T) {
+	const generousBytes = int64(1 << 20)
+	tests := []struct {
+		name          string
+		maxRecords    int
+		maxAge        time.Duration
+		maxTotalBytes int64
+		seed          func(*testing.T, *processRuntimePersistence, Project, time.Time)
+		want          []string
+	}{
+		{
+			name: "record count", maxRecords: 1,
+			maxAge: 24 * time.Hour, maxTotalBytes: generousBytes,
+			seed: func(t *testing.T, runtime *processRuntimePersistence, project Project, now time.Time) {
+				persistAcknowledgedTerminalProcess(t, runtime, project, "old", now.Add(-2*time.Minute), "a\n")
+				persistAcknowledgedTerminalProcess(t, runtime, project, "new", now.Add(-time.Minute), "b\n")
+			},
+			want: []string{"new"},
+		},
+		{
+			name: "age", maxRecords: 10,
+			maxAge: time.Hour, maxTotalBytes: generousBytes,
+			seed: func(t *testing.T, runtime *processRuntimePersistence, project Project, now time.Time) {
+				persistAcknowledgedTerminalProcess(t, runtime, project, "expired", now.Add(-2*time.Hour), "a\n")
+				persistAcknowledgedTerminalProcess(t, runtime, project, "fresh", now.Add(-30*time.Minute), "b\n")
+			},
+			want: []string{"fresh"},
+		},
+		{
+			name: "total bytes", maxRecords: 10,
+			maxAge: 24 * time.Hour, maxTotalBytes: 6,
+			seed: func(t *testing.T, runtime *processRuntimePersistence, project Project, now time.Time) {
+				persistAcknowledgedTerminalProcess(t, runtime, project, "old-bytes", now.Add(-2*time.Minute), "123456")
+				persistAcknowledgedTerminalProcess(t, runtime, project, "new-bytes", now.Add(-time.Minute), "abcdef")
+			},
+			want: []string{"new-bytes"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			projectsRoot, projects := processRetentionRestartProjects(t, "project")
+			seed, err := newProcessRuntimePersistence(dataDir, projects, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			seed.now = func() time.Time { return now }
+			test.seed(t, seed, projects[0], now)
+			if got := len(seed.List(projects[0].ID)); got != 2 {
+				t.Fatalf("seed retained %d records, want 2", got)
+			}
+
+			setProcessRetentionEnv(
+				t,
+				test.maxRecords,
+				test.maxAge,
+				test.maxTotalBytes,
+			)
+			a := bootstrapRetentionTestApp(t, dataDir, projectsRoot)
+			if a.processRuntime.retention.MaxRecords != test.maxRecords ||
+				a.processRuntime.retention.MaxAge != test.maxAge ||
+				a.processRuntime.retention.MaxTotalBytes != test.maxTotalBytes {
+				t.Fatalf("runtime retention = %+v", a.processRuntime.retention)
+			}
+			assertRetainedProcessIDs(
+				t,
+				a.processRuntime,
+				projects[0].ID,
+				test.want...,
+			)
+		})
+	}
+}
+
+func TestConfiguredProcessRetentionBootstrapIsProjectIsolated(t *testing.T) {
+	dataDir := t.TempDir()
+	projectsRoot, projects := processRetentionRestartProjects(
+		t,
+		"project-a",
+		"project-b",
+	)
+	seed, err := newProcessRuntimePersistence(dataDir, projects, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	seed.now = func() time.Time { return now }
+	persistAcknowledgedTerminalProcess(t, seed, projects[0], "a-old", now.Add(-3*time.Minute), "a\n")
+	persistAcknowledgedTerminalProcess(t, seed, projects[0], "a-new", now.Add(-time.Minute), "b\n")
+	persistAcknowledgedTerminalProcess(t, seed, projects[1], "b-only", now.Add(-2*time.Minute), "c\n")
+
+	setProcessRetentionEnv(t, 1, 24*time.Hour, 1<<20)
+	a := bootstrapRetentionTestApp(t, dataDir, projectsRoot)
+	assertRetainedProcessIDs(t, a.processRuntime, projects[0].ID, "a-new")
+	assertRetainedProcessIDs(t, a.processRuntime, projects[1].ID, "b-only")
+}
+
+func TestConfiguredProcessRetentionRestartRecoversOpenReaderAndTombstone(
+	t *testing.T,
+) {
+	dataDir := t.TempDir()
+	projectsRoot, projects := processRetentionRestartProjects(t, "project")
+	seed, err := newProcessRuntimePersistence(dataDir, projects, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	seed.now = func() time.Time { return now }
+	old := persistAcknowledgedTerminalProcess(
+		t,
+		seed,
+		projects[0],
+		"old-open-reader",
+		now.Add(-2*time.Minute),
+		"reader survives unlink\n",
+	)
+	persistAcknowledgedTerminalProcess(
+		t,
+		seed,
+		projects[0],
+		"new",
+		now.Add(-time.Minute),
+		"new\n",
+	)
+	reader, _, err := seed.OpenLogReader(projects[0].ID, old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	setProcessRetentionEnv(t, 1, 24*time.Hour, 1<<20)
+	first := bootstrapRetentionTestApp(t, dataDir, projectsRoot)
+	assertRetainedProcessIDs(t, first.processRuntime, projects[0].ID, "new")
+	if _, _, err := first.processRuntime.OpenLogReader(
+		projects[0].ID,
+		old.ID,
+	); !errors.Is(err, errProcessLogGone) {
+		t.Fatalf("first restart pruned log error = %v, want gone", err)
+	}
+	body, err := io.ReadAll(reader)
+	if err != nil || string(body) != "reader survives unlink\n" {
+		t.Fatalf("pre-restart open reader body = %q err=%v", body, err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	first.processRuntime.authorityMu.Lock()
+	firstKey := first.processRuntime.projects[projects[0].ID].identity.SafeProjectKey
+	firstPartition := first.processRuntime.authority.Projects[firstKey]
+	_, tombstoned := firstPartition.Tombstones[old.ID]
+	first.processRuntime.authorityMu.Unlock()
+	if !tombstoned {
+		t.Fatal("configured bootstrap did not persist the pruned-record tombstone")
+	}
+
+	second := bootstrapRetentionTestApp(t, dataDir, projectsRoot)
+	assertRetainedProcessIDs(t, second.processRuntime, projects[0].ID, "new")
+	second.processRuntime.authorityMu.Lock()
+	secondKey := second.processRuntime.projects[projects[0].ID].identity.SafeProjectKey
+	secondPartition := second.processRuntime.authority.Projects[secondKey]
+	tombstoneCount := len(secondPartition.Tombstones)
+	second.processRuntime.authorityMu.Unlock()
+	if tombstoneCount != 0 {
+		t.Fatalf("second restart retained %d recovered tombstones", tombstoneCount)
+	}
+	if _, _, err := second.processRuntime.OpenLogReader(
+		projects[0].ID,
+		old.ID,
+	); err == nil || errors.Is(err, errProcessLogGone) {
+		t.Fatalf("recovered tombstone lookup error = %v, want not found", err)
+	}
+}
+
+func TestConfiguredProcessRetentionCleanupFailureBlocksRuntimeExposure(
+	t *testing.T,
+) {
+	dataDir := t.TempDir()
+	projectsRoot, projects := processRetentionRestartProjects(t, "project")
+	seed, err := newProcessRuntimePersistence(dataDir, projects, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	seed.now = func() time.Time { return now }
+	record := persistAcknowledgedTerminalProcess(
+		t,
+		seed,
+		projects[0],
+		"cleanup-failure",
+		now.Add(-time.Minute),
+		"cannot remove this log\n",
+	)
+	logPath := filepath.Join(dataDir, record.LogPath)
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(logPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	setProcessRetentionEnv(t, 10, 24*time.Hour, 1)
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: projectsRoot})
+	t.Cleanup(a.supervisorCancel)
+	if err := a.bootstrapProcessRuntime(); err == nil {
+		t.Fatal("configured retention cleanup failure did not fail startup")
+	}
+	if a.processRuntime != nil || a.processSupervisor != nil ||
+		a.processRuntimeReady() {
+		t.Fatal("failed configured retention cleanup exposed process runtime")
 	}
 }
 

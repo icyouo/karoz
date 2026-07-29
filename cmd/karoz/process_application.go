@@ -18,15 +18,15 @@ func (a *app) bootstrapProcessRuntime() error {
 	if err != nil {
 		return err
 	}
-	runtime, err := newProcessRuntimePersistence(
+	runtime, err := newProcessRuntimePersistenceWithRetention(
 		a.settings.DataDir,
 		projects,
 		a.processPersistenceFail,
+		releaseConfig.Retention,
 	)
 	if err != nil {
 		return err
 	}
-	runtime.retention = releaseConfig.Retention
 	supervisorConfig := releaseConfig.Supervisor
 	supervisorConfig.PrepareRecord = runtime.PrepareRecord
 	supervisor, err := newProcessSupervisor(
