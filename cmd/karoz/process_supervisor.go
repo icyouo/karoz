@@ -538,13 +538,13 @@ func (supervisor *processSupervisor) collect(
 					handle.early = append(handle.early, chunk[:accepted]...)
 				}
 			}
-			handle.collectMu.Unlock()
 			if registered && supervisor.config.OutputLine != nil {
 				record := handle.snapshot()
 				for _, line := range lines {
 					supervisor.config.OutputLine(record, line)
 				}
 			}
+			handle.collectMu.Unlock()
 		}
 		if readErr != nil {
 			return

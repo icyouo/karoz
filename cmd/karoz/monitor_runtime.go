@@ -149,7 +149,7 @@ func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
 		if a.processOutputBaselines == nil {
 			a.processOutputBaselines = map[string]uint64{}
 		}
-		a.processOutputBaselines[project.ID+"/"+item.Trigger.ProcessID] = outputBaseline
+		a.processOutputBaselines[project.ID+"/"+item.ID] = outputBaseline
 	}
 	return item, nil
 }
@@ -175,7 +175,7 @@ func (a *app) armProcessOutputMonitor() {
 			continue
 		}
 		if record, err := a.processRecord(item.ProjectID, item.Trigger.ProcessID); err == nil {
-			a.setOutputBaseline(item.ProjectID, item.Trigger.ProcessID, record.OutputSeq)
+			a.setOutputBaseline(item.ProjectID, item.ID, record.OutputSeq)
 		}
 	}
 }
@@ -201,23 +201,17 @@ func (a *app) enqueueProcessOutputObservation(record processdomain.Process, line
 	}
 }
 
-func (a *app) setOutputBaseline(projectID, processID string, sequence uint64) {
+func (a *app) setOutputBaseline(projectID, monitorID string, sequence uint64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.processOutputBaselines == nil {
 		a.processOutputBaselines = map[string]uint64{}
 	}
-	a.processOutputBaselines[projectID+"/"+processID] = sequence
+	a.processOutputBaselines[projectID+"/"+monitorID] = sequence
 }
 
 func (a *app) evaluateProcessOutput(observation processOutputObservation) {
-	key := observation.ProjectID + "/" + observation.ProcessID
 	a.mu.Lock()
-	if observation.Line.Sequence <= a.processOutputBaselines[key] {
-		a.mu.Unlock()
-		return
-	}
-	a.processOutputBaselines[key] = observation.Line.Sequence
 	items := a.monitors[observation.ProjectID]
 	before := cloneMonitorList(items)
 	var fires []monitorFireRef
@@ -225,6 +219,11 @@ func (a *app) evaluateProcessOutput(observation processOutputObservation) {
 	text := redactSensitiveProcessText(observation.Line.Text)
 	for i := range items {
 		item := items[i]
+		key := observation.ProjectID + "/" + item.ID
+		if observation.Line.Sequence <= a.processOutputBaselines[key] {
+			continue
+		}
+		a.processOutputBaselines[key] = observation.Line.Sequence
 		matched, detail := monitordomain.MatchProcessOutput(item, monitordomain.ProcessOutput{ProcessID: observation.ProcessID, Sequence: observation.Line.Sequence, Line: text, Origin: monitordomain.Origin{Kind: "runtime"}})
 		if !matched {
 			continue
