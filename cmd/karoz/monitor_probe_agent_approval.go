@@ -43,6 +43,8 @@ func (a *app) prepareMonitorProbeFromTool(
 			"error": "validation_error", "message": err.Error(),
 		})
 	}
+	a.backgroundOwnerMu.Lock()
+	defer a.backgroundOwnerMu.Unlock()
 	now := time.Now().UTC()
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -203,6 +205,8 @@ func (a *app) resolveMonitorProbeChoice(
 	if !approved && !denied {
 		return false, nil
 	}
+	a.backgroundOwnerMu.Lock()
+	defer a.backgroundOwnerMu.Unlock()
 	id := strings.TrimPrefix(choiceID, monitorProbeApprovePrefix)
 	if denied {
 		id = strings.TrimPrefix(choiceID, monitorProbeDenyPrefix)
@@ -210,17 +214,37 @@ func (a *app) resolveMonitorProbeChoice(
 	now := time.Now().UTC()
 	a.mu.Lock()
 	challenge, ok := a.monitorProbeChallenges[id]
-	reservation, reservationOK := a.monitorProbeReservations[challenge.ReservationID]
-	if !ok || !reservationOK || !now.Before(challenge.ExpiresAt) ||
+	if !ok || !now.Before(challenge.ExpiresAt) ||
 		(challenge.State != "pending_agent" &&
-			challenge.State != "staging_agent") {
+			challenge.State != "staging_agent" &&
+			challenge.State != "consumed") {
 		a.mu.Unlock()
 		return true, errors.New("probe approval is missing, expired, or resolved")
 	}
-	if challenge.ProjectID != projectID || challenge.AgentID != agentID ||
-		reservation.ProjectID != projectID || reservation.AgentID != agentID {
+	if challenge.ProjectID != projectID || challenge.AgentID != agentID {
 		a.mu.Unlock()
 		return true, errors.New("probe approval belongs to a different project or agent")
+	}
+	if challenge.ConsumedReceiptID != "" {
+		receipt, receiptOK := a.monitorProbeReceipts[challenge.ConsumedReceiptID]
+		if denied || !receiptOK ||
+			receipt.ProjectID != projectID ||
+			receipt.AgentID != agentID ||
+			receipt.MonitorID != challenge.MonitorID ||
+			receipt.TriggerRevision != challenge.TriggerRevision ||
+			receipt.ApprovalFlow != "agent_choice" ||
+			receipt.ChoiceRequestID != challenge.ChoiceRequestID {
+			a.mu.Unlock()
+			return true, errors.New("consumed probe approval receipt is unavailable")
+		}
+		a.mu.Unlock()
+		return true, nil
+	}
+	reservation, reservationOK := a.monitorProbeReservations[challenge.ReservationID]
+	if !reservationOK || reservation.ProjectID != projectID ||
+		reservation.AgentID != agentID {
+		a.mu.Unlock()
+		return true, errors.New("probe approval is missing, expired, or resolved")
 	}
 	var owner Agent
 	ownerOK := false

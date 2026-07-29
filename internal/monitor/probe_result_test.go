@@ -18,6 +18,9 @@ func TestParseProbeResult(t *testing.T) {
 	invalid := []ProbeExecution{
 		{Stdout: []byte(`{}`)},
 		{Stdout: []byte(`{"matched":"yes"}`)},
+		{Stdout: []byte(`{"matched":null}`)},
+		{Stdout: []byte(`{"matched":false,"detail":null}`)},
+		{Stdout: []byte(`{"matched":false,"unexpected":"ignored"}`)},
 		{Stdout: []byte(`{"matched":true} {"matched":false}`)},
 		{Stdout: []byte(`{"matched":true,"detail":"` + strings.Repeat("x", MaxProbeDetail+1) + `"}`)},
 		{Stdout: []byte(`{"matched":true}`), ExitCode: 1},

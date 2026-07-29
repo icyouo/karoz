@@ -139,6 +139,8 @@ func (a *app) prepareMonitorProbeApproval(
 	if err != nil {
 		return nil, "", err
 	}
+	a.backgroundOwnerMu.Lock()
+	defer a.backgroundOwnerMu.Unlock()
 	owner, ok := a.projectAgent(project, request.AgentID)
 	if !ok {
 		return nil, "", errors.New("probe owner agent not found")
@@ -238,11 +240,37 @@ func (a *app) confirmMonitorProbeApproval(
 	if !scriptProbeSupported {
 		return nil, errScriptProbeUnsupported
 	}
+	a.backgroundOwnerMu.Lock()
+	defer a.backgroundOwnerMu.Unlock()
 	now := time.Now().UTC()
 	sessionID := monitorProbeSessionID(sessionToken)
 	a.mu.Lock()
 	session, sessionOK := a.monitorProbeSessions[sessionID]
 	challenge, challengeOK := a.monitorProbeChallenges[challengeID]
+	if !sessionOK || session.ProjectID != project.ID ||
+		now.Sub(session.LastActiveAt) > monitorProbeSessionIdle ||
+		!now.Before(session.ExpiresAt) ||
+		!challengeOK || challenge.ProjectID != project.ID ||
+		challenge.OperatorSessionID != sessionID ||
+		!now.Before(challenge.ExpiresAt) {
+		a.mu.Unlock()
+		return nil, errors.New("probe approval challenge is unavailable")
+	}
+	if challenge.ConsumedReceiptID != "" {
+		receipt, ok := a.monitorProbeReceipts[challenge.ConsumedReceiptID]
+		if !ok || receipt.ProjectID != project.ID ||
+			receipt.AgentID != challenge.AgentID ||
+			receipt.MonitorID != challenge.MonitorID ||
+			receipt.TriggerRevision != challenge.TriggerRevision ||
+			receipt.ApprovalFlow != "ui_challenge" ||
+			receipt.OperatorSessionID != sessionID ||
+			receipt.ChallengeID != challenge.ID {
+			a.mu.Unlock()
+			return nil, errors.New("consumed probe approval receipt is unavailable")
+		}
+		a.mu.Unlock()
+		return redactedProbeReceipt(receipt), nil
+	}
 	reservation, reservationOK := a.monitorProbeReservations[challenge.ReservationID]
 	ownerCurrent := false
 	for _, owner := range a.agents[project.ID] {
@@ -252,21 +280,10 @@ func (a *app) confirmMonitorProbeApproval(
 			break
 		}
 	}
-	if !sessionOK || session.ProjectID != project.ID ||
-		now.Sub(session.LastActiveAt) > monitorProbeSessionIdle ||
-		!now.Before(session.ExpiresAt) ||
-		!challengeOK || challenge.ProjectID != project.ID ||
-		!reservationOK || reservation.ProjectID != project.ID ||
-		!ownerCurrent ||
-		challenge.OperatorSessionID != sessionID ||
-		!now.Before(challenge.ExpiresAt) {
+	if !reservationOK || reservation.ProjectID != project.ID ||
+		!ownerCurrent {
 		a.mu.Unlock()
 		return nil, errors.New("probe approval challenge is unavailable")
-	}
-	if challenge.ConsumedReceiptID != "" {
-		receipt := a.monitorProbeReceipts[challenge.ConsumedReceiptID]
-		a.mu.Unlock()
-		return redactedProbeReceipt(receipt), nil
 	}
 	if challenge.State != "pending" && challenge.State != "staging" {
 		a.mu.Unlock()

@@ -39,17 +39,35 @@ func ParseProbeResult(execution ProbeExecution) (ProbeResult, error) {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return ProbeResult{}, errors.New("probe stdout must contain exactly one JSON object")
 	}
+	for key := range raw {
+		if key != "matched" && key != "detail" {
+			return ProbeResult{}, fmt.Errorf(
+				"probe result contains unknown field %q",
+				key,
+			)
+		}
+	}
 	matchedRaw, ok := raw["matched"]
 	if !ok {
 		return ProbeResult{}, errors.New("probe result requires matched")
 	}
-	var matched bool
-	if err := json.Unmarshal(matchedRaw, &matched); err != nil {
+	var matchedValue any
+	if err := json.Unmarshal(matchedRaw, &matchedValue); err != nil {
+		return ProbeResult{}, errors.New("probe result matched must be boolean")
+	}
+	matched, ok := matchedValue.(bool)
+	if !ok {
 		return ProbeResult{}, errors.New("probe result matched must be boolean")
 	}
 	var detail string
 	if detailRaw, ok := raw["detail"]; ok {
-		if err := json.Unmarshal(detailRaw, &detail); err != nil {
+		var detailValue any
+		if err := json.Unmarshal(detailRaw, &detailValue); err != nil {
+			return ProbeResult{}, errors.New("probe result detail must be text")
+		}
+		var valid bool
+		detail, valid = detailValue.(string)
+		if !valid {
 			return ProbeResult{}, errors.New("probe result detail must be text")
 		}
 	}

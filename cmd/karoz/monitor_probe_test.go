@@ -296,6 +296,158 @@ func TestMonitorProbeAgentChoiceClaimIsExactAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestMonitorProbeConcurrentUIConfirmationIsIdempotent(t *testing.T) {
+	a, project, owner := newMonitorProbeTestApp(t)
+	challenge, session, err := a.prepareMonitorProbeApproval(
+		project,
+		monitorProbeApprovalRequest{
+			AgentID: owner.ID, Language: "shell",
+			Workdir: project.Path,
+			Source:  "printf '{\"matched\":true,\"detail\":\"ui-concurrent\"}'\n",
+		},
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const callers = 16
+	start := make(chan struct{})
+	views := make([]map[string]any, callers)
+	errs := make([]error, callers)
+	var wait sync.WaitGroup
+	for index := 0; index < callers; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			views[index], errs[index] = a.confirmMonitorProbeApproval(
+				project,
+				challenge["challenge_id"].(string),
+				session,
+			)
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+	receiptID := ""
+	for index := 0; index < callers; index++ {
+		if errs[index] != nil {
+			t.Fatalf("confirm %d: %v", index, errs[index])
+		}
+		currentID, _ := views[index]["id"].(string)
+		if currentID == "" {
+			t.Fatalf("confirm %d returned no receipt: %+v", index, views[index])
+		}
+		if receiptID == "" {
+			receiptID = currentID
+		} else if currentID != receiptID {
+			t.Fatalf("confirm identities differ: %s != %s", currentID, receiptID)
+		}
+	}
+	claimed := claimConcurrentProbeReceiptForTest(
+		t,
+		a,
+		project,
+		owner,
+		challenge["monitor_id"].(string),
+		receiptID,
+		"ui-concurrent-mutation",
+	)
+	result, err := a.runMonitorProbe(
+		context.Background(),
+		project.ID,
+		claimed.ID,
+		time.Now().UTC(),
+		true,
+	)
+	if err != nil || !result.Matched || result.Detail != "ui-concurrent" {
+		t.Fatalf("confirmed UI receipt result=%+v err=%v", result, err)
+	}
+}
+
+func TestMonitorProbeConcurrentAgentConfirmationIsIdempotent(t *testing.T) {
+	a, project, owner := newMonitorProbeTestApp(t)
+	raw := a.prepareMonitorProbeFromTool(
+		ResidentToolContext{
+			Project: project, Agent: owner,
+			RunID: "request-run", TurnType: "ask",
+			Workdir: project.Path,
+		},
+		map[string]any{
+			"language": "shell",
+			"source":   "printf '{\"matched\":true,\"detail\":\"agent-concurrent\"}'\n",
+		},
+	)
+	var choice struct {
+		MonitorID string `json:"monitor_id"`
+		Choices   []struct {
+			ID string `json:"id"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(raw), &choice); err != nil {
+		t.Fatal(err)
+	}
+	if choice.MonitorID == "" || len(choice.Choices) == 0 {
+		t.Fatalf("unexpected approval response: %s", raw)
+	}
+	const callers = 16
+	start := make(chan struct{})
+	recognized := make([]bool, callers)
+	errs := make([]error, callers)
+	var wait sync.WaitGroup
+	for index := 0; index < callers; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			recognized[index], errs[index] = a.resolveMonitorProbeChoice(
+				project.ID,
+				owner.ID,
+				"approval-run",
+				choice.Choices[0].ID,
+			)
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+	for index := 0; index < callers; index++ {
+		if errs[index] != nil || !recognized[index] {
+			t.Fatalf(
+				"agent confirm %d recognized=%v err=%v",
+				index,
+				recognized[index],
+				errs[index],
+			)
+		}
+	}
+	if len(a.monitorProbeReceipts) != 1 {
+		t.Fatalf("concurrent agent confirm minted %d receipts", len(a.monitorProbeReceipts))
+	}
+	var receiptID string
+	for id := range a.monitorProbeReceipts {
+		receiptID = id
+	}
+	claimed := claimConcurrentProbeReceiptForTest(
+		t,
+		a,
+		project,
+		owner,
+		choice.MonitorID,
+		receiptID,
+		"agent-concurrent-mutation",
+	)
+	result, err := a.runMonitorProbe(
+		context.Background(),
+		project.ID,
+		claimed.ID,
+		time.Now().UTC(),
+		true,
+	)
+	if err != nil || !result.Matched || result.Detail != "agent-concurrent" {
+		t.Fatalf("confirmed agent receipt result=%+v err=%v", result, err)
+	}
+}
+
 func TestMonitorProbeNoOverlapAndThreeErrorsDisable(t *testing.T) {
 	a, project, owner := newMonitorProbeTestApp(t)
 	slow := claimMonitorProbeForTest(
@@ -349,7 +501,7 @@ func TestMonitorProbeNoOverlapAndThreeErrorsDisable(t *testing.T) {
 		a,
 		project,
 		owner,
-		"printf 'not-json'\n",
+		"printf '{\"matched\":false,\"unexpected\":\"ignored\"}'\n",
 		1_000,
 	)
 	for index := 0; index < 3; index++ {
@@ -361,7 +513,7 @@ func TestMonitorProbeNoOverlapAndThreeErrorsDisable(t *testing.T) {
 			false,
 		); err == nil {
 			t.Fatalf("malformed result %d unexpectedly succeeded", index)
-		} else if !strings.Contains(err.Error(), "stdout") {
+		} else if !strings.Contains(err.Error(), "unknown field") {
 			t.Fatalf("malformed result %d returned unexpected error: %v", index, err)
 		}
 	}
@@ -371,6 +523,35 @@ func TestMonitorProbeNoOverlapAndThreeErrorsDisable(t *testing.T) {
 		got.ConsecutiveProbeErrors != 3 {
 		t.Fatalf("three errors did not disable probe: %+v", got)
 	}
+}
+
+func claimConcurrentProbeReceiptForTest(
+	t *testing.T,
+	a *app,
+	project Project,
+	owner Agent,
+	monitorID, receiptID, mutationID string,
+) Monitor {
+	t.Helper()
+	item, err := a.claimScriptProbeMonitor(
+		project,
+		owner,
+		Monitor{
+			ID: monitorID, Name: "concurrent",
+			State: monitordomain.StateDisabled,
+			Action: monitordomain.Action{
+				Kind:     monitordomain.ActionBlackboard,
+				Revision: 1,
+				Topic:    "probe",
+			},
+		},
+		receiptID,
+		mutationID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return item
 }
 
 func TestMonitorProbeRestartPreservesReceiptWithoutCatchup(t *testing.T) {
