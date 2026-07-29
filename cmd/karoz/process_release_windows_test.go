@@ -93,11 +93,11 @@ func TestWindowsBackgroundReleaseLifecycle(t *testing.T) {
 		t.Fatalf("Windows output process = %+v", outputRecord)
 	}
 	waitWindowsTerminalReleased(t, a, project.ID, outputID)
-	events := a.processEventSink.Pending(project.ID)
-	if len(events) != 1 ||
-		events[0].EntityID != outputID ||
-		events[0].To != string(processdomain.StateSucceeded) {
-		t.Fatalf("Windows durable terminal sink = %+v", events)
+	messages := a.agentMessagesFor(project.ID, agent.ID)
+	if len(messages) != 1 ||
+		messages[0].ID != processTerminalEventID(outputID) ||
+		messages[0].Intent != "process_terminal" {
+		t.Fatalf("Windows durable terminal message = %+v", messages)
 	}
 
 	handler := a.httpHandler()

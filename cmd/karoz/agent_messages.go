@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	processdomain "github.com/karoz/karoz/internal/process"
 )
 
 func (a *app) agentMessagesFor(projectID, agentID string) []AgentMessage {
@@ -98,6 +100,116 @@ func (a *app) appendAgentMessage(projectID, agentID, role, intent, body string) 
 	a.mu.Unlock()
 	a.persistAppendedAgentMessage(projectID, agentID)
 	return msg
+}
+
+// admitProcessTerminalMessage puts the process outbox receipt in the existing
+// durable agent message stream. The process event ID is the receipt ID: a
+// retry must find the identical payload before its terminal reservation can be
+// released. Holding backgroundOwnerMu keeps owner deletion and target choice
+// ordered without another registry or generation store.
+func (a *app) admitProcessTerminalMessage(event RuntimeEvent) (bool, error) {
+	if err := validateProcessRuntimeEvent(event); err != nil {
+		return false, err
+	}
+	a.backgroundOwnerMu.Lock()
+	defer a.backgroundOwnerMu.Unlock()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	targetID := a.processTerminalMessageTargetLocked(event.ProjectID, event.AgentID)
+	expected := AgentMessage{
+		ID:        event.ID,
+		ProjectID: event.ProjectID,
+		AgentID:   targetID,
+		SessionID: residentSessionID(event.ProjectID, targetID),
+		Role:      "system",
+		Intent:    "process_terminal",
+		Body:      processTerminalMessageBody(event),
+		CreatedAt: event.CreatedAt,
+	}
+	for key, messages := range a.agentMessages {
+		if !strings.HasPrefix(key, event.ProjectID+"/") {
+			continue
+		}
+		for _, message := range messages {
+			if message.ID != event.ID {
+				continue
+			}
+			// The first durable admission fixes the recipient (owner or Karoz).
+			// A later retry may observe an owner recreation, so compare against
+			// that durable recipient instead of routing the same event again.
+			expected.AgentID = message.AgentID
+			expected.SessionID = message.SessionID
+			if !sameProcessTerminalMessage(message, expected) {
+				return false, fmt.Errorf("process terminal message identity collision")
+			}
+			return false, nil
+		}
+	}
+	key := projectAgentKey(event.ProjectID, targetID)
+	previous := append([]AgentMessage{}, a.agentMessages[key]...)
+	expected.Seq = a.nextAgentTranscriptSequenceLocked(event.ProjectID, targetID)
+	a.agentMessages[key] = append(a.agentMessages[key], expected)
+	if err := a.saveJSON("agent-messages.json", a.agentMessages, 0644); err != nil {
+		a.agentMessages[key] = previous
+		return false, err
+	}
+	if err := a.processRuntimePersistenceFail(processPersistAfterTerminalMessage); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (a *app) processTerminalMessageTargetLocked(projectID, ownerID string) string {
+	key := projectAgentKey(projectID, ownerID)
+	if !a.backgroundOwnerDeleting[key] {
+		for _, agent := range a.agents[projectID] {
+			if agent.ID == ownerID {
+				return ownerID
+			}
+		}
+	}
+	return "karoz"
+}
+
+func sameProcessTerminalMessage(left, right AgentMessage) bool {
+	return left.ID == right.ID &&
+		left.ProjectID == right.ProjectID &&
+		left.AgentID == right.AgentID &&
+		left.SessionID == right.SessionID &&
+		left.Role == right.Role &&
+		left.Intent == right.Intent &&
+		left.Body == right.Body &&
+		left.CreatedAt.Equal(right.CreatedAt)
+}
+
+func processTerminalMessageBody(event RuntimeEvent) string {
+	exitCode := 0
+	if event.ExitCode != nil {
+		exitCode = *event.ExitCode
+	}
+	return fmt.Sprintf(
+		"Background process %s reached %s (exit code %d; run %s).",
+		event.EntityID,
+		event.To,
+		exitCode,
+		firstNonEmpty(event.RunID, "unknown"),
+	)
+}
+
+func validateProcessRuntimeEvent(event RuntimeEvent) error {
+	if event.ID != processTerminalEventID(event.EntityID) ||
+		strings.TrimSpace(event.ProjectID) == "" ||
+		strings.TrimSpace(event.AgentID) == "" ||
+		!safeProcessID(event.EntityID) ||
+		event.Kind != processTerminalEventKind ||
+		event.Reason != "process_terminal" ||
+		!processdomain.State(event.To).Terminal() ||
+		event.ExitCode == nil ||
+		event.CreatedAt.IsZero() {
+		return fmt.Errorf("invalid process runtime event")
+	}
+	return nil
 }
 
 func (a *app) appendAgentMessageForRun(projectID, agentID, runID, role, intent, body string) (AgentMessage, bool) {

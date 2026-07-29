@@ -70,8 +70,7 @@ const (
 	processPersistAfterDetachedOperation   processPersistenceFailpoint = "after_detached_operation"
 	processPersistAfterLedgerRelease       processPersistenceFailpoint = "after_ledger_release"
 	processPersistAfterAdmissionDelete     processPersistenceFailpoint = "after_admission_delete"
-	processPersistBeforeRuntimeEventSink   processPersistenceFailpoint = "before_runtime_event_sink"
-	processPersistAfterRuntimeEventSink    processPersistenceFailpoint = "after_runtime_event_sink"
+	processPersistAfterTerminalMessage     processPersistenceFailpoint = "after_terminal_message"
 )
 
 type runtimeProjectIndex struct {

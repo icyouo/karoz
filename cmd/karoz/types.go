@@ -22,7 +22,6 @@ type app struct {
 	processRuntime                     *processRuntimePersistence
 	processSupervisor                  *processSupervisor
 	processPersistenceFail             func(processPersistenceFailpoint) error
-	processEventSink                   *processRuntimeEventSink
 	processTerminalDrainMu             sync.Mutex
 	processTerminalWake                chan struct{}
 	processTerminalWorkerOnce          sync.Once

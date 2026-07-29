@@ -158,6 +158,19 @@ func bootstrapProcessTerminalOutboxApp(
 	t.Helper()
 	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: projectsRoot})
 	a.processPersistenceFail = fail
+	projects, err := a.scanProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range projects {
+		a.agents[project.ID] = []Agent{
+			{ID: "karoz", ProjectID: project.ID, Name: "Karoz"},
+			{ID: "agent", ProjectID: project.ID, Name: "Agent"},
+		}
+	}
+	if err := a.loadAgentMessages(); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.bootstrapProcessRuntime(); err != nil {
 		t.Fatal(err)
 	}
@@ -170,122 +183,20 @@ func stopOutboxAppForCrash(a *app) {
 	}
 }
 
-func TestProcessTerminalOutboxDoesNotAcknowledgeWithoutDurableSink(
-	t *testing.T,
-) {
-	dataDir := t.TempDir()
-	_, projects := processRetentionRestartProjects(t, "project")
-	runtime, err := newProcessRuntimePersistence(dataDir, projects, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	persistPendingTerminalProcess(
-		t,
-		runtime,
-		projects[0],
-		"no-sink",
-		processdomain.StateFailed,
-		7,
-		time.Now().UTC(),
-	)
-	a := newApp(Settings{DataDir: dataDir})
-	a.processRuntime = runtime
-	a.drainProcessTerminalOutbox()
-	assertProcessTerminalPending(t, runtime, projects[0].ID, "no-sink")
-}
-
-func TestProcessTerminalOutboxBackpressureAndProjectIsolation(t *testing.T) {
-	dataDir := t.TempDir()
-	projectsRoot, projects := processRetentionRestartProjects(
-		t,
-		"project-a",
-		"project-b",
-	)
-	seed, err := newProcessRuntimePersistence(dataDir, projects, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	for index, project := range projects {
-		persistPendingTerminalProcess(
-			t,
-			seed,
-			project,
-			fmt.Sprintf("terminal-%d", index),
-			processdomain.StateSucceeded,
-			0,
-			now,
-		)
-	}
-	var blocked atomic.Bool
-	blocked.Store(true)
-	a := bootstrapProcessTerminalOutboxApp(
-		t,
-		dataDir,
-		projectsRoot,
-		func(point processPersistenceFailpoint) error {
-			if blocked.Load() && point == processPersistBeforeRuntimeEventSink {
-				return errors.New("runtime sink backpressure")
-			}
-			return nil
-		},
-	)
-	t.Cleanup(func() { stopOutboxAppForCrash(a) })
-	for index, project := range projects {
-		assertProcessTerminalPending(
-			t,
-			a.processRuntime,
-			project.ID,
-			fmt.Sprintf("terminal-%d", index),
-		)
-	}
-	if events := a.processEventSink.Pending(projects[0].ID); len(events) != 0 {
-		t.Fatalf("backpressured sink accepted events: %+v", events)
-	}
-
-	projectA := a.processRuntime.projects[projects[0].ID]
-	a.processRuntime.authorityMu.Lock()
-	partitionA := a.processRuntime.authority.Projects[projectA.identity.SafeProjectKey]
-	corrupt := partitionA.Records["terminal-0"]
-	corrupt.Event.ExitCode++
-	partitionA.Records["terminal-0"] = corrupt
-	a.processRuntime.authority.Projects[projectA.identity.SafeProjectKey] = partitionA
-	a.processRuntime.authorityMu.Unlock()
-	blocked.Store(false)
-	a.drainProcessTerminalOutbox()
-	assertProcessTerminalPending(
-		t,
-		a.processRuntime,
-		projects[0].ID,
-		"terminal-0",
-	)
-	assertProcessTerminalReleased(
-		t,
-		a.processRuntime,
-		projects[1].ID,
-		"terminal-1",
-	)
-	if !a.processRuntime.projectDisabled(projectA.identity.SafeProjectKey) {
-		t.Fatal("corrupt terminal outbox project was not disabled")
-	}
-	events := a.processEventSink.Pending(projects[1].ID)
-	if len(events) != 1 || events[0].EntityID != "terminal-1" {
-		t.Fatalf("isolated durable sink events = %+v", events)
-	}
-}
-
-func TestProcessTerminalOutboxStartupRecoversInterruptedProcess(t *testing.T) {
+func TestProcessTerminalOutboxPersistsMessageBeforeAcknowledging(t *testing.T) {
 	dataDir := t.TempDir()
 	projectsRoot, projects := processRetentionRestartProjects(t, "project")
 	seed, err := newProcessRuntimePersistence(dataDir, projects, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	persistRunningProcessForOutboxRestart(
+	persistPendingTerminalProcess(
 		t,
 		seed,
 		projects[0],
-		"interrupted",
+		"zero-watchers",
+		processdomain.StateSucceeded,
+		0,
 		time.Now().UTC(),
 	)
 	a := bootstrapProcessTerminalOutboxApp(
@@ -295,156 +206,95 @@ func TestProcessTerminalOutboxStartupRecoversInterruptedProcess(t *testing.T) {
 		nil,
 	)
 	t.Cleanup(func() { stopOutboxAppForCrash(a) })
-	events := a.processEventSink.Pending(projects[0].ID)
-	if len(events) != 1 {
-		t.Fatalf("startup durable terminal events = %+v", events)
+	if len(a.runtimeWatchers) != 0 {
+		t.Fatal("test unexpectedly has runtime watchers")
 	}
-	event := events[0]
-	if event.ID != processTerminalEventID("interrupted") ||
-		event.ProjectID != projects[0].ID ||
-		event.AgentID != "agent" ||
-		event.EntityID != "interrupted" ||
-		event.RunID != "run-interrupted" ||
-		event.To != string(processdomain.StateInterrupted) ||
-		event.ExitCode == nil ||
-		*event.ExitCode != 0 {
-		t.Fatalf("startup terminal provenance = %+v", event)
+	messages := a.agentMessagesFor(projects[0].ID, "agent")
+	if len(messages) != 1 || messages[0].ID != processTerminalEventID("zero-watchers") ||
+		messages[0].Intent != "process_terminal" ||
+		messages[0].Body != "Background process zero-watchers reached succeeded (exit code 0; run run-zero-watchers)." {
+		t.Fatalf("durable terminal message = %+v", messages)
 	}
 	assertProcessTerminalReleased(
 		t,
 		a.processRuntime,
 		projects[0].ID,
-		"interrupted",
+		"zero-watchers",
 	)
-
-	reloaded, err := newProcessRuntimeEventSink(dataDir, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reloadedEvents := reloaded.Pending(projects[0].ID)
-	if len(reloadedEvents) != 1 ||
-		reloadedEvents[0].ID != event.ID {
-		t.Fatalf("restarted future-consumer events = %+v", reloadedEvents)
-	}
 }
 
-func TestProcessTerminalOutboxCrashRecoveryBoundaries(t *testing.T) {
-	tests := []struct {
-		name      string
-		failpoint processPersistenceFailpoint
-	}{
-		{name: "before durable sink", failpoint: processPersistBeforeRuntimeEventSink},
-		{name: "after durable sink", failpoint: processPersistAfterRuntimeEventSink},
-		{name: "after acknowledgement", failpoint: processPersistAfterAck},
-		{name: "during release", failpoint: processPersistAfterAuthorityDetach},
-		{name: "after ledger release", failpoint: processPersistAfterLedgerRelease},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			dataDir := t.TempDir()
-			projectsRoot, projects := processRetentionRestartProjects(t, "project")
-			seed, err := newProcessRuntimePersistence(dataDir, projects, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			processID := "terminal"
-			persistPendingTerminalProcess(
-				t,
-				seed,
-				projects[0],
-				processID,
-				processdomain.StateFailed,
-				9,
-				time.Now().UTC(),
-			)
-			var armed atomic.Bool
-			armed.Store(true)
-			first := bootstrapProcessTerminalOutboxApp(
-				t,
-				dataDir,
-				projectsRoot,
-				func(point processPersistenceFailpoint) error {
-					if armed.Load() && point == test.failpoint {
-						return errors.New("injected terminal delivery crash")
-					}
-					return nil
-				},
-			)
-			stopOutboxAppForCrash(first)
-			armed.Store(false)
-
-			second := bootstrapProcessTerminalOutboxApp(
-				t,
-				dataDir,
-				projectsRoot,
-				nil,
-			)
-			t.Cleanup(func() { stopOutboxAppForCrash(second) })
-			assertProcessTerminalReleased(
-				t,
-				second.processRuntime,
-				projects[0].ID,
-				processID,
-			)
-			events := second.processEventSink.Pending(projects[0].ID)
-			if len(events) != 1 {
-				t.Fatalf("stable durable terminal events = %+v", events)
-			}
-			event := events[0]
-			if event.ProjectID != projects[0].ID ||
-				event.AgentID != "agent" ||
-				event.EntityID != processID ||
-				event.To != string(processdomain.StateFailed) ||
-				event.ExitCode == nil ||
-				*event.ExitCode != 9 {
-				t.Fatalf("stable terminal event = %+v", event)
-			}
-		})
-	}
-}
-
-func TestProcessTerminalOutboxScopesDeliveryIdentityByProject(t *testing.T) {
+func TestProcessTerminalOutboxRetriesSavedMessageBeforeAcknowledging(t *testing.T) {
 	dataDir := t.TempDir()
-	projectsRoot, projects := processRetentionRestartProjects(
-		t,
-		"project-a",
-		"project-b",
-	)
+	projectsRoot, projects := processRetentionRestartProjects(t, "project")
 	seed, err := newProcessRuntimePersistence(dataDir, projects, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
-	for _, project := range projects {
-		persistPendingTerminalProcess(
-			t,
-			seed,
-			project,
-			"same-process-id",
-			processdomain.StateSucceeded,
-			0,
-			now,
-		)
-	}
-	a := bootstrapProcessTerminalOutboxApp(
-		t,
-		dataDir,
-		projectsRoot,
-		nil,
-	)
-	t.Cleanup(func() { stopOutboxAppForCrash(a) })
-	for _, project := range projects {
-		events := a.processEventSink.Pending(project.ID)
-		if len(events) != 1 ||
-			events[0].ID != processTerminalEventID("same-process-id") {
-			t.Fatalf("project %s durable events = %+v", project.ID, events)
+	persistPendingTerminalProcess(t, seed, projects[0], "retry", processdomain.StateFailed, 9, time.Now().UTC())
+	var armed atomic.Bool
+	armed.Store(true)
+	first := bootstrapProcessTerminalOutboxApp(t, dataDir, projectsRoot, func(point processPersistenceFailpoint) error {
+		if armed.Load() && point == processPersistAfterTerminalMessage {
+			return errors.New("crash after terminal message save")
 		}
-		assertProcessTerminalReleased(
-			t,
-			a.processRuntime,
-			project.ID,
-			"same-process-id",
-		)
+		return nil
+	})
+	assertProcessTerminalPending(t, first.processRuntime, projects[0].ID, "retry")
+	if messages := first.agentMessagesFor(projects[0].ID, "agent"); len(messages) != 1 || messages[0].ID != processTerminalEventID("retry") {
+		t.Fatalf("message was not durable before crash: %+v", messages)
+	}
+	stopOutboxAppForCrash(first)
+	armed.Store(false)
+	second := bootstrapProcessTerminalOutboxApp(t, dataDir, projectsRoot, nil)
+	t.Cleanup(func() { stopOutboxAppForCrash(second) })
+	assertProcessTerminalReleased(t, second.processRuntime, projects[0].ID, "retry")
+	if messages := second.agentMessagesFor(projects[0].ID, "agent"); len(messages) != 1 || messages[0].ID != processTerminalEventID("retry") {
+		t.Fatalf("retry duplicated terminal message: %+v", messages)
+	}
+}
+
+func TestProcessTerminalOutboxUsesKarozAfterOwnerDeletion(t *testing.T) {
+	dataDir := t.TempDir()
+	projectsRoot, projects := processRetentionRestartProjects(t, "project")
+	runtime, err := newProcessRuntimePersistence(dataDir, projects, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistPendingTerminalProcess(t, runtime, projects[0], "deleted-owner", processdomain.StateKilled, 1, time.Now().UTC())
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: projectsRoot})
+	a.agents[projects[0].ID] = []Agent{{ID: "karoz", ProjectID: projects[0].ID, Name: "Karoz"}}
+	if err := a.bootstrapProcessRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stopOutboxAppForCrash(a) })
+	if messages := a.agentMessagesFor(projects[0].ID, "karoz"); len(messages) != 1 || messages[0].ID != processTerminalEventID("deleted-owner") {
+		t.Fatalf("Karoz terminal notification = %+v", messages)
+	}
+	assertProcessTerminalReleased(t, a.processRuntime, projects[0].ID, "deleted-owner")
+}
+
+func TestProcessTerminalMessageAdmissionIsIdempotentAndExact(t *testing.T) {
+	project := runtimeTestProject(t, "project")
+	a := newApp(Settings{DataDir: t.TempDir()})
+	a.agents[project.ID] = []Agent{{ID: "agent", ProjectID: project.ID}}
+	exitCode := 4
+	event := RuntimeEvent{
+		ID: processTerminalEventID("exact"), ProjectID: project.ID,
+		Kind: processTerminalEventKind, EntityID: "exact", AgentID: "agent",
+		RunID: "run-exact", To: string(processdomain.StateFailed), ExitCode: &exitCode,
+		Reason: "process_terminal", CreatedAt: time.Now().UTC(),
+	}
+	if accepted, err := a.admitProcessTerminalMessage(event); err != nil || !accepted {
+		t.Fatalf("first terminal admission accepted=%v err=%v", accepted, err)
+	}
+	if accepted, err := a.admitProcessTerminalMessage(event); err != nil || accepted {
+		t.Fatalf("retry terminal admission accepted=%v err=%v", accepted, err)
+	}
+	changed := event
+	changedExitCode := 5
+	changed.ExitCode = &changedExitCode
+	if _, err := a.admitProcessTerminalMessage(changed); err == nil {
+		t.Fatal("changed terminal payload was accepted under stable event ID")
 	}
 }
 
@@ -490,8 +340,8 @@ func TestProcessTerminalOutboxCyclesReleaseSlotsAndApplyRetention(t *testing.T) 
 	if items := a.processRuntime.List(projects[0].ID); len(items) > 2 {
 		t.Fatalf("configured retention retained %d cycles: %+v", len(items), items)
 	}
-	if events := a.processEventSink.Pending(projects[0].ID); len(events) != cycles {
-		t.Fatalf("durable sink retained %d events, want %d", len(events), cycles)
+	if messages := a.agentMessagesFor(projects[0].ID, "agent"); len(messages) != cycles {
+		t.Fatalf("durable terminal messages retained %d events, want %d", len(messages), cycles)
 	}
 	project := a.processRuntime.projects[projects[0].ID]
 	project.ledgerMu.Lock()
@@ -499,6 +349,29 @@ func TestProcessTerminalOutboxCyclesReleaseSlotsAndApplyRetention(t *testing.T) 
 	project.ledgerMu.Unlock()
 	if slots != 0 {
 		t.Fatalf("terminal cycles leaked %d reservation slots", slots)
+	}
+}
+
+func TestProcessTerminalOutboxHasNoSeparateTerminalCapacityStore(t *testing.T) {
+	dataDir := t.TempDir()
+	projectsRoot, projects := processRetentionRestartProjects(t, "project")
+	a := bootstrapProcessTerminalOutboxApp(t, dataDir, projectsRoot, nil)
+	t.Cleanup(func() { stopOutboxAppForCrash(a) })
+	key := projectAgentKey(projects[0].ID, "agent")
+	a.mu.Lock()
+	for index := 0; index < 4096; index++ {
+		a.agentMessages[key] = append(a.agentMessages[key], AgentMessage{
+			ID: fmt.Sprintf("prior-%04d", index), ProjectID: projects[0].ID,
+			AgentID: "agent", Role: "system", Intent: "note", Body: "prior",
+			Seq: int64(index + 1), CreatedAt: time.Now().UTC(),
+		})
+	}
+	a.mu.Unlock()
+	persistPendingTerminalProcess(t, a.processRuntime, projects[0], "over-4096", processdomain.StateSucceeded, 0, time.Now().UTC())
+	a.drainProcessTerminalOutbox()
+	assertProcessTerminalReleased(t, a.processRuntime, projects[0].ID, "over-4096")
+	if messages := a.agentMessagesFor(projects[0].ID, "agent"); len(messages) != 4097 || messages[len(messages)-1].ID != processTerminalEventID("over-4096") {
+		t.Fatalf("terminal message admission kept a separate capacity: %d %+v", len(messages), messages[len(messages)-1])
 	}
 }
 

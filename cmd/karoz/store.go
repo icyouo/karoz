@@ -18,9 +18,6 @@ func (a *app) bootstrap() error {
 	if err := os.MkdirAll(a.settings.ProjectsRoot, 0755); err != nil {
 		return err
 	}
-	if err := a.bootstrapProcessRuntime(); err != nil {
-		return err
-	}
 	if err := a.loadTasks(); err != nil {
 		return err
 	}
@@ -61,6 +58,12 @@ func (a *app) bootstrap() error {
 		return err
 	}
 	if err := a.loadAgentSessions(); err != nil {
+		return err
+	}
+	// Terminal recovery delivers into the already-loaded durable agent message
+	// stream so a deleted owner can be redirected to Karoz without a parallel
+	// process-event store.
+	if err := a.bootstrapProcessRuntime(); err != nil {
 		return err
 	}
 	if err := a.loadProjectAliases(); err != nil {

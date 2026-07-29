@@ -185,7 +185,7 @@ func (a *app) drainProcessTerminalOutbox() {
 	}
 	for _, event := range events {
 		runtimeEvent := event.runtimeEvent()
-		accepted, err := a.acceptProcessTerminalEvent(runtimeEvent)
+		accepted, err := a.admitProcessTerminalMessage(runtimeEvent)
 		if err != nil {
 			log.Printf(
 				"process terminal outbox delivery %s failed: %v",
@@ -210,13 +210,4 @@ func (a *app) drainProcessTerminalOutbox() {
 			continue
 		}
 	}
-}
-
-func (a *app) acceptProcessTerminalEvent(
-	event RuntimeEvent,
-) (bool, error) {
-	if a.processEventSink == nil {
-		return false, errors.New("process runtime event sink is unavailable")
-	}
-	return a.processEventSink.Accept(event)
 }

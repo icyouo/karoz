@@ -18,13 +18,6 @@ func (a *app) bootstrapProcessRuntime() error {
 	if err != nil {
 		return err
 	}
-	eventSink, err := newProcessRuntimeEventSink(
-		a.settings.DataDir,
-		a.processPersistenceFail,
-	)
-	if err != nil {
-		return err
-	}
 	runtime, err := newProcessRuntimePersistenceWithRetention(
 		a.settings.DataDir,
 		projects,
@@ -53,7 +46,6 @@ func (a *app) bootstrapProcessRuntime() error {
 	}
 	a.processRuntime = runtime
 	a.processSupervisor = supervisor
-	a.processEventSink = eventSink
 	a.startProcessTerminalOutbox()
 	return nil
 }
@@ -73,8 +65,7 @@ func (a *app) shutdownProcessRuntime(ctx context.Context) error {
 
 func (a *app) processRuntimeReady() bool {
 	return a.processRuntime != nil &&
-		a.processSupervisor != nil &&
-		a.processEventSink != nil
+		a.processSupervisor != nil
 }
 
 func (a *app) processRecord(projectID, processID string) (processdomain.Process, error) {
