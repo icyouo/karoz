@@ -13,6 +13,7 @@ import (
 	"time"
 
 	monitordomain "github.com/karoz/karoz/internal/monitor"
+	processdomain "github.com/karoz/karoz/internal/process"
 )
 
 type MonitorRunPayload struct {
@@ -40,7 +41,7 @@ func (a *app) loadMonitors() error {
 }
 
 func gate3MonitorTrigger(kind monitordomain.TriggerKind) bool {
-	return kind == monitordomain.TriggerRuntimeEvent || kind == monitordomain.TriggerProcessExit
+	return kind == monitordomain.TriggerRuntimeEvent || kind == monitordomain.TriggerProcessExit || kind == monitordomain.TriggerProcessOutput
 }
 
 func (a *app) saveMonitorsLocked() error {
@@ -121,6 +122,14 @@ func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
 			return Monitor{}, errors.New("monitor notify target agent not found")
 		}
 	}
+	var outputBaseline uint64
+	if item.Trigger.Kind == monitordomain.TriggerProcessOutput {
+		record, err := a.processRecord(project.ID, item.Trigger.ProcessID)
+		if err != nil || record.State.Terminal() {
+			return Monitor{}, errors.New("monitor process target is retired or unavailable")
+		}
+		outputBaseline = record.OutputSeq
+	}
 	if err := monitordomain.ValidateMonitor(item); err != nil {
 		return Monitor{}, err
 	}
@@ -136,7 +145,122 @@ func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
 		a.monitors[project.ID] = a.monitors[project.ID][:len(a.monitors[project.ID])-1]
 		return Monitor{}, err
 	}
+	if item.Trigger.Kind == monitordomain.TriggerProcessOutput {
+		if a.processOutputBaselines == nil {
+			a.processOutputBaselines = map[string]uint64{}
+		}
+		a.processOutputBaselines[project.ID+"/"+item.Trigger.ProcessID] = outputBaseline
+	}
 	return item, nil
+}
+
+type processOutputObservation struct {
+	ProjectID string
+	ProcessID string
+	Line      processdomain.OutputLine
+}
+
+func (a *app) armProcessOutputMonitor() {
+	a.processOutputMonitorOnce.Do(func() {
+		go func() {
+			for observation := range a.processOutputMonitorCh {
+				a.evaluateProcessOutput(observation)
+			}
+		}()
+	})
+	// A new server deliberately begins at the current tail sequence: output
+	// before this process lifetime is coverage, not an event replay source.
+	for _, item := range a.monitorsForAllProjects() {
+		if item.Trigger.Kind != monitordomain.TriggerProcessOutput {
+			continue
+		}
+		if record, err := a.processRecord(item.ProjectID, item.Trigger.ProcessID); err == nil {
+			a.setOutputBaseline(item.ProjectID, item.Trigger.ProcessID, record.OutputSeq)
+		}
+	}
+}
+
+func (a *app) monitorsForAllProjects() []Monitor {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []Monitor
+	for _, items := range a.monitors {
+		out = append(out, items...)
+	}
+	return out
+}
+
+func (a *app) enqueueProcessOutputObservation(record processdomain.Process, line processdomain.OutputLine) {
+	if line.Sequence == 0 || a.processOutputMonitorCh == nil {
+		return
+	}
+	item := processOutputObservation{ProjectID: record.ProjectID, ProcessID: record.ID, Line: line}
+	select {
+	case a.processOutputMonitorCh <- item:
+	default:
+	}
+}
+
+func (a *app) setOutputBaseline(projectID, processID string, sequence uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.processOutputBaselines == nil {
+		a.processOutputBaselines = map[string]uint64{}
+	}
+	a.processOutputBaselines[projectID+"/"+processID] = sequence
+}
+
+func (a *app) evaluateProcessOutput(observation processOutputObservation) {
+	key := observation.ProjectID + "/" + observation.ProcessID
+	a.mu.Lock()
+	if observation.Line.Sequence <= a.processOutputBaselines[key] {
+		a.mu.Unlock()
+		return
+	}
+	a.processOutputBaselines[key] = observation.Line.Sequence
+	items := a.monitors[observation.ProjectID]
+	before := cloneMonitorList(items)
+	var fires []monitorFireRef
+	now := time.Now().UTC()
+	text := redactSensitiveProcessText(observation.Line.Text)
+	for i := range items {
+		item := items[i]
+		matched, detail := monitordomain.MatchProcessOutput(item, monitordomain.ProcessOutput{ProcessID: observation.ProcessID, Sequence: observation.Line.Sequence, Line: text, Origin: monitordomain.Origin{Kind: "runtime"}})
+		if !matched {
+			continue
+		}
+		decision := monitordomain.Fire(item, detail, now)
+		items[i] = decision.Monitor
+		if !decision.Fire {
+			continue
+		}
+		payload, _ := json.Marshal(map[string]any{"process_id": observation.ProcessID, "seq": observation.Line.Sequence, "stream": observation.Line.Stream, "line": text})
+		event := monitordomain.Event{ID: fmt.Sprintf("process/%s/output/%d", observation.ProcessID, observation.Line.Sequence), ProjectID: observation.ProjectID, AuthorityID: "runtime", AuthorityGeneration: 1, Kind: "process_output", EntityID: observation.ProcessID, Origin: monitordomain.Origin{Kind: "runtime"}, At: now, Payload: payload}
+		briefing := strings.TrimSpace(items[i].Action.Template)
+		if briefing == "" {
+			briefing = detail
+		}
+		pending, err := monitordomain.FreezePendingFire(items[i], event, briefing, payload, json.RawMessage(`{}`), now)
+		if err != nil {
+			continue
+		}
+		updated, err := monitordomain.AdmitPendingFire(items[i], pending)
+		if err != nil {
+			continue
+		}
+		items[i] = updated
+		fires = append(fires, monitorFireRef{observation.ProjectID, item.ID, pending.ID})
+	}
+	a.monitors[observation.ProjectID] = items
+	if err := a.saveMonitorsLocked(); err != nil {
+		a.monitors[observation.ProjectID] = before
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Unlock()
+	for _, fire := range fires {
+		a.dispatchMonitorPending(fire)
+	}
 }
 
 func (a *app) setMonitorState(project Project, id string, state monitordomain.State) (Monitor, error) {

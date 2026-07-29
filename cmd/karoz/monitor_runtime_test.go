@@ -3,10 +3,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	monitordomain "github.com/karoz/karoz/internal/monitor"
+	processdomain "github.com/karoz/karoz/internal/process"
 )
 
 func TestRuntimeMonitorFreezesAndDeliversBlackboardAction(t *testing.T) {
@@ -122,5 +124,33 @@ func TestGate3CreateMonitorRejectsUnavailableTriggerAndMissingTarget(t *testing.
 	}
 	if _, err := a.createMonitor(project, Monitor{AgentID: "owner", Name: "target", Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerRuntimeEvent, EventKinds: []string{"task_changed"}}, Action: monitordomain.Action{Kind: monitordomain.ActionNotifyAgent, AgentID: "missing", TurnType: "ask"}}); err == nil {
 		t.Fatal("missing notify target was accepted")
+	}
+}
+
+func TestProcessOutputMonitorUsesRedactedCompleteSequence(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "p1")
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	projectID := projectID(path)
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
+	a.agents[projectID] = []Agent{{ID: "owner", ProjectID: projectID}}
+	now := time.Now().UTC()
+	a.monitors[projectID] = []Monitor{{ID: "output", ProjectID: projectID, AgentID: "owner", Name: "output", Revision: 1, State: monitordomain.StateActive, Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerProcessOutput, Revision: 1, ProcessID: "proc", Pattern: "Authorization"}, Action: monitordomain.Action{Revision: 1, Kind: monitordomain.ActionBlackboard, Topic: "output", Template: "matched output"}, CreatedAt: now, UpdatedAt: now}}
+	a.evaluateProcessOutput(processOutputObservation{ProjectID: projectID, ProcessID: "proc", Line: processdomain.OutputLine{Sequence: 1, Stream: "stderr", Text: "Authorization: Bearer secret-token"}})
+	entries := a.blackboardFor(projectID, 10)
+	for _, entry := range entries {
+		if strings.Contains(entry.Detail, "secret-token") {
+			t.Fatalf("raw process secret leaked: %+v", entry)
+		}
+	}
+	if len(entries) != 1 || entries[0].Detail != "matched output" {
+		t.Fatalf("output monitor result = %+v", entries)
+	}
+	// The supervisor sequence is the event identity: duplicate handoff must not fire again.
+	a.evaluateProcessOutput(processOutputObservation{ProjectID: projectID, ProcessID: "proc", Line: processdomain.OutputLine{Sequence: 1, Text: "token"}})
+	if got := a.blackboardFor(projectID, 10); len(got) != 1 {
+		t.Fatalf("duplicate output sequence fired: %+v", got)
 	}
 }

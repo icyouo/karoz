@@ -75,6 +75,7 @@ type processSupervisorConfig struct {
 	BeforeFinalize    func()
 	PrepareRecord     func(processdomain.Process) (processdomain.Process, error)
 	TerminalPersisted func(processdomain.Process)
+	OutputLine        func(processdomain.Process, processdomain.OutputLine)
 }
 
 type processStartRequest struct {
@@ -519,7 +520,7 @@ func (supervisor *processSupervisor) collect(
 		count, readErr := reader.Read(chunk)
 		if count > 0 {
 			handle.collectMu.Lock()
-			_, accepted := handle.buffer.AppendStream(stream, string(chunk[:count]))
+			lines, accepted := handle.buffer.AppendStream(stream, string(chunk[:count]))
 			handle.stateMu.Lock()
 			registered := handle.registered
 			handle.stateMu.Unlock()
@@ -538,6 +539,12 @@ func (supervisor *processSupervisor) collect(
 				}
 			}
 			handle.collectMu.Unlock()
+			if registered && supervisor.config.OutputLine != nil {
+				record := handle.snapshot()
+				for _, line := range lines {
+					supervisor.config.OutputLine(record, line)
+				}
+			}
 		}
 		if readErr != nil {
 			return
@@ -597,7 +604,7 @@ func (supervisor *processSupervisor) finalizeExited(handle *supervisedProcess) e
 	waitErr := handle.waitErr
 	handle.stateMu.Unlock()
 	containErr := supervisor.containAfterWait(handle)
-	logErr := handle.closeLogAndFlush()
+	logErr := supervisor.closeLogAndFlush(handle)
 	if err := errors.Join(containErr, logErr, cleanupWaitError(waitErr)); err != nil {
 		supervisor.recordRecovery(handle.processID(), "containment", err)
 		return fmt.Errorf("process containment failed: %w", err)
@@ -719,11 +726,18 @@ func (supervisor *processSupervisor) cleanupUnregistered(handle *supervisedProce
 	return errors.Join(signalErr, closeErr, waitErr, proofErr, logErr)
 }
 
-func (handle *supervisedProcess) closeLogAndFlush() error {
+func (supervisor *processSupervisor) closeLogAndFlush(handle *supervisedProcess) error {
 	handle.collectMu.Lock()
-	_, _ = handle.buffer.FlushStream("stdout")
-	_, _ = handle.buffer.FlushStream("stderr")
+	stdout, _ := handle.buffer.FlushStream("stdout")
+	stderr, _ := handle.buffer.FlushStream("stderr")
+	registered := handle.registered
 	handle.collectMu.Unlock()
+	if registered && supervisor.config.OutputLine != nil {
+		record := handle.snapshot()
+		for _, line := range append(stdout, stderr...) {
+			supervisor.config.OutputLine(record, line)
+		}
+	}
 	return handle.closeLog()
 }
 

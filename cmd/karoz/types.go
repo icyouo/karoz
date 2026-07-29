@@ -26,6 +26,9 @@ type app struct {
 	processTerminalDrainMu             sync.Mutex
 	processTerminalWake                chan struct{}
 	processTerminalWorkerOnce          sync.Once
+	processOutputMonitorOnce           sync.Once
+	processOutputMonitorCh             chan processOutputObservation
+	processOutputBaselines             map[string]uint64
 	backgroundOwnerMu                  sync.Mutex
 	backgroundOwnerDeleting            map[string]bool
 	projectRegistrationMu              sync.Mutex

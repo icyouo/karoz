@@ -32,6 +32,7 @@ func (a *app) bootstrapProcessRuntime() error {
 	supervisorConfig.TerminalPersisted = func(processdomain.Process) {
 		a.wakeProcessTerminalOutbox()
 	}
+	supervisorConfig.OutputLine = a.enqueueProcessOutputObservation
 	supervisor, err := newProcessSupervisor(
 		a.supervisorCtx,
 		runtime,
@@ -46,6 +47,7 @@ func (a *app) bootstrapProcessRuntime() error {
 	}
 	a.processRuntime = runtime
 	a.processSupervisor = supervisor
+	a.armProcessOutputMonitor()
 	a.startProcessTerminalOutbox()
 	return nil
 }

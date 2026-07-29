@@ -44,6 +44,8 @@ func newApp(settings Settings) *app {
 		residentBashApprovals:    map[string]ResidentBashApproval{},
 		backgroundOwnerDeleting:  map[string]bool{},
 		processTerminalWake:      make(chan struct{}, 1),
+		processOutputMonitorCh:   make(chan processOutputObservation, 256),
+		processOutputBaselines:   map[string]uint64{},
 		schedulerQueue:           runtimedomain.NewSchedulerQueue(),
 		schedulerExecutors:       map[ScheduledRunKind]ScheduledRunExecutor{},
 		runtimeHooks:             map[string]bool{},
