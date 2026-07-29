@@ -1879,6 +1879,7 @@ func TestSettingsUpdateAndCreateRacePreservesRuntimeProjectSet(t *testing.T) {
 	}
 	settingsPath := filepath.Join(dataDir, "settings.json")
 	indexPath := filepath.Join(dataDir, "project-runtime", "index.json")
+	authorityPath := filepath.Join(dataDir, "processes.json")
 	settingsBefore, err := os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1911,6 +1912,33 @@ func TestSettingsUpdateAndCreateRacePreservesRuntimeProjectSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	createdRuntime := a.processRuntime.projectRuntime(
+		projectFromPath(filepath.Join(rootA, "created"), rootA, "main").ID,
+	)
+	if createdRuntime == nil {
+		t.Fatal("create barrier did not expose the registered runtime")
+	}
+	createdIdentity := createdRuntime.identity
+	runtimeSafetyPaths := []string{
+		indexPath,
+		authorityPath,
+		filepath.Join(
+			dataDir, "project-runtime", createdIdentity.SafeProjectKey,
+			"terminal-reservations.json",
+		),
+		filepath.Join(
+			dataDir, "project-runtime", createdIdentity.SafeProjectKey,
+			"runtime-mutations.json",
+		),
+	}
+	runtimeSafetyBeforeSettings := make(map[string][]byte, len(runtimeSafetyPaths))
+	for _, path := range runtimeSafetyPaths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtimeSafetyBeforeSettings[path] = body
+	}
 	settingsResult := make(chan error, 1)
 	go func() {
 		settingsResult <- a.updateSettings(SettingsUpdateRequest{ProjectsRoot: rootB})
@@ -1942,12 +1970,17 @@ func TestSettingsUpdateAndCreateRacePreservesRuntimeProjectSet(t *testing.T) {
 	if string(settingsAfter) != string(settingsBefore) {
 		t.Fatal("rejected settings update changed settings bytes")
 	}
-	indexAfterSettings, err := os.ReadFile(indexPath)
-	if err != nil {
-		t.Fatal(err)
+	for _, path := range runtimeSafetyPaths {
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(runtimeSafetyBeforeSettings[path]) {
+			t.Errorf("rejected settings update changed runtime safety state %s", path)
+		}
 	}
-	if string(indexAfterSettings) != string(indexAfterCreate) {
-		t.Fatal("rejected settings update changed runtime index bytes")
+	if string(runtimeSafetyBeforeSettings[indexPath]) != string(indexAfterCreate) {
+		t.Fatal("runtime index snapshot changed before settings entered the registration lane")
 	}
 	a.mu.Lock()
 	configuredRoot := a.settings.ProjectsRoot
@@ -1955,8 +1988,19 @@ func TestSettingsUpdateAndCreateRacePreservesRuntimeProjectSet(t *testing.T) {
 	if filepath.Clean(configuredRoot) != filepath.Clean(rootA) {
 		t.Fatalf("configured root=%q, want %q", configuredRoot, rootA)
 	}
-	if a.processRuntime.projectRuntime(created.project.ID) == nil {
-		t.Fatal("live runtime lost concurrently created project")
+	if created.project.ID != createdIdentity.ProjectID {
+		t.Fatalf(
+			"created project identity=%q, runtime identity=%q",
+			created.project.ID, createdIdentity.ProjectID,
+		)
+	}
+	assertSingleReadyRuntimeProject(t, a.processRuntime, createdIdentity)
+	projects, err := a.scanProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 || projects[0].ID != created.project.ID {
+		t.Fatalf("live project set=%+v, want only %s", projects, created.project.ID)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1985,8 +2029,81 @@ func TestSettingsUpdateAndCreateRacePreservesRuntimeProjectSet(t *testing.T) {
 	if filepath.Clean(restartedRoot) != filepath.Clean(rootA) {
 		t.Fatalf("restarted root=%q, want %q", restartedRoot, rootA)
 	}
-	if restarted.processRuntime.projectRuntime(created.project.ID) == nil {
-		t.Fatal("restart lost concurrently created project runtime")
+	assertSingleReadyRuntimeProject(t, restarted.processRuntime, createdIdentity)
+	restartedProjects, err := restarted.scanProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restartedProjects) != 1 ||
+		restartedProjects[0].ID != created.project.ID {
+		t.Fatalf(
+			"restarted project set=%+v, want only %s",
+			restartedProjects, created.project.ID,
+		)
+	}
+}
+
+func assertSingleReadyRuntimeProject(
+	t *testing.T,
+	runtime *processRuntimePersistence,
+	want monitordomain.RuntimeProjectIdentity,
+) {
+	t.Helper()
+	runtime.registryMu.RLock()
+	defer runtime.registryMu.RUnlock()
+	if len(runtime.projects) != 1 {
+		t.Fatalf("live runtime project count=%d, want 1", len(runtime.projects))
+	}
+	state := runtime.projects[want.ProjectID]
+	if state == nil {
+		t.Fatalf("ready runtime %s is orphaned from the live project set", want.ProjectID)
+	}
+	if state.identity != want {
+		t.Fatalf("live runtime identity=%+v, want %+v", state.identity, want)
+	}
+
+	runtime.indexMu.Lock()
+	indexProjectCount := len(runtime.index.Projects)
+	if indexProjectCount != 1 {
+		runtime.indexMu.Unlock()
+		t.Fatalf("runtime index project count=%d, want 1", indexProjectCount)
+	}
+	entry, exists := runtime.index.Projects[want.SafeProjectKey]
+	runtime.indexMu.Unlock()
+	if !exists || entry.Project != want || entry.State != "ready" ||
+		entry.Import != nil {
+		t.Fatalf("runtime index entry=%+v, want ready identity %+v", entry, want)
+	}
+
+	runtime.authorityMu.Lock()
+	authorityProjectCount := len(runtime.authority.Projects)
+	if authorityProjectCount != 1 {
+		runtime.authorityMu.Unlock()
+		t.Fatalf(
+			"runtime authority project count=%d, want 1",
+			authorityProjectCount,
+		)
+	}
+	authority, exists := runtime.authority.Projects[want.SafeProjectKey]
+	runtime.authorityMu.Unlock()
+	if !exists || authority.Project != want ||
+		len(authority.Records) != 0 || len(authority.Tombstones) != 0 {
+		t.Fatalf("runtime authority identity=%+v, want %+v", authority.Project, want)
+	}
+
+	state.ledgerMu.Lock()
+	ledgerProject := state.ledger.Project
+	ledgerSlots := len(state.ledger.Slots)
+	state.ledgerMu.Unlock()
+	if ledgerProject != want || ledgerSlots != 0 {
+		t.Fatalf("runtime ledger identity=%+v, want %+v", ledgerProject, want)
+	}
+	state.journalMu.Lock()
+	journalProject := state.journal.Project
+	journalOperations := len(state.journal.Operations)
+	state.journalMu.Unlock()
+	if journalProject != want || journalOperations != 0 {
+		t.Fatalf("runtime journal identity=%+v, want %+v", journalProject, want)
 	}
 }
 
