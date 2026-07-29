@@ -128,6 +128,9 @@ func (a *app) createProject(req ProjectCreateRequest) (Project, error) {
 	if strings.EqualFold(strings.TrimSpace(req.Mode), "import") || strings.TrimSpace(req.Path) != "" {
 		return a.importProject(req)
 	}
+	a.projectRegistrationMu.Lock()
+	defer a.projectRegistrationMu.Unlock()
+
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		return Project{}, errors.New("project name is required")
@@ -135,8 +138,11 @@ func (a *app) createProject(req ProjectCreateRequest) (Project, error) {
 	if !isSafeProjectName(name) {
 		return Project{}, errors.New("project name may only contain letters, numbers, dot, dash, and underscore")
 	}
-	path := filepath.Join(a.settings.ProjectsRoot, name)
-	cleanRoot := filepath.Clean(a.settings.ProjectsRoot)
+	a.mu.Lock()
+	projectsRoot := a.settings.ProjectsRoot
+	a.mu.Unlock()
+	path := filepath.Join(projectsRoot, name)
+	cleanRoot := filepath.Clean(projectsRoot)
 	cleanPath := filepath.Clean(path)
 	if cleanPath == cleanRoot || !strings.HasPrefix(cleanPath, cleanRoot+string(os.PathSeparator)) {
 		return Project{}, errors.New("project path escapes projects root")
@@ -170,6 +176,9 @@ func (a *app) createProject(req ProjectCreateRequest) (Project, error) {
 	}
 	if err := a.registerProcessRuntimeProject(project); err != nil {
 		return Project{}, fmt.Errorf("register project runtime: %w", err)
+	}
+	if a.projectCreateAfterRegistrationHook != nil {
+		a.projectCreateAfterRegistrationHook()
 	}
 	return project, nil
 }

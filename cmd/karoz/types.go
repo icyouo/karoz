@@ -23,6 +23,8 @@ type app struct {
 	processSupervisor                  *processSupervisor
 	processPersistenceFail             func(processPersistenceFailpoint) error
 	projectRegistrationMu              sync.Mutex
+	projectCreateAfterRegistrationHook func()
+	settingsUpdateBeforeRegistryHook   func()
 	projectImportSettingsSave          func() error
 	taskRunMu                          sync.Mutex
 	taskRunCancels                     map[string]taskRun

@@ -1866,6 +1866,130 @@ func TestSettingsUpdateAndImportRacePreservesRuntimeProjectSet(t *testing.T) {
 	}
 }
 
+func TestSettingsUpdateAndCreateRacePreservesRuntimeProjectSet(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	dataDir := t.TempDir()
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: rootA})
+	if err := a.bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.saveSettings(); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(dataDir, "settings.json")
+	indexPath := filepath.Join(dataDir, "project-runtime", "index.json")
+	settingsBefore, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createRegistered := make(chan struct{})
+	releaseCreate := make(chan struct{})
+	settingsAtRegistry := make(chan struct{})
+	a.projectCreateAfterRegistrationHook = func() {
+		close(createRegistered)
+		<-releaseCreate
+	}
+	a.settingsUpdateBeforeRegistryHook = func() {
+		close(settingsAtRegistry)
+	}
+	createResult := make(chan struct {
+		project Project
+		err     error
+	}, 1)
+	go func() {
+		project, createErr := a.createProject(ProjectCreateRequest{Name: "created"})
+		createResult <- struct {
+			project Project
+			err     error
+		}{project: project, err: createErr}
+	}()
+	<-createRegistered
+
+	indexAfterCreate, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsResult := make(chan error, 1)
+	go func() {
+		settingsResult <- a.updateSettings(SettingsUpdateRequest{ProjectsRoot: rootB})
+	}()
+	<-settingsAtRegistry
+	settingsWhileCreateOwnsLane, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(settingsWhileCreateOwnsLane) != string(settingsBefore) {
+		t.Fatal("settings changed while create owned the registration lane")
+	}
+
+	close(releaseCreate)
+	created := <-createResult
+	if created.err != nil {
+		t.Fatalf("create project: %v", created.err)
+	}
+	if err := <-settingsResult; err == nil {
+		t.Fatal("settings update removed a concurrently registered project")
+	}
+	a.projectCreateAfterRegistrationHook = nil
+	a.settingsUpdateBeforeRegistryHook = nil
+
+	settingsAfter, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(settingsAfter) != string(settingsBefore) {
+		t.Fatal("rejected settings update changed settings bytes")
+	}
+	indexAfterSettings, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(indexAfterSettings) != string(indexAfterCreate) {
+		t.Fatal("rejected settings update changed runtime index bytes")
+	}
+	a.mu.Lock()
+	configuredRoot := a.settings.ProjectsRoot
+	a.mu.Unlock()
+	if filepath.Clean(configuredRoot) != filepath.Clean(rootA) {
+		t.Fatalf("configured root=%q, want %q", configuredRoot, rootA)
+	}
+	if a.processRuntime.projectRuntime(created.project.ID) == nil {
+		t.Fatal("live runtime lost concurrently created project")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := a.shutdownProcessRuntime(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	restarted := newApp(Settings{DataDir: dataDir, ProjectsRoot: rootB})
+	if err := restarted.loadSettings(); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.bootstrap(); err != nil {
+		t.Fatalf("restart after settings/create race: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := restarted.shutdownProcessRuntime(ctx); err != nil {
+			t.Errorf("shutdown restarted runtime: %v", err)
+		}
+	})
+	restarted.mu.Lock()
+	restartedRoot := restarted.settings.ProjectsRoot
+	restarted.mu.Unlock()
+	if filepath.Clean(restartedRoot) != filepath.Clean(rootA) {
+		t.Fatalf("restarted root=%q, want %q", restartedRoot, rootA)
+	}
+	if restarted.processRuntime.projectRuntime(created.project.ID) == nil {
+		t.Fatal("restart lost concurrently created project runtime")
+	}
+}
+
 func TestProcessRuntimeConcurrentCanonicalPathRegistrationAllowsOneOwner(t *testing.T) {
 	dataDir := t.TempDir()
 	runtime, err := newProcessRuntimePersistence(dataDir, nil, nil)

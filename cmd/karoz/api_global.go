@@ -100,6 +100,9 @@ func (a *app) updateSettings(req SettingsUpdateRequest) error {
 	if root == "" {
 		return errors.New("projects_root is required")
 	}
+	if a.settingsUpdateBeforeRegistryHook != nil {
+		a.settingsUpdateBeforeRegistryHook()
+	}
 	a.projectRegistrationMu.Lock()
 	defer a.projectRegistrationMu.Unlock()
 	if err := os.MkdirAll(root, 0o755); err != nil {
