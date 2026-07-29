@@ -164,6 +164,8 @@ type processRuntimePersistence struct {
 	healthMu     sync.RWMutex
 	projectErrs  map[string]error
 	disabledKeys map[string]bool
+	readerMu     sync.Mutex
+	openReaders  map[string]map[string]int
 	fail         func(processPersistenceFailpoint) error
 	now          func() time.Time
 	retention    processdomain.RetentionPolicy
@@ -185,7 +187,8 @@ func newProcessRuntimePersistence(
 	runtime := &processRuntimePersistence{
 		store: store, projects: make(map[string]*processProjectRuntime),
 		projectErrs: make(map[string]error), disabledKeys: make(map[string]bool),
-		fail: fail, now: func() time.Time { return time.Now().UTC() },
+		openReaders: make(map[string]map[string]int),
+		fail:        fail, now: func() time.Time { return time.Now().UTC() },
 		retention: defaultProcessRetentionPolicy(),
 	}
 	if err := runtime.bootstrap(identities); err != nil {

@@ -13,6 +13,12 @@ type secureRuntimeStore struct {
 	root string
 }
 
+type runtimeReadSeekCloser interface {
+	io.Reader
+	io.Seeker
+	io.Closer
+}
+
 func newSecureRuntimeStore(dataDir string) (*secureRuntimeStore, error) {
 	if strings.TrimSpace(dataDir) == "" {
 		return nil, errors.New("runtime data directory is empty")
@@ -90,6 +96,16 @@ func (store *secureRuntimeStore) openLog(relative string) (io.WriteCloser, error
 		return nil, err
 	}
 	return secureOpenAppendFile(store.root, parts)
+}
+
+func (store *secureRuntimeStore) openRead(
+	relative string,
+) (runtimeReadSeekCloser, error) {
+	parts, err := secureRelativeParts(relative)
+	if err != nil {
+		return nil, err
+	}
+	return secureOpenReadFile(store.root, parts)
 }
 
 func (store *secureRuntimeStore) remove(relative string) error {

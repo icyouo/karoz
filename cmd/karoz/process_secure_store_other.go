@@ -18,4 +18,7 @@ func secureWriteFile(string, []string, []byte) error { return errSecureRuntimeUn
 func secureOpenAppendFile(string, []string) (io.WriteCloser, error) {
 	return nil, errSecureRuntimeUnsupported
 }
+func secureOpenReadFile(string, []string) (runtimeReadSeekCloser, error) {
+	return nil, errSecureRuntimeUnsupported
+}
 func secureRemoveFile(string, []string) error { return errSecureRuntimeUnsupported }

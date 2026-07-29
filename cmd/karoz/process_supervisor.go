@@ -55,22 +55,24 @@ const (
 )
 
 type processSupervisorConfig struct {
-	LogBytes        int64
-	TailLines       int
-	ExitDrain       time.Duration
-	StopGrace       time.Duration
-	DefaultLifetime time.Duration
-	MaxLifetime     time.Duration
-	TerminalRetry   time.Duration
-	TerminalRetries int
-	Fail            func(processFailpoint) error
-	GuardExecutable string
-	GuardArgsPrefix []string
-	BoundaryFactory func(*exec.Cmd) (processBoundary, error)
-	ProcessKill     func(*os.Process) error
-	ProcessWait     func(*exec.Cmd) error
-	BeforeFinalize  func()
-	PrepareRecord   func(processdomain.Process) (processdomain.Process, error)
+	LogBytes         int64
+	TailLines        int
+	MaxConcurrent    int
+	OutputEventBytes int64
+	ExitDrain        time.Duration
+	StopGrace        time.Duration
+	DefaultLifetime  time.Duration
+	MaxLifetime      time.Duration
+	TerminalRetry    time.Duration
+	TerminalRetries  int
+	Fail             func(processFailpoint) error
+	GuardExecutable  string
+	GuardArgsPrefix  []string
+	BoundaryFactory  func(*exec.Cmd) (processBoundary, error)
+	ProcessKill      func(*os.Process) error
+	ProcessWait      func(*exec.Cmd) error
+	BeforeFinalize   func()
+	PrepareRecord    func(processdomain.Process) (processdomain.Process, error)
 }
 
 type processStartRequest struct {
@@ -183,6 +185,15 @@ func newProcessSupervisor(
 	if config.TailLines <= 0 {
 		config.TailLines = 200
 	}
+	if config.MaxConcurrent <= 0 {
+		config.MaxConcurrent = defaultProcessMaxConcurrent
+	}
+	if config.OutputEventBytes <= 0 {
+		config.OutputEventBytes = defaultProcessOutputEventMax
+	}
+	if config.OutputEventBytes > maxProcessOutputEventMax {
+		return nil, errors.New("process output event limit exceeds product ceiling")
+	}
 	if config.ExitDrain <= 0 {
 		config.ExitDrain = 250 * time.Millisecond
 	}
@@ -258,6 +269,21 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 	if _, exists := supervisor.faulted[request.ID]; exists {
 		supervisor.mu.Unlock()
 		return processdomain.Process{}, errors.New("process has unresolved durable state")
+	}
+	activeForProject := 0
+	for _, handle := range supervisor.handles {
+		if handle.snapshot().ProjectID == request.ProjectID {
+			activeForProject++
+		}
+	}
+	for _, faulted := range supervisor.faulted {
+		if faulted.handle != nil && faulted.record.ProjectID == request.ProjectID {
+			activeForProject++
+		}
+	}
+	if activeForProject >= supervisor.config.MaxConcurrent {
+		supervisor.mu.Unlock()
+		return processdomain.Process{}, errors.New("project background process concurrency limit reached")
 	}
 	supervisor.mu.Unlock()
 
@@ -889,6 +915,40 @@ func (supervisor *processSupervisor) Stop(id string) error {
 			return errors.New("process terminal state is unresolved")
 		}
 	}
+}
+
+func (supervisor *processSupervisor) LiveSnapshot(
+	id string,
+) (processdomain.Process, bool) {
+	supervisor.mu.Lock()
+	handle := supervisor.handles[id]
+	supervisor.mu.Unlock()
+	if handle == nil {
+		return processdomain.Process{}, false
+	}
+	record := handle.snapshot()
+	record.LogBytes, record.LogLines, record.LogTruncated = handle.buffer.Stats()
+	tail := handle.buffer.TailSequenced(1)
+	if len(tail) > 0 {
+		record.OutputSeq = tail[len(tail)-1].Sequence
+	}
+	return record, true
+}
+
+func (supervisor *processSupervisor) LiveTail(
+	projectID, id string,
+	limit int,
+) ([]processdomain.OutputLine, bool) {
+	supervisor.mu.Lock()
+	handle := supervisor.handles[id]
+	supervisor.mu.Unlock()
+	if handle == nil {
+		return nil, false
+	}
+	if handle.snapshot().ProjectID != projectID {
+		return nil, false
+	}
+	return handle.buffer.TailSequenced(limit), true
 }
 
 func (supervisor *processSupervisor) enforceLifetime(handle *supervisedProcess, lifetime time.Duration) {

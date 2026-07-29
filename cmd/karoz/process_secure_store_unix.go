@@ -160,6 +160,39 @@ func secureOpenAppendFile(root string, parts []string) (io.WriteCloser, error) {
 	return os.NewFile(uintptr(fd), name), nil
 }
 
+func secureOpenReadFile(
+	root string,
+	parts []string,
+) (runtimeReadSeekCloser, error) {
+	parent, name, err := openSecureUnixParent(root, parts, false)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(parent)
+	fd, err := unix.Openat(
+		parent,
+		name,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if errors.Is(err, unix.ENOENT) {
+		return nil, os.ErrNotExist
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := validateSecureUnixFD(fd, false); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		unix.Close(fd)
+		return nil, errors.New("create runtime read handle")
+	}
+	return file, nil
+}
+
 func secureRemoveFile(root string, parts []string) error {
 	parent, name, err := openSecureUnixParent(root, parts, false)
 	if err != nil {

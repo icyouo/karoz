@@ -22,6 +22,7 @@ type app struct {
 	processRuntime                     *processRuntimePersistence
 	processSupervisor                  *processSupervisor
 	processPersistenceFail             func(processPersistenceFailpoint) error
+	backgroundOwnerMu                  sync.Mutex
 	projectRegistrationMu              sync.Mutex
 	projectCreateAfterRegistrationHook func()
 	settingsUpdateBeforeRegistryHook   func()
@@ -242,10 +243,8 @@ type BashToolResult struct {
 
 type ResidentBashApproval struct {
 	ID        string
-	ProjectID string
-	AgentID   string
 	RunID     string
-	Command   string
+	Subject   residentBashSubject
 	State     string
 	CreatedAt time.Time
 	ExpiresAt time.Time

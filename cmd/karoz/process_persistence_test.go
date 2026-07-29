@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1106,6 +1107,90 @@ func TestProcessRetentionNeverPrunesActiveOrUnacknowledged(t *testing.T) {
 	}
 	if items := runtime.List(project.ID); len(items) != 2 {
 		t.Fatalf("retention pruned pinned records: %+v", items)
+	}
+}
+
+func TestProcessRetentionPinsOpenLogReaderThenReturnsGone(t *testing.T) {
+	dataDir := t.TempDir()
+	project := runtimeTestProject(t, "retention-reader")
+	runtime, err := newProcessRuntimePersistence(
+		dataDir,
+		[]Project{project},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := runtimeStartingRecord(t, runtime, project.ID, "terminal")
+	writer, err := runtime.OpenLog(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("retained while open\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	admitRuntimeRecord(t, runtime, record)
+	record.State = processdomain.StateRunning
+	record.PID, record.GuardPID, record.PGID = 100, 100, 100
+	record.UpdatedAt = record.UpdatedAt.Add(time.Second)
+	if err := runtime.MarkRunning(record); err != nil {
+		t.Fatal(err)
+	}
+	record.State = processdomain.StateSucceeded
+	record.PID, record.GuardPID, record.PGID = 0, 0, 0
+	record.EndedAt = timePointer(record.UpdatedAt.Add(time.Second))
+	record.UpdatedAt = *record.EndedAt
+	record.LogBytes = int64(len("retained while open\n"))
+	record.LogLines = 1
+	if err := runtime.MarkTerminal(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.AcknowledgeTerminal(
+		project.ID,
+		record.ID,
+		processTerminalEventID(record.ID),
+	); err != nil {
+		t.Fatal(err)
+	}
+	reader, _, err := runtime.OpenLogReader(project.ID, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.ApplyRetention(
+		project.ID,
+		processdomain.RetentionPolicy{MaxRecords: 0, MaxTotalBytes: 0},
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if items := runtime.List(project.ID); len(items) != 1 {
+		t.Fatalf("open reader did not pin terminal record: %+v", items)
+	}
+	body, err := io.ReadAll(reader)
+	if err != nil || string(body) != "retained while open\n" {
+		t.Fatalf("open reader body = %q err=%v", body, err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.ApplyRetention(
+		project.ID,
+		processdomain.RetentionPolicy{MaxRecords: 0, MaxTotalBytes: 0},
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if items := runtime.List(project.ID); len(items) != 0 {
+		t.Fatalf("closed reader continued to pin record: %+v", items)
+	}
+	if _, _, err := runtime.OpenLogReader(
+		project.ID,
+		record.ID,
+	); !errors.Is(err, errProcessLogGone) {
+		t.Fatalf("retired log error = %v, want gone", err)
 	}
 }
 

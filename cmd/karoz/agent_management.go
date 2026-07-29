@@ -382,6 +382,9 @@ func (*agentBusyModelConfigError) Error() string {
 }
 
 func (a *app) deleteProjectAgent(project Project, agentID string) error {
+	a.backgroundOwnerMu.Lock()
+	defer a.backgroundOwnerMu.Unlock()
+
 	agentID = strings.TrimSpace(agentID)
 	if agentID == "" {
 		return fmt.Errorf("agent id is required")
@@ -391,6 +394,9 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	}
 	if group, ok := a.groupForAgent(project.ID, agentID); ok && group.CoordinatorAgentID == agentID {
 		return fmt.Errorf("group coordinator cannot be deleted before coordination is transferred")
+	}
+	if err := a.stopOwnedProcesses(project.ID, agentID); err != nil {
+		return fmt.Errorf("stop background processes owned by %s: %w", agentID, err)
 	}
 	key := projectAgentKey(project.ID, agentID)
 	a.mu.Lock()

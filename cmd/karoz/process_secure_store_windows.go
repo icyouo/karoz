@@ -132,6 +132,20 @@ func secureOpenAppendFile(root string, parts []string) (io.WriteCloser, error) {
 	return file, nil
 }
 
+func secureOpenReadFile(
+	root string,
+	parts []string,
+) (runtimeReadSeekCloser, error) {
+	path, err := secureWindowsPath(root, parts, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateWindowsSecurePath(path); err != nil {
+		return nil, err
+	}
+	return os.Open(path)
+}
+
 func secureRemoveFile(root string, parts []string) error {
 	path, err := secureWindowsPath(root, parts, false)
 	if err != nil {

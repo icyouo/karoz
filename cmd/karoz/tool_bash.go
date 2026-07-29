@@ -2,15 +2,26 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
+	residentBashSubjectVersion = 1
+
+	residentBashOperationForeground      = "foreground"
+	residentBashOperationBackgroundStart = "background_start"
+	residentBashOperationBackgroundStop  = "background_stop"
+
 	residentBashApprovalTTL     = 10 * time.Minute
 	residentBashApprovePrefix   = "resident_bash_approve:"
 	residentBashDenyPrefix      = "resident_bash_deny:"
@@ -18,14 +29,136 @@ const (
 	residentBashApprovalGranted = "approved"
 )
 
+// residentBashSubject is the versioned canonical approval identity for every
+// resident command operation. Equality is structured-field equality; labels
+// shown to users are never parsed back into authorization.
+type residentBashSubject struct {
+	Version          int    `json:"version"`
+	Operation        string `json:"operation"`
+	ProjectID        string `json:"project_id"`
+	AgentID          string `json:"agent_id"`
+	CanonicalWorkdir string `json:"canonical_workdir"`
+	ProcessID        string `json:"process_id"`
+	CommandSHA256    string `json:"command_sha256"`
+}
+
+func newResidentBashSubject(
+	operation, projectID, agentID, workdir, command, processID string,
+) (residentBashSubject, error) {
+	canonicalWorkdir, err := canonicalResidentWorkdir(workdir)
+	if err != nil {
+		return residentBashSubject{}, err
+	}
+	return newResidentBashSubjectFromCanonical(
+		operation,
+		projectID,
+		agentID,
+		canonicalWorkdir,
+		command,
+		processID,
+	)
+}
+
+func newResidentBashSubjectFromCanonical(
+	operation, projectID, agentID, canonicalWorkdir, command, processID string,
+) (residentBashSubject, error) {
+	canonicalWorkdir = strings.TrimSpace(canonicalWorkdir)
+	if !filepath.IsAbs(canonicalWorkdir) ||
+		filepath.Clean(canonicalWorkdir) != canonicalWorkdir {
+		return residentBashSubject{}, errors.New(
+			"resident command canonical workdir is invalid",
+		)
+	}
+	sum := sha256.Sum256([]byte(command))
+	subject := residentBashSubject{
+		Version: residentBashSubjectVersion, Operation: strings.TrimSpace(operation),
+		ProjectID: strings.TrimSpace(projectID), AgentID: strings.TrimSpace(agentID),
+		CanonicalWorkdir: canonicalWorkdir, ProcessID: strings.TrimSpace(processID),
+		CommandSHA256: hex.EncodeToString(sum[:]),
+	}
+	if err := subject.validate(); err != nil {
+		return residentBashSubject{}, err
+	}
+	return subject, nil
+}
+
+func (subject residentBashSubject) validate() error {
+	if subject.Version != residentBashSubjectVersion {
+		return errors.New("resident command approval subject version is unsupported")
+	}
+	switch subject.Operation {
+	case residentBashOperationForeground, residentBashOperationBackgroundStart:
+		if subject.ProcessID != "" {
+			return errors.New("resident command start subject must not include a process id")
+		}
+	case residentBashOperationBackgroundStop:
+		if subject.ProcessID == "" {
+			return errors.New("resident command stop subject requires a process id")
+		}
+	default:
+		return errors.New("resident command approval operation is invalid")
+	}
+	if subject.ProjectID == "" || subject.AgentID == "" ||
+		subject.CanonicalWorkdir == "" || len(subject.CommandSHA256) != sha256.Size*2 {
+		return errors.New("resident command approval subject is incomplete")
+	}
+	if _, err := hex.DecodeString(subject.CommandSHA256); err != nil ||
+		subject.CommandSHA256 != strings.ToLower(subject.CommandSHA256) {
+		return errors.New("resident command approval digest is invalid")
+	}
+	return nil
+}
+
+func (subject residentBashSubject) canonicalJSON() ([]byte, error) {
+	if err := subject.validate(); err != nil {
+		return nil, err
+	}
+	return json.Marshal(subject)
+}
+
+func canonicalResidentWorkdir(workdir string) (string, error) {
+	workdir = strings.TrimSpace(workdir)
+	if workdir == "" {
+		return "", errors.New("resident command workdir is required")
+	}
+	absolute, err := filepath.Abs(workdir)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize resident command workdir: %w", err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("resident command workdir must be a directory")
+	}
+	return filepath.Clean(canonical), nil
+}
+
 func (a *app) executeResidentBashTool(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 	command := toolStringArg(args, "command", 20000)
 	if command == "" {
 		return toolJSON(map[string]any{"error": "validation_error", "message": "command is required"}), nil
 	}
 
-	if normalizeChatTurnType(toolCtx.TurnType) != "dev" && !a.consumeResidentBashApproval(toolCtx.Project.ID, toolCtx.Agent.ID, toolCtx.RunID, command) {
-		return a.requestResidentBashApproval(toolCtx, command), nil
+	subject, err := newResidentBashSubject(
+		residentBashOperationForeground,
+		toolCtx.Project.ID,
+		toolCtx.Agent.ID,
+		firstNonEmpty(toolCtx.Workdir, toolCtx.Project.Path),
+		command,
+		"",
+	)
+	if err != nil {
+		return toolJSON(map[string]any{"error": "validation_error", "message": err.Error()}), nil
+	}
+	if normalizeChatTurnType(toolCtx.TurnType) != "dev" &&
+		!a.consumeResidentBashApprovalSubject(toolCtx.RunID, subject) {
+		return a.requestResidentBashApprovalSubject(toolCtx, subject, command), nil
 	}
 	if err := a.markScheduledRunEffectsStarted(toolCtx.RunID); err != nil {
 		return toolJSON(map[string]any{"error": "effect_barrier_failed", "message": err.Error()}), err
@@ -35,7 +168,13 @@ func (a *app) executeResidentBashTool(ctx context.Context, toolCtx ResidentToolC
 	// The provider loop gives tools only the remaining tool-phase context. Do
 	// not advertise or attempt a Bash timeout that outlives that context.
 	requestedTimeout = clampResidentBashTimeout(ctx, requestedTimeout)
-	result := runResidentBashTool(ctx, toolCtx.Workdir, command, requestedTimeout, clampToolInt(args, "max_output", 20000, 1, 200000))
+	result := runResidentBashTool(
+		ctx,
+		subject.CanonicalWorkdir,
+		command,
+		requestedTimeout,
+		clampToolInt(args, "max_output", 20000, 1, 200000),
+	)
 	if err := ctx.Err(); err != nil {
 		return toolJSON(result), err
 	}
@@ -141,6 +280,25 @@ func (w *boundedCommandOutput) Result() (string, bool) {
 }
 
 func (a *app) requestResidentBashApproval(toolCtx ResidentToolContext, command string) string {
+	subject, err := newResidentBashSubject(
+		residentBashOperationForeground,
+		toolCtx.Project.ID,
+		toolCtx.Agent.ID,
+		firstNonEmpty(toolCtx.Workdir, toolCtx.Project.Path),
+		command,
+		"",
+	)
+	if err != nil {
+		return toolJSON(map[string]any{"error": "validation_error", "message": err.Error()})
+	}
+	return a.requestResidentBashApprovalSubject(toolCtx, subject, command)
+}
+
+func (a *app) requestResidentBashApprovalSubject(
+	toolCtx ResidentToolContext,
+	subject residentBashSubject,
+	command string,
+) string {
 	now := time.Now().UTC()
 	approval := ResidentBashApproval{}
 	a.mu.Lock()
@@ -152,35 +310,39 @@ func (a *app) requestResidentBashApproval(toolCtx ResidentToolContext, command s
 			delete(a.residentBashApprovals, id)
 			continue
 		}
-		if candidate.ProjectID == toolCtx.Project.ID && candidate.AgentID == toolCtx.Agent.ID && candidate.Command == command && candidate.State == residentBashApprovalPending {
+		if candidate.Subject == subject &&
+			candidate.State == residentBashApprovalPending {
 			approval = candidate
 			break
 		}
 	}
 	if approval.ID == "" {
 		approval = ResidentBashApproval{
-			ID:        randomID(),
-			ProjectID: toolCtx.Project.ID,
-			AgentID:   toolCtx.Agent.ID,
-			Command:   command,
-			State:     residentBashApprovalPending,
-			CreatedAt: now,
-			ExpiresAt: now.Add(residentBashApprovalTTL),
+			ID: randomID(), Subject: subject, State: residentBashApprovalPending,
+			CreatedAt: now, ExpiresAt: now.Add(residentBashApprovalTTL),
 		}
 		a.residentBashApprovals[approval.ID] = approval
 	}
 	a.mu.Unlock()
 
 	agentName := firstNonEmpty(toolCtx.Agent.Nickname, toolCtx.Agent.DisplayName, toolCtx.Agent.Name, toolCtx.Agent.ID, "resident agent")
+	action, choiceLabel := "run this command", "Run command"
+	switch subject.Operation {
+	case residentBashOperationBackgroundStart:
+		action, choiceLabel = "start this background command", "Start background process"
+	case residentBashOperationBackgroundStop:
+		action, choiceLabel = "stop background process "+subject.ProcessID, "Stop background process"
+	}
 	return toolJSON(map[string]any{
 		"kind":          "choice_request",
 		"status":        "pending_user_choice",
 		"approval_type": "resident_bash",
 		"approval_id":   approval.ID,
-		"question":      fmt.Sprintf("Allow %s to run this command in %s?\n\n$ %s", agentName, firstNonEmpty(toolCtx.Project.Name, toolCtx.Project.ID, "the project"), command),
+		"operation":     subject.Operation,
+		"question":      fmt.Sprintf("Allow %s to %s in %s?\n\n$ %s", agentName, action, firstNonEmpty(toolCtx.Project.Name, toolCtx.Project.ID, "the project"), command),
 		"mode":          "yes_no",
 		"choices": []map[string]string{
-			{"id": residentBashApprovePrefix + approval.ID, "label": "Run command", "description": "Allow this exact command once."},
+			{"id": residentBashApprovePrefix + approval.ID, "label": choiceLabel, "description": "Allow this exact operation once."},
 			{"id": residentBashDenyPrefix + approval.ID, "label": "Cancel", "description": "Do not run the command."},
 		},
 	})
@@ -211,7 +373,8 @@ func (a *app) resolveResidentBashChoice(projectID, agentID, runID, choiceID stri
 		delete(a.residentBashApprovals, id)
 		return true, errors.New("bash approval is missing or expired")
 	}
-	if approval.ProjectID != projectID || approval.AgentID != agentID {
+	if approval.Subject.ProjectID != projectID ||
+		approval.Subject.AgentID != agentID {
 		return true, errors.New("bash approval belongs to a different project or agent")
 	}
 	if approval.State != residentBashApprovalPending {
@@ -230,7 +393,10 @@ func (a *app) resolveResidentBashChoice(projectID, agentID, runID, choiceID stri
 	return true, nil
 }
 
-func (a *app) consumeResidentBashApproval(projectID, agentID, runID, command string) bool {
+func (a *app) consumeResidentBashApprovalSubject(
+	runID string,
+	subject residentBashSubject,
+) bool {
 	if strings.TrimSpace(runID) == "" {
 		return false
 	}
@@ -242,12 +408,46 @@ func (a *app) consumeResidentBashApproval(projectID, agentID, runID, command str
 			delete(a.residentBashApprovals, id)
 			continue
 		}
-		if approval.ProjectID == projectID && approval.AgentID == agentID && approval.RunID == runID && approval.Command == command && approval.State == residentBashApprovalGranted {
+		if approval.RunID == runID && approval.Subject == subject &&
+			approval.State == residentBashApprovalGranted {
 			delete(a.residentBashApprovals, id)
 			return true
 		}
 	}
 	return false
+}
+
+// consumeResidentBashApproval keeps the historical foreground test/helper
+// boundary while production callers use the exact structured subject above.
+func (a *app) consumeResidentBashApproval(
+	projectID, agentID, runID, command string,
+) bool {
+	sum := sha256.Sum256([]byte(command))
+	digest := hex.EncodeToString(sum[:])
+	a.mu.Lock()
+	workdir := ""
+	for _, approval := range a.residentBashApprovals {
+		if approval.Subject.Operation == residentBashOperationForeground &&
+			approval.Subject.ProjectID == projectID &&
+			approval.Subject.AgentID == agentID &&
+			approval.Subject.CommandSHA256 == digest {
+			workdir = approval.Subject.CanonicalWorkdir
+			break
+		}
+	}
+	a.mu.Unlock()
+	if workdir == "" {
+		return false
+	}
+	subject, err := newResidentBashSubject(
+		residentBashOperationForeground,
+		projectID,
+		agentID,
+		workdir,
+		command,
+		"",
+	)
+	return err == nil && a.consumeResidentBashApprovalSubject(runID, subject)
 }
 
 func (a *app) revokeResidentBashApprovalsForRun(runID string) {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"time"
 
 	monitordomain "github.com/karoz/karoz/internal/monitor"
@@ -787,6 +788,12 @@ func (runtime *processRuntimePersistence) applyRetentionLocked(
 	policy processdomain.RetentionPolicy,
 	now time.Time,
 ) error {
+	runtime.readerMu.Lock()
+	openReaders := make(map[string]int, len(runtime.openReaders[project.identity.ProjectID]))
+	for processID, count := range runtime.openReaders[project.identity.ProjectID] {
+		openReaders[processID] = count
+	}
+	runtime.readerMu.Unlock()
 	runtime.authorityMu.Lock()
 	partition := runtime.authority.Projects[project.identity.SafeProjectKey]
 	candidates := make([]processdomain.RetentionRecord, 0, len(partition.Records))
@@ -794,7 +801,9 @@ func (runtime *processRuntimePersistence) applyRetentionLocked(
 		if record.Event != nil || record.Reservation != nil {
 			continue
 		}
-		candidates = append(candidates, processdomain.RetentionRecord{Process: record.Process})
+		candidates = append(candidates, processdomain.RetentionRecord{
+			Process: record.Process, ReaderOpen: openReaders[record.Process.ID] > 0,
+		})
 	}
 	selected := processdomain.SelectRetention(candidates, policy, now)
 	for _, item := range selected {
@@ -820,8 +829,8 @@ func (runtime *processRuntimePersistence) applyRetentionLocked(
 	partition = runtime.authority.Projects[project.identity.SafeProjectKey]
 	for _, item := range selected {
 		delete(partition.Records, item.ID)
-		delete(partition.Tombstones, item.ID)
 	}
+	pruneProcessTombstones(partition.Tombstones, maxProcessTerminalRecords)
 	runtime.authority.Projects[project.identity.SafeProjectKey] = partition
 	if len(selected) > 0 {
 		runtime.authority.Generation++
@@ -829,6 +838,28 @@ func (runtime *processRuntimePersistence) applyRetentionLocked(
 	err := runtime.saveAuthorityLocked()
 	runtime.authorityMu.Unlock()
 	return err
+}
+
+func pruneProcessTombstones(
+	tombstones map[string]processTombstone,
+	limit int,
+) {
+	if limit < 1 || len(tombstones) <= limit {
+		return
+	}
+	items := make([]processTombstone, 0, len(tombstones))
+	for _, tombstone := range tombstones {
+		items = append(items, tombstone)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ProcessID < items[j].ProcessID
+		}
+		return items[i].CreatedAt.Before(items[j].CreatedAt)
+	})
+	for _, tombstone := range items[:len(items)-limit] {
+		delete(tombstones, tombstone.ProcessID)
+	}
 }
 
 func (runtime *processRuntimePersistence) recoverTombstones() error {

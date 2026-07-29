@@ -237,6 +237,39 @@ func TestProcessSupervisorTrueOneWriteAndLongRun(t *testing.T) {
 	}
 }
 
+func TestProcessSupervisorEnforcesPerProjectConcurrencyCap(t *testing.T) {
+	store := newMemoryProcessStore()
+	reservations := newMemoryReservationBoundary()
+	supervisor := testSupervisor(
+		t,
+		store,
+		reservations,
+		&synchronizedBuffer{},
+		processSupervisorConfig{MaxConcurrent: 1},
+	)
+	first := startRequest("cap-first", "sleep 30", t.TempDir())
+	if _, err := supervisor.Start(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	second := startRequest("cap-second", "sleep 30", first.Workdir)
+	if _, err := supervisor.Start(context.Background(), second); err == nil ||
+		!strings.Contains(err.Error(), "concurren") {
+		t.Fatalf("second start at cap error = %v", err)
+	}
+	if err := supervisor.Stop(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if record := waitTerminal(t, store, first.ID); !record.State.Terminal() {
+		t.Fatalf("first process did not terminate: %+v", record)
+	}
+	if _, err := supervisor.Start(context.Background(), second); err != nil {
+		t.Fatalf("capacity was not released: %v", err)
+	}
+	if err := supervisor.Stop(second.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProcessSupervisorInstantExitReturnsRecoveredTerminalSnapshot(t *testing.T) {
 	exitObserved := make(chan struct{})
 	releaseFinalize := make(chan struct{})

@@ -83,6 +83,7 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 	b.WriteString("- path: " + project.Path + "\n")
 	b.WriteString("- branch: " + project.DefaultBranch + "\n")
 	b.WriteString("- resident_agent: " + agentID + "\n")
+	a.renderResidentProcessObservation(&b, project.ID, agentID)
 	if skillPrompt := a.renderSkillsPrompt(project); skillPrompt != "" {
 		b.WriteString(limitString(skillPrompt, 6000))
 		b.WriteString("\n")
@@ -221,6 +222,38 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 	prompt := b.String()
 	log.Printf("resident prompt build project=%s agent=%s turn=%s stable_prefix_chars=%d transcript_context_tokens=%d build_duration=%s", project.ID, agent.ID, turnType, stablePrefixChars, estimateModelBoundTranscriptTokens(delta), time.Since(promptStarted).Round(time.Millisecond))
 	return prompt
+}
+
+func (a *app) renderResidentProcessObservation(
+	b *strings.Builder,
+	projectID, agentID string,
+) {
+	if b == nil || !a.processRuntimeReady() {
+		return
+	}
+	processes, err := a.processViews(projectID, agentID, 5)
+	if err != nil || len(processes) == 0 {
+		return
+	}
+	b.WriteString("\n### Background processes (bounded observation)\n")
+	for _, process := range processes {
+		b.WriteString("- id: ")
+		b.WriteString(limitString(process.ID, 128))
+		b.WriteString("; state: ")
+		b.WriteString(string(process.State))
+		b.WriteString("; exit_code: ")
+		b.WriteString(fmt.Sprintf("%d", process.ExitCode))
+		b.WriteString("; runtime_ms: ")
+		b.WriteString(fmt.Sprintf("%d", process.RuntimeMS))
+		if strings.TrimSpace(process.LastLine) != "" {
+			b.WriteString("; last_line: ")
+			b.WriteString(limitString(
+				strings.ReplaceAll(process.LastLine, "\n", " "),
+				240,
+			))
+		}
+		b.WriteString("\n")
+	}
 }
 
 func (a *app) renderResidentDurableIdentity(b *strings.Builder, project Project, agent Agent) {

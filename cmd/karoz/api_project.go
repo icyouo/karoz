@@ -12,6 +12,12 @@ func (a *app) handleProjectScoped(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if len(parts) >= 2 && parts[1] == "processes" &&
+		isStateChangingMethod(r.Method) {
+		if !requireProcessMutationBoundary(w, r) {
+			return
+		}
+	}
 	project, err := a.projectByID(parts[0])
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
@@ -42,6 +48,8 @@ func (a *app) handleProjectScoped(w http.ResponseWriter, r *http.Request) {
 		a.handleRuntimeEvents(w, r, project)
 	case "tasks":
 		a.handleTasks(w, r, project, parts[2:])
+	case "processes":
+		a.handleProcesses(w, r, project, parts[2:])
 	case "audit":
 		a.handleProjectAudit(w, r, project)
 	default:

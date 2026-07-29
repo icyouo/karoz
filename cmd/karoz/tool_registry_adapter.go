@@ -26,6 +26,18 @@ func (a *app) residentToolRegistry() *tooldomain.Registry[ResidentToolContext] {
 			"bash": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				return a.executeResidentBashTool(ctx, toolCtx, args)
 			},
+			"run_background": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.executeResidentRunBackgroundTool(ctx, toolCtx, args)
+			},
+			"list_processes": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.executeResidentListProcessesTool(ctx, toolCtx, args)
+			},
+			"read_process_log": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.executeResidentReadProcessLogTool(ctx, toolCtx, args)
+			},
+			"stop_process": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.executeResidentStopProcessTool(ctx, toolCtx, args)
+			},
 			"repo_list": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				result := repoListTool(ctx, toolCtx.Workdir, args)
 				return result, ctx.Err()
@@ -199,7 +211,10 @@ func (a *app) executeResidentTool(ctx context.Context, toolCtx ResidentToolConte
 	if toolCtx.EnforcePolicy && !residentToolAllowed(toolCtx, call.Name) {
 		return toolJSON(map[string]any{"error": "tool_forbidden", "message": call.Name + " is not allowed for this resident turn"}), nil
 	}
-	if residentToolHasSideEffects(call.Name) && call.Name != "bash" {
+	if residentToolHasSideEffects(call.Name) &&
+		call.Name != "bash" &&
+		call.Name != "run_background" &&
+		call.Name != "stop_process" {
 		if err := a.markScheduledRunEffectsStarted(toolCtx.RunID); err != nil {
 			return toolJSON(map[string]any{"error": "effect_barrier_failed", "message": err.Error()}), err
 		}
@@ -226,6 +241,8 @@ func residentToolHasSideEffects(name string) bool {
 	case "repo_list", "repo_read", "repo_search", "list_skills", "read_skill",
 		"web_search", "web_fetch", "search_archive", "list_pending", "get_messages",
 		"list_artifacts", "get_artifact", "list_agent_templates", "list_groups", "list_plans", "get_plan", "list_tasks", "get_task":
+		return false
+	case "list_processes", "read_process_log":
 		return false
 	default:
 		return true

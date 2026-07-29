@@ -5,12 +5,15 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
-	"time"
 
 	processdomain "github.com/karoz/karoz/internal/process"
 )
 
 func (a *app) bootstrapProcessRuntime() error {
+	releaseConfig, err := processReleaseConfigFromEnv()
+	if err != nil {
+		return err
+	}
 	projects, err := a.scanProjects()
 	if err != nil {
 		return err
@@ -23,6 +26,9 @@ func (a *app) bootstrapProcessRuntime() error {
 	if err != nil {
 		return err
 	}
+	runtime.retention = releaseConfig.Retention
+	supervisorConfig := releaseConfig.Supervisor
+	supervisorConfig.PrepareRecord = runtime.PrepareRecord
 	supervisor, err := newProcessSupervisor(
 		a.supervisorCtx,
 		runtime,
@@ -30,7 +36,7 @@ func (a *app) bootstrapProcessRuntime() error {
 		func(record processdomain.Process) (io.WriteCloser, error) {
 			return runtime.OpenLog(record)
 		},
-		processSupervisorConfig{PrepareRecord: runtime.PrepareRecord},
+		supervisorConfig,
 	)
 	if err != nil {
 		return err
@@ -62,15 +68,23 @@ func (a *app) processRecord(projectID, processID string) (processdomain.Process,
 	}
 	for _, record := range a.processRuntime.List(projectID) {
 		if record.ID == processID {
+			if a.processSupervisor != nil {
+				if live, ok := a.processSupervisor.LiveSnapshot(processID); ok &&
+					live.ProjectID == projectID {
+					return live, nil
+				}
+			}
 			return record, nil
 		}
 	}
-	return processdomain.Process{}, errors.New("process not found")
+	return processdomain.Process{}, errProcessNotFound
 }
 
 func defaultProcessRetentionPolicy() processdomain.RetentionPolicy {
 	return processdomain.RetentionPolicy{
-		MaxRecords: 200, MaxAge: 7 * 24 * time.Hour, MaxTotalBytes: 256 << 20,
+		MaxRecords:    defaultProcessTerminalRecords,
+		MaxAge:        defaultProcessTerminalAge,
+		MaxTotalBytes: defaultProcessLogTotalBytes,
 	}
 }
 

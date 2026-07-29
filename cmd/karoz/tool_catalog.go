@@ -14,6 +14,23 @@ func residentToolSpecs() []map[string]any {
 			"max_output":  map[string]any{"type": "integer", "description": "Optional maximum combined stdout/stderr characters. Default 20000, max 200000."},
 			"description": map[string]any{"type": "string", "description": "Short reason for running the command."},
 		}, []string{"command"}),
+		residentToolSpec("run_background", "Start a server-owned background command in the current project. The process continues after this resident turn or browser request ends. Ask and plan turns require explicit approval for the exact background-start subject.", map[string]any{
+			"command":     map[string]any{"type": "string", "description": "Bash command to start."},
+			"lifetime_ms": map[string]any{"type": "integer", "description": "Optional positive lifetime in milliseconds, bounded by server configuration."},
+			"description": map[string]any{"type": "string", "description": "Short non-sensitive description."},
+		}, []string{"command"}),
+		residentToolSpec("list_processes", "List bounded, redacted background-process status owned by this resident agent.", map[string]any{
+			"limit": map[string]any{"type": "integer", "description": "Maximum processes from 1 to 100. Default 20."},
+		}, nil),
+		residentToolSpec("read_process_log", "Read a bounded, redacted window of one background-process log owned by this resident agent.", map[string]any{
+			"process_id": map[string]any{"type": "string"},
+			"offset":     map[string]any{"type": "integer", "description": "Zero-based line offset. Supplying it disables tail mode unless tail is explicitly true."},
+			"limit":      map[string]any{"type": "integer", "description": "Maximum lines from 1 to 200. Default 50."},
+			"tail":       map[string]any{"type": "boolean", "description": "Read the newest lines. Default true when offset is absent."},
+		}, []string{"process_id"}),
+		residentToolSpec("stop_process", "Stop one background process owned by this resident agent. Terminal processes are idempotent. Ask and plan turns require explicit approval bound to the exact process and original command subject.", map[string]any{
+			"process_id": map[string]any{"type": "string"},
+		}, []string{"process_id"}),
 		residentToolSpec("repo_list", "List files and directories inside the current project through a bounded read-only repository view.", map[string]any{
 			"path":        map[string]any{"type": "string", "description": "Optional relative repository path."},
 			"depth":       map[string]any{"type": "integer", "description": "Traversal depth from 0 to 6. Default 2."},
