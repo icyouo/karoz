@@ -84,6 +84,33 @@
       );
     }
 
+    function backgroundMonitorCapabilities(monitor, probeSupported) {
+      const scriptProbe = !!(monitor && monitor.trigger && monitor.trigger.kind === 'script_probe');
+      const unsupportedProbe = scriptProbe &&
+        (!probeSupported || monitor.error_code === 'unsupported_platform');
+      return {
+        canRunCheck: scriptProbe && !unsupportedProbe,
+        runCheckTitle: unsupportedProbe
+          ? 'Temporary code probes are not supported in v1 on Windows'
+          : (scriptProbe ? '' : 'Run check is available for temporary-code probes'),
+        canResume: !unsupportedProbe,
+        resumeTitle: unsupportedProbe
+          ? 'Temporary code probes are not supported in v1 on Windows'
+          : '',
+      };
+    }
+
+    function backgroundScriptProbeEditorPresentation(monitor) {
+      const trigger = (monitor && monitor.trigger) || {};
+      return {
+        optionLabel: 'Temporary code · immutable',
+        summary: (trigger.probe_language || 'probe') + ' · every ' + backgroundDuration(trigger.interval_ms)
+          + ' · timeout ' + backgroundDuration(trigger.timeout_ms),
+        binding: 'Bound to MonitorID ' + (monitor.id || '') + ' · revision '
+          + String(trigger.revision || monitor.revision || 0),
+      };
+    }
+
     function backgroundProcessForMonitor(monitor) {
       const processID = monitor && monitor.trigger && monitor.trigger.process_id;
       return (state.backgroundProcesses || []).find(item => item.id === processID) || null;
@@ -223,6 +250,7 @@
       const process = backgroundProcessForMonitor(monitor);
       const sourceGaps = Object.values(monitor.source_gaps || {});
       const unacknowledged = monitorHasUnacknowledgedGaps(monitor);
+      const capabilities = backgroundMonitorCapabilities(monitor, state.backgroundProbeSupported);
       const outputCoverage = monitor.trigger && monitor.trigger.kind === 'process_output' && process
         ? '<div class="background-coverage"><strong>Live / best effort</strong><span>' + Number(process.output_lost_lines || 0) + ' lost lines · ' + Number(process.output_gap_count || 0) + ' gaps</span>'
           + (Number(process.output_lost_lines || 0) ? '<em>Coverage degraded</em>' : '')
@@ -249,9 +277,9 @@
         + (monitor.last_match ? '<div class="background-last-line"><span>Last match</span><code>' + escapeHTML(monitor.last_match) + '</code></div>' : '')
         + (monitor.last_error ? '<p class="background-note error">' + escapeHTML(monitor.last_error) + '</p>' : '')
         + outputCoverage + sourceGapRows + actionResult
-        + '<div class="background-actions"><button type="button" class="secondary" data-monitor-toggle="' + escapeHTML(monitor.id) + '" data-operation="' + (monitor.state === 'active' ? 'pause' : 'resume') + '"' + (monitor.state !== 'active' && unacknowledged ? ' disabled title="Acknowledge every source gap before resuming"' : '') + '>' + (monitor.state === 'active' ? 'Pause' : 'Resume') + '</button>'
+        + '<div class="background-actions"><button type="button" class="secondary" data-monitor-toggle="' + escapeHTML(monitor.id) + '" data-operation="' + (monitor.state === 'active' ? 'pause' : 'resume') + '"' + (monitor.state !== 'active' && (unacknowledged || !capabilities.canResume) ? ' disabled title="' + escapeHTML(unacknowledged ? 'Acknowledge every source gap before resuming' : capabilities.resumeTitle) + '"' : '') + '>' + (monitor.state === 'active' ? 'Pause' : 'Resume') + '</button>'
         + '<button type="button" class="secondary" data-monitor-edit="' + escapeHTML(monitor.id) + '">Edit</button>'
-        + '<button type="button" class="secondary" data-monitor-check="' + escapeHTML(monitor.id) + '"' + (monitor.trigger && monitor.trigger.kind === 'script_probe' ? '' : ' disabled title="Run check is available for temporary-code probes"') + '>Run check</button>'
+        + '<button type="button" class="secondary" data-monitor-check="' + escapeHTML(monitor.id) + '"' + (!capabilities.canRunCheck ? ' disabled title="' + escapeHTML(capabilities.runCheckTitle) + '"' : '') + '>Run check</button>'
         + '<button type="button" class="danger" data-monitor-delete="' + escapeHTML(monitor.id) + '">Delete</button></div>';
       card.querySelectorAll('[data-monitor-toggle]').forEach(button => {
         button.onclick = () => void mutateBackgroundMonitor(monitor, button.dataset.operation);
@@ -344,10 +372,16 @@
       const processOptions = (state.backgroundProcesses || []).filter(item => !item.terminal || item.id === trigger.process_id)
         .map(item => '<option value="' + escapeHTML(item.id) + '"' + (item.id === trigger.process_id ? ' selected' : '') + '>' + escapeHTML(item.description || item.command_summary || item.id) + '</option>').join('');
       const agentOptions = (state.agents || []).map(agent => '<option value="' + escapeHTML(agent.id) + '"' + (agent.id === action.agent_id ? ' selected' : '') + '>' + escapeHTML(backgroundOwnerLabel(agent.id)) + '</option>').join('');
+      const scriptProbePresentation = monitor && trigger.kind === 'script_probe'
+        ? backgroundScriptProbeEditorPresentation(monitor)
+        : null;
+      const scriptProbeOption = monitor && trigger.kind === 'script_probe'
+        ? '<option value="script_probe" selected>' + escapeHTML(scriptProbePresentation.optionLabel) + '</option>'
+        : '';
       body.innerHTML = '<form id="backgroundMonitorForm" class="background-editor">'
         + '<div class="background-editor-head"><button type="button" class="secondary" id="backgroundEditorBack">← Monitors</button><strong>' + (monitor ? 'Edit monitor' : 'New monitor') + '</strong></div>'
         + '<label>Name<input name="name" maxlength="160" required value="' + escapeHTML((monitor && monitor.name) || '') + '"></label>'
-        + '<label>Trigger<select name="trigger_kind"' + (monitor ? ' disabled title="Trigger changes require a dev agent turn"' : '') + '><option value="runtime_event"' + (trigger.kind === 'runtime_event' ? ' selected' : '') + '>Runtime event</option><option value="process_exit"' + (trigger.kind === 'process_exit' ? ' selected' : '') + '>Process exit</option><option value="process_output"' + (trigger.kind === 'process_output' ? ' selected' : '') + '>Process output · Live / best effort</option></select></label>'
+        + '<label>Trigger<select name="trigger_kind"' + (monitor ? ' disabled title="Trigger changes require a dev agent turn"' : '') + '><option value="runtime_event"' + (trigger.kind === 'runtime_event' ? ' selected' : '') + '>Runtime event</option><option value="process_exit"' + (trigger.kind === 'process_exit' ? ' selected' : '') + '>Process exit</option><option value="process_output"' + (trigger.kind === 'process_output' ? ' selected' : '') + '>Process output · Live / best effort</option>' + scriptProbeOption + '</select></label>'
         + (monitor ? '<p class="background-note">The trigger is revision-bound. Edit it from a dev agent turn; this form updates presentation, action, and guards only.</p>' : '')
         + '<div id="backgroundTriggerFields"></div>'
         + '<label>Action<select name="action_kind"><option value="notify_agent"' + (action.kind === 'notify_agent' ? ' selected' : '') + '>Notify agent</option><option value="blackboard"' + (action.kind === 'blackboard' ? ' selected' : '') + '>Write to blackboard</option></select></label>'
@@ -364,8 +398,10 @@
           fields.innerHTML = '<label>Event kinds<input name="event_kinds" required value="' + escapeHTML((trigger.event_kinds || ['task_changed']).join(', ')) + '" placeholder="task_changed, handoff_changed"></label><label>Entity ID (optional)<input name="entity_id" value="' + escapeHTML(trigger.entity_id || '') + '"></label><div class="background-editor-grid"><label>From state (optional)<input name="from_state" value="' + escapeHTML(trigger.from_state || '') + '"></label><label>To state (optional)<input name="to_state" value="' + escapeHTML(trigger.to_state || '') + '"></label></div><label class="background-check"><input name="include_monitor_events" type="checkbox"' + (trigger.include_monitor_events ? ' checked' : '') + '> Include events produced by other monitors</label>';
         } else if (kind === 'process_exit') {
           fields.innerHTML = '<label>Process<select name="process_id" required>' + processOptions + '</select></label><label class="background-check"><input name="failure_only" type="checkbox"' + (trigger.failure_only ? ' checked' : '') + '> Match failures only</label>';
-        } else {
+        } else if (kind === 'process_output') {
           fields.innerHTML = '<label>Process<select name="process_id" required>' + processOptions + '</select></label><label>Line pattern (regular expression)<input name="pattern" required value="' + escapeHTML(trigger.pattern || '') + '" placeholder="ready|listening"></label><p class="background-note">Only complete, redacted lines are evaluated. Delivery is live and best effort.</p>';
+        } else {
+          fields.innerHTML = '<div class="background-approval"><strong>Temporary code · immutable trigger</strong><span>' + escapeHTML(scriptProbePresentation.summary) + '</span><span>' + escapeHTML(scriptProbePresentation.binding) + '</span><span>Trigger source and execution settings can only be replaced from a dev agent turn.</span></div>';
         }
       };
       const renderActionFields = () => {
@@ -518,5 +554,7 @@
         backgroundBytes,
         backgroundTriggerLabel,
         monitorHasUnacknowledgedGaps,
+        backgroundMonitorCapabilities,
+        backgroundScriptProbeEditorPresentation,
       };
     }
