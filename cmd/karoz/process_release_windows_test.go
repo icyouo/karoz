@@ -17,6 +17,20 @@ import (
 	processdomain "github.com/karoz/karoz/internal/process"
 )
 
+func TestBackgroundProcessGuardHelper(t *testing.T) {
+	index := -1
+	for i, arg := range os.Args {
+		if arg == "process-guard" {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return
+	}
+	os.Exit(runBackgroundProcessGuard(os.Args[index+1:]))
+}
+
 func TestWindowsBackgroundReleaseLifecycle(t *testing.T) {
 	projectsRoot := t.TempDir()
 	projectPath := filepath.Join(projectsRoot, "project")
