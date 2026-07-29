@@ -33,8 +33,9 @@ type OutputBuffer struct {
 	truncated bool
 	nextSeq   uint64
 
-	partials map[string]*partialLine
-	tail     []OutputLine
+	partials  map[string]*partialLine
+	tail      []OutputLine
+	lineLimit int
 }
 
 func NewOutputBuffer(tailLimit int, byteLimit int64) *OutputBuffer {
@@ -46,7 +47,18 @@ func NewOutputBuffer(tailLimit int, byteLimit int64) *OutputBuffer {
 	}
 	return &OutputBuffer{
 		tailLimit: tailLimit, byteLimit: byteLimit,
-		partials: make(map[string]*partialLine),
+		partials:  make(map[string]*partialLine),
+		lineLimit: maxPendingLineBytes,
+	}
+}
+
+// SetLineLimit applies the validated supervisor event ceiling to complete
+// output lines. It is configured before collectors are armed.
+func (b *OutputBuffer) SetLineLimit(limit int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if limit > 0 {
+		b.lineLimit = limit
 	}
 }
 
@@ -94,7 +106,7 @@ func (b *OutputBuffer) appendLocked(stream, chunk string) ([]OutputLine, int64) 
 			part = strings.TrimSuffix(part, "\n")
 		}
 		if !partial.discardingLine && part != "" {
-			available := maxPendingLineBytes - partial.pending.Len()
+			available := b.lineLimit - partial.pending.Len()
 			if len(part) <= available {
 				partial.pending.WriteString(part)
 			} else {

@@ -488,6 +488,7 @@ func (supervisor *processSupervisor) launch(record processdomain.Process, logWri
 		waitDone: make(chan struct{}), terminalResult: make(chan struct{}),
 		stdoutDone: make(chan struct{}), stderrDone: make(chan struct{}),
 	}
+	handle.buffer.SetLineLimit(int(supervisor.config.OutputEventBytes))
 	if err := boundary.AfterStart(cmd); err != nil {
 		cleanupErr := supervisor.cleanupUnregistered(handle, false)
 		if cleanupErr != nil {
