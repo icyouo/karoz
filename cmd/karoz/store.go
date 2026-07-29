@@ -60,10 +60,7 @@ func (a *app) bootstrap() error {
 	if err := a.loadAgentSessions(); err != nil {
 		return err
 	}
-	// Terminal recovery delivers into the already-loaded durable agent message
-	// stream so a deleted owner can be redirected to Karoz without a parallel
-	// process-event store.
-	if err := a.bootstrapProcessRuntime(); err != nil {
+	if err := a.loadMonitors(); err != nil {
 		return err
 	}
 	if err := a.loadProjectAliases(); err != nil {
@@ -75,6 +72,13 @@ func (a *app) bootstrap() error {
 	if err := a.loadScheduledRuns(); err != nil {
 		return err
 	}
+	// Terminal recovery delivers into the already-loaded durable agent message
+	// stream. Load the scheduler first: a recovery event can immediately freeze
+	// and admit a monitor fire without a later queue recovery overwriting it.
+	if err := a.bootstrapProcessRuntime(); err != nil {
+		return err
+	}
+	a.resumeMonitorPending()
 	if err := a.reconcileWorkspaceArtifacts(); err != nil {
 		return err
 	}

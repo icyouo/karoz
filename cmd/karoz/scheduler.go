@@ -16,6 +16,7 @@ const (
 	ScheduledRunTaskEvent     = runtimedomain.ScheduledTaskEvent
 	ScheduledRunPlanEvent     = runtimedomain.ScheduledPlanEvent
 	ScheduledRunIdleReconcile = runtimedomain.ScheduledIdleReconcile
+	ScheduledRunMonitorEvent  = runtimedomain.ScheduledMonitorEvent
 )
 
 const (
@@ -84,6 +85,7 @@ func newScheduledRun(kind ScheduledRunKind, input AgentRunInput, dedupKey string
 		TurnType:    turnType,
 		SourceID:    strings.TrimSpace(input.SourceID),
 		MessageID:   strings.TrimSpace(input.MessageID),
+		Origin:      input.Origin,
 		DedupKey:    strings.TrimSpace(dedupKey),
 		Payload:     raw,
 		Status:      ScheduledRunQueued,
@@ -236,6 +238,8 @@ func (a *app) executeScheduledRun(ctx context.Context, job ScheduledRun) error {
 		return a.executePlanEventScheduledRun(ctx, job)
 	case ScheduledRunIdleReconcile:
 		return a.executeIdleReconcileScheduledRun(ctx, job)
+	case ScheduledRunMonitorEvent:
+		return a.executeMonitorScheduledRun(ctx, job)
 	default:
 		return errors.New("unknown scheduled run kind: " + string(job.Kind))
 	}
@@ -266,6 +270,7 @@ func (a *app) emitScheduledRunQueued(job ScheduledRun) {
 		From:      "idle",
 		To:        string(RunStateQueued),
 		Reason:    string(job.Trigger),
+		Origin:    job.Origin,
 		CreatedAt: time.Now().UTC(),
 	})
 }

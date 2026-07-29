@@ -31,6 +31,11 @@ func residentToolSpecs() []map[string]any {
 		residentToolSpec("stop_process", "Stop one background process owned by this resident agent. Terminal processes are idempotent. Ask and plan turns require explicit approval bound to the exact process and original command subject.", map[string]any{
 			"process_id": map[string]any{"type": "string"},
 		}, []string{"process_id"}),
+		residentToolSpec("list_monitors", "List durable runtime-event and process-exit monitors in this project.", nil, nil),
+		residentToolSpec("create_monitor", "Create a durable runtime-event or process-exit monitor owned by this resident agent.", map[string]any{"monitor": map[string]any{"type": "object"}}, []string{"monitor"}),
+		residentToolSpec("pause_monitor", "Pause one monitor owned by this resident agent.", map[string]any{"monitor_id": map[string]any{"type": "string"}}, []string{"monitor_id"}),
+		residentToolSpec("resume_monitor", "Resume one monitor owned by this resident agent.", map[string]any{"monitor_id": map[string]any{"type": "string"}}, []string{"monitor_id"}),
+		residentToolSpec("delete_monitor", "Delete one monitor owned by this resident agent.", map[string]any{"monitor_id": map[string]any{"type": "string"}}, []string{"monitor_id"}),
 		residentToolSpec("repo_list", "List files and directories inside the current project through a bounded read-only repository view.", map[string]any{
 			"path":        map[string]any{"type": "string", "description": "Optional relative repository path."},
 			"depth":       map[string]any{"type": "integer", "description": "Traversal depth from 0 to 6. Default 2."},
@@ -255,6 +260,8 @@ func residentToolAllowed(toolCtx ResidentToolContext, name string) bool {
 	}
 	turnType := normalizeChatTurnType(toolCtx.TurnType)
 	switch name {
+	case "create_monitor", "pause_monitor", "resume_monitor", "delete_monitor":
+		return turnType == "dev"
 	case "write_workspace_file", "show_preview":
 		return turnType == "dev"
 	case "create_task", "update_task_status":

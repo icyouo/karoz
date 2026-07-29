@@ -38,6 +38,21 @@ func (a *app) residentToolRegistry() *tooldomain.Registry[ResidentToolContext] {
 			"stop_process": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				return a.executeResidentStopProcessTool(ctx, toolCtx, args)
 			},
+			"list_monitors": func(_ context.Context, toolCtx ResidentToolContext, _ map[string]any) (string, error) {
+				return toolJSON(map[string]any{"monitors": a.monitorsForOwner(toolCtx.Project.ID, toolCtx.Agent.ID)}), nil
+			},
+			"create_monitor": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.createMonitorFromTool(toolCtx, args), nil
+			},
+			"pause_monitor": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.setMonitorFromTool(toolCtx, args, false), nil
+			},
+			"resume_monitor": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.setMonitorFromTool(toolCtx, args, true), nil
+			},
+			"delete_monitor": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+				return a.deleteMonitorFromTool(toolCtx, args), nil
+			},
 			"repo_list": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 				result := repoListTool(ctx, toolCtx.Workdir, args)
 				return result, ctx.Err()
@@ -238,7 +253,7 @@ func residentToolHasSideEffects(name string) bool {
 		return true
 	}
 	switch name {
-	case "repo_list", "repo_read", "repo_search", "list_skills", "read_skill",
+	case "repo_list", "repo_read", "repo_search", "list_skills", "read_skill", "list_monitors",
 		"web_search", "web_fetch", "search_archive", "list_pending", "get_messages",
 		"list_artifacts", "get_artifact", "list_agent_templates", "list_groups", "list_plans", "get_plan", "list_tasks", "get_task":
 		return false

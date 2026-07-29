@@ -460,6 +460,18 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 		return fmt.Errorf("agent %s not found", agentID)
 	}
 	a.agents[project.ID] = next
+	// A deleted owner must not leave a latent monitor able to wake a recreated
+	// same-ID agent.  Pending work is discarded under the same deletion fence.
+	for i := range a.monitors[project.ID] {
+		item := &a.monitors[project.ID][i]
+		if item.AgentID == agentID || (item.Action.Kind == "notify_agent" && item.Action.AgentID == agentID) {
+			item.State = "disabled"
+			item.ErrorCode = "owner_deleted"
+			item.LastError = "monitor owner or target agent was deleted"
+			item.PendingFires = nil
+			item.UpdatedAt = time.Now().UTC()
+		}
+	}
 	var routes []AgentRoute
 	for _, route := range a.agentRoutes[project.ID] {
 		if route.FromAgentID == agentID || route.ToAgentID == agentID {
@@ -472,6 +484,9 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	delete(a.agentRunCancels, key)
 	a.mu.Unlock()
 	ownerRemoved = true
+	if err := a.saveMonitors(); err != nil {
+		return err
+	}
 	if err := a.saveAgents(); err != nil {
 		return err
 	}

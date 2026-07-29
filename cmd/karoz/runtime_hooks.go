@@ -21,6 +21,7 @@ func (a *app) emitRuntimeStateChanged(event RuntimeEvent) {
 		event.CreatedAt = time.Now().UTC()
 	}
 	a.projectRuntimeEventToBlackboard(event)
+	a.evaluateRuntimeMonitorEvent(event)
 	a.broadcastRuntimeEvent(event)
 	a.maybeTriggerKarozIdleReconcile(event)
 }

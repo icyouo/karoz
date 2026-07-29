@@ -21,6 +21,7 @@ func newApp(settings Settings) *app {
 		archives:                 map[string][]AgentArchiveMessage{},
 		memories:                 map[string][]AgentMemoryEntry{},
 		blackboard:               map[string][]AgentBlackboardEntry{},
+		monitors:                 map[string][]Monitor{},
 		artifacts:                map[string][]Artifact{},
 		groups:                   map[string][]AgentGroup{},
 		groupInbox:               map[string][]GroupInboxMessage{},

@@ -12,6 +12,7 @@ const (
 	RunTriggerHandoff    = runtimedomain.TriggerHandoff
 	RunTriggerTaskEvent  = runtimedomain.TriggerTaskEvent
 	RunTriggerPlanEvent  = runtimedomain.TriggerPlanEvent
+	RunTriggerMonitor    = runtimedomain.TriggerMonitor
 	RunTriggerSystem     = runtimedomain.TriggerSystem
 )
 
@@ -97,6 +98,7 @@ func (a *app) beginAgentRun(input AgentRunInput) (AgentRun, bool) {
 		From:      "idle",
 		To:        string(run.State),
 		Reason:    string(input.Trigger),
+		Origin:    run.Origin,
 		CreatedAt: now,
 	})
 	return run, true
@@ -129,6 +131,7 @@ func (a *app) transitionAgentRun(projectID, agentID, expectedRunID string, next 
 			From:      string(previous),
 			To:        string(next),
 			Reason:    string(run.Trigger),
+			Origin:    run.Origin,
 			CreatedAt: run.UpdatedAt,
 		})
 	}
@@ -172,6 +175,7 @@ func (a *app) finishAgentRun(projectID, agentID, expectedRunID string, final Run
 		From:      string(previous),
 		To:        string(final),
 		Reason:    string(run.Trigger),
+		Origin:    run.Origin,
 		CreatedAt: now,
 	})
 	return run, true

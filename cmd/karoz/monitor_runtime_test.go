@@ -1,0 +1,103 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	monitordomain "github.com/karoz/karoz/internal/monitor"
+)
+
+func TestRuntimeMonitorFreezesAndDeliversBlackboardAction(t *testing.T) {
+	root := t.TempDir()
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
+	path := filepath.Join(root, "p1")
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	project := Project{ID: projectID(path), Name: "p1", Path: path}
+	a.agents[project.ID] = []Agent{{ID: "owner", ProjectID: project.ID, Nickname: "Owner"}}
+	item, err := a.createMonitor(project, Monitor{ID: "m1", AgentID: "owner", Name: "task updates", Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerRuntimeEvent, EventKinds: []string{"task_changed"}}, Action: monitordomain.Action{Kind: monitordomain.ActionBlackboard, Topic: "task update", Template: "task changed"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.emitRuntimeStateChanged(RuntimeEvent{ID: "event-1", ProjectID: project.ID, Kind: "task_changed", EntityID: "task-1", To: "done", CreatedAt: time.Now().UTC()})
+	if got := a.monitorsForProject(project.ID)[0].PendingFires; len(got) != 0 {
+		t.Fatalf("pending fire was not delivered: %+v", got)
+	}
+	entries := a.blackboardFor(project.ID, 20)
+	var delivered int
+	for _, entry := range entries {
+		if entry.SourceType == "monitor" && entry.SourceID == monitordomain.StableFireID(item.ID, "event-1") {
+			delivered++
+		}
+	}
+	if delivered != 1 {
+		t.Fatalf("monitor delivery count=%d entries=%+v", delivered, entries)
+	}
+	// Stable fire identity makes a duplicate runtime emission idempotent.
+	a.emitRuntimeStateChanged(RuntimeEvent{ID: "event-1", ProjectID: project.ID, Kind: "task_changed", EntityID: "task-1", To: "done", CreatedAt: time.Now().UTC()})
+	entries = a.blackboardFor(project.ID, 20)
+	delivered = 0
+	for _, entry := range entries {
+		if entry.SourceType == "monitor" {
+			delivered++
+		}
+	}
+	if delivered != 1 {
+		t.Fatalf("duplicate monitor delivery: %+v", entries)
+	}
+}
+
+func TestProcessExitMonitorMatchesOnlyTerminalProcess(t *testing.T) {
+	root := t.TempDir()
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
+	path := filepath.Join(root, "p1")
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	project := Project{ID: projectID(path), Name: "p1", Path: path}
+	a.agents[project.ID] = []Agent{{ID: "owner", ProjectID: project.ID, Nickname: "Owner"}}
+	_, err := a.createMonitor(project, Monitor{ID: "m-exit", AgentID: "owner", Name: "exit", Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerProcessExit, ProcessID: "proc-1", FailureOnly: true}, Action: monitordomain.Action{Kind: monitordomain.ActionBlackboard, Topic: "process failed"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := 0
+	a.emitRuntimeStateChanged(RuntimeEvent{ID: "ordinary", ProjectID: project.ID, Kind: "process_changed", EntityID: "proc-1", ExitCode: &zero, To: "exited", CreatedAt: time.Now().UTC()})
+	for _, entry := range a.blackboardFor(project.ID, 10) {
+		if entry.SourceType == "monitor" {
+			t.Fatalf("non-terminal process matched: %+v", entry)
+		}
+	}
+	code := 1
+	a.emitRuntimeStateChanged(RuntimeEvent{ID: "terminal", ProjectID: project.ID, Kind: processTerminalEventKind, EntityID: "proc-1", ExitCode: &code, To: "failed", Reason: "process_terminal", CreatedAt: time.Now().UTC()})
+	matched := false
+	for _, entry := range a.blackboardFor(project.ID, 10) {
+		matched = matched || entry.SourceType == "monitor"
+	}
+	if !matched {
+		t.Fatalf("terminal process did not match")
+	}
+}
+
+func TestDeletingOwnerDisablesAndClearsMonitorWork(t *testing.T) {
+	root := t.TempDir()
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
+	path := filepath.Join(root, "p1")
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	project := Project{ID: projectID(path), Name: "p1", Path: path}
+	a.agents[project.ID] = []Agent{{ID: "karoz", ProjectID: project.ID}, {ID: "owner", ProjectID: project.ID}}
+	if _, err := a.createMonitor(project, Monitor{ID: "m-delete", AgentID: "owner", Name: "owner", Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerRuntimeEvent, EventKinds: []string{"task_changed"}}, Action: monitordomain.Action{Kind: monitordomain.ActionBlackboard, Topic: "task"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.deleteProjectAgent(project, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	got := a.monitorsForProject(project.ID)
+	if len(got) != 1 || got[0].State != monitordomain.StateDisabled || got[0].ErrorCode != "owner_deleted" || len(got[0].PendingFires) != 0 {
+		t.Fatalf("deleted owner monitor = %+v", got)
+	}
+}

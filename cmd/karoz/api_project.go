@@ -46,6 +46,8 @@ func (a *app) handleProjectScoped(w http.ResponseWriter, r *http.Request) {
 		a.handleAgentRoutes(w, r, project)
 	case "runtime-events":
 		a.handleRuntimeEvents(w, r, project)
+	case "monitors":
+		a.handleMonitors(w, r, project, parts[2:])
 	case "tasks":
 		a.handleTasks(w, r, project, parts[2:])
 	case "processes":

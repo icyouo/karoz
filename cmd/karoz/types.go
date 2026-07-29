@@ -6,6 +6,7 @@ import (
 	agentdomain "github.com/karoz/karoz/internal/agent"
 	artifactdomain "github.com/karoz/karoz/internal/artifact"
 	collaborationdomain "github.com/karoz/karoz/internal/collaboration"
+	monitordomain "github.com/karoz/karoz/internal/monitor"
 	projectdomain "github.com/karoz/karoz/internal/project"
 	runtimedomain "github.com/karoz/karoz/internal/runtime"
 	settingsdomain "github.com/karoz/karoz/internal/settings"
@@ -47,6 +48,7 @@ type app struct {
 	archives                           map[string][]AgentArchiveMessage
 	memories                           map[string][]AgentMemoryEntry
 	blackboard                         map[string][]AgentBlackboardEntry
+	monitors                           map[string][]Monitor
 	artifacts                          map[string][]Artifact
 	groups                             map[string][]AgentGroup
 	groupInbox                         map[string][]GroupInboxMessage
@@ -98,6 +100,7 @@ type AgentArchiveMessage = agentdomain.AgentArchiveMessage
 type AgentMemoryEntry = agentdomain.AgentMemoryEntry
 
 type AgentBlackboardEntry = collaborationdomain.BlackboardEntry
+type Monitor = monitordomain.Monitor
 type RuntimeEvent = runtimedomain.Event
 type AgentInboxMessage = collaborationdomain.Handoff
 
