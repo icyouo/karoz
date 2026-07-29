@@ -55,7 +55,9 @@ func (a *app) bootstrapProcessRuntime() error {
 func (a *app) shutdownProcessRuntime(ctx context.Context) error {
 	if a.processSupervisor == nil {
 		if a.processRuntime != nil {
-			a.drainProcessOutputGaps()
+			if err := a.drainProcessOutputGaps(); err != nil {
+				return err
+			}
 		}
 		a.supervisorCancel()
 		return nil
@@ -63,8 +65,10 @@ func (a *app) shutdownProcessRuntime(ctx context.Context) error {
 	if err := a.processSupervisor.Shutdown(ctx); err != nil {
 		return err
 	}
+	if err := a.drainProcessOutputGaps(); err != nil {
+		return err
+	}
 	a.drainProcessTerminalOutbox()
-	a.drainProcessOutputGaps()
 	a.supervisorCancel()
 	return nil
 }

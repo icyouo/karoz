@@ -18,25 +18,32 @@ func (a *app) armProcessOutputGapWorker() {
 				case <-a.supervisorCtx.Done():
 					return
 				case <-a.processOutputGapWake:
-					a.drainProcessOutputGaps()
+					_ = a.drainProcessOutputGaps()
 				}
 			}
 		}()
 	})
 }
 
-func (a *app) drainProcessOutputGaps() {
+func (a *app) drainProcessOutputGaps() error {
+	a.processOutputGapDrainMu.Lock()
+	defer a.processOutputGapDrainMu.Unlock()
 	pending := a.takeProcessOutputGapDeltas()
 	retry := false
+	var firstErr error
 	for _, delta := range pending {
 		if err := a.applyProcessOutputGap(delta); err != nil {
 			a.returnProcessOutputGapDelta(delta)
 			retry = true
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	if retry {
 		a.scheduleProcessOutputGapRetry()
 	}
+	return firstErr
 }
 
 func (a *app) takeProcessOutputGapDeltas() map[string]processOutputGapDelta {
@@ -53,6 +60,27 @@ func (a *app) returnProcessOutputGapDelta(delta processOutputGapDelta) {
 	current := a.processOutputPendingGaps[key]
 	a.processOutputPendingGaps[key] = mergeProcessOutputGapDeltas(delta, current)
 	a.processOutputGapMu.Unlock()
+}
+
+func (a *app) flushProcessOutputGap(projectID, processID string) error {
+	a.processOutputGapDrainMu.Lock()
+	defer a.processOutputGapDrainMu.Unlock()
+	key := projectAgentKey(projectID, processID)
+	a.processOutputGapMu.Lock()
+	delta, exists := a.processOutputPendingGaps[key]
+	if exists {
+		delete(a.processOutputPendingGaps, key)
+	}
+	a.processOutputGapMu.Unlock()
+	if !exists {
+		return nil
+	}
+	if err := a.applyProcessOutputGap(delta); err != nil {
+		a.returnProcessOutputGapDelta(delta)
+		a.scheduleProcessOutputGapRetry()
+		return err
+	}
+	return nil
 }
 
 func (a *app) scheduleProcessOutputGapRetry() {

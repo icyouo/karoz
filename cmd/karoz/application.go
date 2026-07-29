@@ -46,6 +46,7 @@ func newApp(settings Settings) *app {
 		processTerminalWake:      make(chan struct{}, 1),
 		processOutputMonitorCh:   make(chan processOutputObservation, 256),
 		processOutputBaselines:   map[string]uint64{},
+		processOutputCursors:     map[string]uint64{},
 		processOutputPendingGaps: map[string]processOutputGapDelta{},
 		processOutputGapWake:     make(chan struct{}, 1),
 		schedulerQueue:           runtimedomain.NewSchedulerQueue(),

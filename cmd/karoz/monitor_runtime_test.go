@@ -258,3 +258,152 @@ func TestProcessOutputGapSaveFailureReturnsDeltaForRetry(t *testing.T) {
 		t.Fatalf("failed save published monitor mutation: %+v", got)
 	}
 }
+
+func TestProcessOutputCursorIsIsolatedByProcess(t *testing.T) {
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	a.agents["project"] = []Agent{{ID: "owner", ProjectID: "project"}}
+	now := time.Now().UTC()
+	for _, target := range []string{"process-a", "process-b"} {
+		a.monitors["project"] = append(a.monitors["project"], Monitor{
+			ID: target, ProjectID: "project", AgentID: "owner",
+			Name: target, Revision: 1, State: monitordomain.StateActive,
+			Trigger: monitordomain.Trigger{
+				Kind: monitordomain.TriggerProcessOutput, Revision: 1,
+				ProcessID: target, Pattern: "matched",
+			},
+			Action: monitordomain.Action{
+				Kind: monitordomain.ActionBlackboard, Revision: 1,
+				Topic: target, Template: target,
+			},
+			CreatedAt: now, UpdatedAt: now,
+		})
+	}
+	a.evaluateProcessOutput(processOutputObservation{
+		ProjectID: "project", ProcessID: "process-a",
+		Line: processdomain.OutputLine{Sequence: 100, Text: "matched"},
+	})
+	a.evaluateProcessOutput(processOutputObservation{
+		ProjectID: "project", ProcessID: "process-b",
+		Line: processdomain.OutputLine{Sequence: 1, Text: "matched"},
+	})
+	monitors := a.monitorsForProject("project")
+	if monitors[0].TriggerCount != 1 || monitors[1].TriggerCount != 1 {
+		t.Fatalf("cross-process cursor skipped a monitor: %+v", monitors)
+	}
+	keyA := projectAgentKey("project", "process-a")
+	keyB := projectAgentKey("project", "process-b")
+	if a.processOutputCursors[keyA] != 100 ||
+		a.processOutputCursors[keyB] != 1 {
+		t.Fatalf("isolated cursors = %v", a.processOutputCursors)
+	}
+}
+
+func TestProcessOutputLaterSuccessDoesNotHideEarlierGap(t *testing.T) {
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	now := time.Now().UTC()
+	a.monitors["project"] = []Monitor{{
+		ID: "monitor", ProjectID: "project", AgentID: "owner",
+		Name: "monitor", Revision: 1, State: monitordomain.StateActive,
+		Trigger: monitordomain.Trigger{
+			Kind: monitordomain.TriggerProcessOutput, Revision: 1,
+			ProcessID: "process", Pattern: "success",
+		},
+		Action: monitordomain.Action{
+			Kind: monitordomain.ActionBlackboard, Revision: 1,
+			Topic: "output", Template: "success",
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}}
+	key := projectAgentKey("project", "monitor")
+	a.processOutputBaselines[key] = 0
+	a.processOutputCursors[key] = 0
+	a.evaluateProcessOutput(processOutputObservation{
+		ProjectID: "project", ProcessID: "process",
+		Line: processdomain.OutputLine{Sequence: 2, Text: "success"},
+	})
+	if a.processOutputCursors[key] != 2 ||
+		a.processOutputBaselines[key] != 0 {
+		t.Fatalf(
+			"cursor/baseline = %d/%d",
+			a.processOutputCursors[key],
+			a.processOutputBaselines[key],
+		)
+	}
+	if err := a.saveProcessOutputGapDiagnostics(processOutputGapDelta{
+		ProjectID: "project", ProcessID: "process",
+		Recent:    []processdomain.SeqRange{{Start: 1, End: 1}},
+		LostLines: 1, GapCount: 1, OldestSeq: 1, NewestSeq: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.monitorsForProject("project")[0]; got.ErrorCode != "output_gap" {
+		t.Fatalf("later success hid earlier gap: %+v", got)
+	}
+}
+
+func TestProcessOutputUnmatchedLineDoesNotSaveMonitorRegistry(t *testing.T) {
+	root := t.TempDir()
+	dataFile := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(dataFile, []byte("file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(Settings{DataDir: dataFile, ProjectsRoot: root})
+	now := time.Now().UTC()
+	a.monitors["project"] = []Monitor{{
+		ID: "monitor", ProjectID: "project", AgentID: "owner",
+		Name: "monitor", Revision: 1, State: monitordomain.StateActive,
+		Trigger: monitordomain.Trigger{
+			Kind: monitordomain.TriggerProcessOutput, Revision: 1,
+			ProcessID: "process", Pattern: "wanted",
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}}
+	a.evaluateProcessOutput(processOutputObservation{
+		ProjectID: "project", ProcessID: "process",
+		Line: processdomain.OutputLine{Sequence: 1, Text: "unmatched"},
+	})
+	key := projectAgentKey("project", "monitor")
+	if a.processOutputCursors[key] != 1 {
+		t.Fatalf("unmatched cursor = %d", a.processOutputCursors[key])
+	}
+	if pending := a.takeProcessOutputGapDeltas(); len(pending) != 0 {
+		t.Fatalf("unmatched line attempted a monitor save: %+v", pending)
+	}
+}
+
+func TestProcessOutputMonitorSaveFailureRecordsCoverageGap(t *testing.T) {
+	root := t.TempDir()
+	dataFile := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(dataFile, []byte("file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(Settings{DataDir: dataFile, ProjectsRoot: root})
+	t.Cleanup(a.supervisorCancel)
+	now := time.Now().UTC()
+	a.monitors["project"] = []Monitor{{
+		ID: "monitor", ProjectID: "project", AgentID: "owner",
+		Name: "monitor", Revision: 1, State: monitordomain.StateActive,
+		Trigger: monitordomain.Trigger{
+			Kind: monitordomain.TriggerProcessOutput, Revision: 1,
+			ProcessID: "process", Pattern: "matched",
+		},
+		Action: monitordomain.Action{
+			Kind: monitordomain.ActionBlackboard, Revision: 1,
+			Topic: "output", Template: "matched",
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}}
+	a.evaluateProcessOutput(processOutputObservation{
+		ProjectID: "project", ProcessID: "process",
+		Line: processdomain.OutputLine{Sequence: 4, Text: "matched"},
+	})
+	pending := a.takeProcessOutputGapDeltas()
+	delta, ok := pending[projectAgentKey("project", "process")]
+	if !ok || delta.LostLines != 1 || delta.GapCount != 1 ||
+		delta.OldestSeq != 4 || delta.NewestSeq != 4 {
+		t.Fatalf("monitor save failure coverage = %+v", pending)
+	}
+	if got := a.monitorsForProject("project")[0]; got.TriggerCount != 0 {
+		t.Fatalf("failed monitor save published mutation: %+v", got)
+	}
+}

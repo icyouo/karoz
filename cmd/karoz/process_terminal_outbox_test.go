@@ -400,3 +400,46 @@ func TestProcessAbortAcceptsTerminalAlreadyReleasedByOutbox(t *testing.T) {
 	}
 	assertProcessTerminalReleased(t, runtime, project.ID, record.ID)
 }
+
+func TestProcessTerminalOutboxPersistsPendingOutputGapBeforeRelease(t *testing.T) {
+	dataDir := t.TempDir()
+	project := runtimeTestProject(t, "project")
+	runtime, err := newProcessRuntimePersistence(
+		dataDir,
+		[]Project{project},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := persistPendingTerminalProcess(
+		t,
+		runtime,
+		project,
+		"terminal-gap",
+		processdomain.StateSucceeded,
+		0,
+		time.Now().UTC(),
+	)
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: project.Path})
+	a.processRuntime = runtime
+	a.agents[project.ID] = []Agent{{
+		ID: "agent", ProjectID: project.ID, Name: "Agent",
+	}}
+	t.Cleanup(a.supervisorCancel)
+	a.recordProcessOutputGap(project.ID, record.ID, 7)
+
+	a.drainProcessTerminalOutbox()
+
+	assertProcessTerminalReleased(t, runtime, project.ID, record.ID)
+	got := runtime.List(project.ID)
+	if len(got) != 1 ||
+		got[0].OutputLostLines != 1 ||
+		got[0].OutputGapCount != 1 ||
+		got[0].OutputGapOldestSeq != 7 ||
+		got[0].OutputGapNewestSeq != 7 ||
+		len(got[0].OutputGaps) != 1 ||
+		got[0].OutputGaps[0] != (processdomain.SeqRange{Start: 7, End: 7}) {
+		t.Fatalf("terminal release lost pending output gap: %+v", got)
+	}
+}

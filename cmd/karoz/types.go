@@ -30,7 +30,9 @@ type app struct {
 	processOutputMonitorOnce           sync.Once
 	processOutputMonitorCh             chan processOutputObservation
 	processOutputBaselines             map[string]uint64
+	processOutputCursors               map[string]uint64
 	processOutputGapMu                 sync.Mutex
+	processOutputGapDrainMu            sync.Mutex
 	processOutputPendingGaps           map[string]processOutputGapDelta
 	processOutputGapWake               chan struct{}
 	processOutputGapWorkerOnce         sync.Once

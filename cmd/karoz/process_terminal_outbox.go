@@ -179,11 +179,31 @@ func (a *app) drainProcessTerminalOutbox() {
 	if runtime == nil {
 		return
 	}
+	a.armProcessOutputMonitor()
 	events, faults := runtime.PendingTerminalEvents()
 	for _, fault := range faults {
 		log.Printf("process terminal outbox skipped invalid event: %v", fault)
 	}
 	for _, event := range events {
+		if err := a.waitForProcessOutputHandoff(); err != nil {
+			log.Printf(
+				"process terminal outbox output handoff %s failed: %v",
+				event.ID,
+				err,
+			)
+			continue
+		}
+		if err := a.flushProcessOutputGap(
+			event.ProjectID,
+			event.ProcessID,
+		); err != nil {
+			log.Printf(
+				"process terminal outbox gap flush %s failed: %v",
+				event.ID,
+				err,
+			)
+			continue
+		}
 		runtimeEvent := event.runtimeEvent()
 		_, err := a.admitProcessTerminalMessage(runtimeEvent)
 		if err != nil {
