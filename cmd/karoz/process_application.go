@@ -54,6 +54,9 @@ func (a *app) bootstrapProcessRuntime() error {
 
 func (a *app) shutdownProcessRuntime(ctx context.Context) error {
 	if a.processSupervisor == nil {
+		if a.processRuntime != nil {
+			a.drainProcessOutputGaps()
+		}
 		a.supervisorCancel()
 		return nil
 	}
@@ -61,6 +64,7 @@ func (a *app) shutdownProcessRuntime(ctx context.Context) error {
 		return err
 	}
 	a.drainProcessTerminalOutbox()
+	a.drainProcessOutputGaps()
 	a.supervisorCancel()
 	return nil
 }
@@ -79,7 +83,7 @@ func (a *app) processRecord(projectID, processID string) (processdomain.Process,
 			if a.processSupervisor != nil {
 				if live, ok := a.processSupervisor.LiveSnapshot(processID); ok &&
 					live.ProjectID == projectID {
-					return live, nil
+					return preserveProcessOutputCoverage(live, record), nil
 				}
 			}
 			return record, nil

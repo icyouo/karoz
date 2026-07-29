@@ -283,6 +283,77 @@ func (runtime *processRuntimePersistence) updateProcessRecord(
 	return runtime.saveAuthorityLocked()
 }
 
+// ApplyOutputGapDelta records best-effort monitor coverage loss without
+// changing process lifecycle state. OutputGapNewestSeq is the durable apply
+// watermark, so retrying an uncertain save cannot double-count the same
+// drained delta.
+func (runtime *processRuntimePersistence) ApplyOutputGapDelta(
+	delta processOutputGapDelta,
+) error {
+	project := runtime.projectRuntime(delta.ProjectID)
+	if project == nil {
+		return errors.New("process project runtime is unavailable")
+	}
+	project.lane.Lock()
+	defer project.lane.Unlock()
+
+	runtime.authorityMu.Lock()
+	defer runtime.authorityMu.Unlock()
+	partition, exists := runtime.authority.Projects[project.identity.SafeProjectKey]
+	if !exists {
+		return errors.New("process authority partition is unavailable")
+	}
+	current, exists := partition.Records[delta.ProcessID]
+	if !exists || current.Reservation == nil {
+		return errors.New("durable process record is missing")
+	}
+	if delta.NewestSeq <= current.Process.OutputGapNewestSeq {
+		return nil
+	}
+
+	previous := current
+	previousGeneration := runtime.authority.Generation
+	record := cloneDurableProcess(current.Process)
+	record.OutputLostLines += delta.LostLines
+	record.OutputGapCount += delta.GapCount
+	if len(record.OutputGaps) > 0 &&
+		record.OutputGaps[len(record.OutputGaps)-1].End+1 == delta.OldestSeq &&
+		record.OutputGapCount > 0 {
+		record.OutputGapCount--
+	}
+	record.OutputGapOldestSeq = minNonZero(
+		record.OutputGapOldestSeq,
+		delta.OldestSeq,
+	)
+	record.OutputGapNewestSeq = maxUint64(
+		record.OutputGapNewestSeq,
+		delta.NewestSeq,
+	)
+	record.OutputSeq = maxUint64(record.OutputSeq, delta.NewestSeq)
+	for _, candidate := range delta.Recent {
+		if len(record.OutputGaps) > 0 &&
+			candidate.Start == record.OutputGaps[len(record.OutputGaps)-1].End+1 {
+			record.OutputGaps[len(record.OutputGaps)-1].End = candidate.End
+			continue
+		}
+		record.OutputGaps = append(record.OutputGaps, candidate)
+		if len(record.OutputGaps) > 32 {
+			record.OutputGaps = record.OutputGaps[1:]
+		}
+	}
+	current.Process = record
+	partition.Records[delta.ProcessID] = current
+	runtime.authority.Projects[project.identity.SafeProjectKey] = partition
+	runtime.authority.Generation++
+	if err := runtime.saveAuthorityLocked(); err != nil {
+		partition.Records[delta.ProcessID] = previous
+		runtime.authority.Projects[project.identity.SafeProjectKey] = partition
+		runtime.authority.Generation = previousGeneration
+		return err
+	}
+	return nil
+}
+
 func (runtime *processRuntimePersistence) persistTerminalAuthority(
 	identity monitordomain.RuntimeProjectIdentity,
 	record processdomain.Process,
@@ -309,6 +380,7 @@ func (runtime *processRuntimePersistence) persistTerminalAuthority(
 	}
 	terminalReservation := reservation
 	terminalReservation.State = monitordomain.ReservationTerminalUnacknowledged
+	record = preserveProcessOutputCoverage(record, current.Process)
 	current.Process = cloneDurableProcess(record)
 	current.Reservation = &terminalReservation
 	current.Event = &processTerminalEvent{

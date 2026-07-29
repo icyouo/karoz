@@ -154,3 +154,107 @@ func TestProcessOutputMonitorUsesRedactedCompleteSequence(t *testing.T) {
 		t.Fatalf("duplicate output sequence fired: %+v", got)
 	}
 }
+
+func TestProcessOutputGapAccumulatorKeepsBoundedExactRanges(t *testing.T) {
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	t.Cleanup(a.supervisorCancel)
+
+	a.recordProcessOutputGap("project", "process", 1)
+	a.recordProcessOutputGap("project", "process", 2)
+	for sequence := uint64(4); sequence <= 68; sequence += 2 {
+		a.recordProcessOutputGap("project", "process", sequence)
+	}
+
+	pending := a.takeProcessOutputGapDeltas()
+	delta := pending[projectAgentKey("project", "process")]
+	if delta.LostLines != 35 || delta.GapCount != 34 {
+		t.Fatalf("gap totals = lost %d count %d", delta.LostLines, delta.GapCount)
+	}
+	if delta.OldestSeq != 1 || delta.NewestSeq != 68 {
+		t.Fatalf("gap summary = %d..%d", delta.OldestSeq, delta.NewestSeq)
+	}
+	if len(delta.Recent) != 32 {
+		t.Fatalf("recent ranges = %d, want 32", len(delta.Recent))
+	}
+	if delta.Recent[0] != (processdomain.SeqRange{Start: 6, End: 6}) ||
+		delta.Recent[31] != (processdomain.SeqRange{Start: 68, End: 68}) {
+		t.Fatalf("recent ranges lost exact boundaries: %+v", delta.Recent)
+	}
+	for _, gap := range delta.Recent {
+		if gap.Start != gap.End {
+			t.Fatalf("successful sequence was bridged by a gap: %+v", gap)
+		}
+	}
+}
+
+func TestProcessOutputGapDiagnosticRespectsIndependentBaseline(t *testing.T) {
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	now := time.Now().UTC()
+	a.monitors["project"] = []Monitor{
+		{
+			ID: "old", ProjectID: "project", AgentID: "owner",
+			Name: "old", State: monitordomain.StateActive,
+			Trigger: monitordomain.Trigger{
+				Kind: monitordomain.TriggerProcessOutput, ProcessID: "process",
+			},
+			CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "new", ProjectID: "project", AgentID: "owner",
+			Name: "new", State: monitordomain.StateActive,
+			Trigger: monitordomain.Trigger{
+				Kind: monitordomain.TriggerProcessOutput, ProcessID: "process",
+			},
+			CreatedAt: now, UpdatedAt: now,
+		},
+	}
+	a.processOutputBaselines[projectAgentKey("project", "old")] = 5
+	a.processOutputBaselines[projectAgentKey("project", "new")] = 20
+	delta := processOutputGapDelta{
+		ProjectID: "project", ProcessID: "process",
+		Recent:    []processdomain.SeqRange{{Start: 8, End: 10}},
+		LostLines: 3, GapCount: 1, OldestSeq: 8, NewestSeq: 10,
+	}
+	if err := a.saveProcessOutputGapDiagnostics(delta); err != nil {
+		t.Fatal(err)
+	}
+	got := a.monitorsForProject("project")
+	if got[0].ErrorCode != "output_gap" ||
+		!strings.Contains(got[0].LastError, "lost 3 line") {
+		t.Fatalf("old subscription diagnostic = %+v", got[0])
+	}
+	if got[1].ErrorCode != "" || got[1].LastError != "" {
+		t.Fatalf("new subscription inherited an old gap: %+v", got[1])
+	}
+}
+
+func TestProcessOutputGapSaveFailureReturnsDeltaForRetry(t *testing.T) {
+	root := t.TempDir()
+	dataFile := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(dataFile, []byte("file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(Settings{DataDir: dataFile, ProjectsRoot: root})
+	t.Cleanup(a.supervisorCancel)
+	now := time.Now().UTC()
+	a.monitors["project"] = []Monitor{{
+		ID: "monitor", ProjectID: "project", AgentID: "owner",
+		Name: "monitor", State: monitordomain.StateActive,
+		Trigger: monitordomain.Trigger{
+			Kind: monitordomain.TriggerProcessOutput, ProcessID: "process",
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}}
+	a.recordProcessOutputGap("project", "process", 9)
+	a.drainProcessOutputGaps()
+
+	pending := a.takeProcessOutputGapDeltas()
+	delta, ok := pending[projectAgentKey("project", "process")]
+	if !ok || delta.LostLines != 1 || delta.GapCount != 1 ||
+		len(delta.Recent) != 1 || delta.Recent[0].Start != 9 {
+		t.Fatalf("failed save did not preserve retry delta: %+v", pending)
+	}
+	if got := a.monitorsForProject("project")[0]; got.ErrorCode != "" {
+		t.Fatalf("failed save published monitor mutation: %+v", got)
+	}
+}

@@ -2736,3 +2736,81 @@ func TestProcessRuntimeListReturnsIndependentCopies(t *testing.T) {
 		t.Fatalf("List exposed mutable process aliases: %+v", second[0])
 	}
 }
+
+func TestProcessRuntimeOutputGapDeltaIsBoundedDurableAndIdempotent(t *testing.T) {
+	dataDir := t.TempDir()
+	project := runtimeTestProject(t, "output-gap")
+	runtime, err := newProcessRuntimePersistence(dataDir, []Project{project}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := runtimeStartingRecord(t, runtime, project.ID, "process")
+	admitRuntimeRecord(t, runtime, record)
+
+	recent := make([]processdomain.SeqRange, 0, 32)
+	for sequence := uint64(3); sequence <= 65; sequence += 2 {
+		recent = append(recent, processdomain.SeqRange{
+			Start: sequence,
+			End:   sequence,
+		})
+	}
+	delta := processOutputGapDelta{
+		ProjectID: project.ID, ProcessID: record.ID,
+		Recent: recent, LostLines: 33, GapCount: 33,
+		OldestSeq: 1, NewestSeq: 65,
+	}
+	if err := runtime.ApplyOutputGapDelta(delta); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.ApplyOutputGapDelta(delta); err != nil {
+		t.Fatal(err)
+	}
+	got := runtime.List(project.ID)[0]
+	if got.OutputLostLines != 33 || got.OutputGapCount != 33 ||
+		got.OutputGapOldestSeq != 1 || got.OutputGapNewestSeq != 65 ||
+		got.OutputSeq != 65 || len(got.OutputGaps) != 32 {
+		t.Fatalf("first durable gap = %+v", got)
+	}
+
+	continuous := processOutputGapDelta{
+		ProjectID: project.ID, ProcessID: record.ID,
+		Recent:    []processdomain.SeqRange{{Start: 66, End: 68}},
+		LostLines: 3, GapCount: 1, OldestSeq: 66, NewestSeq: 68,
+	}
+	if err := runtime.ApplyOutputGapDelta(continuous); err != nil {
+		t.Fatal(err)
+	}
+	got = runtime.List(project.ID)[0]
+	if got.OutputLostLines != 36 || got.OutputGapCount != 33 ||
+		got.OutputGapNewestSeq != 68 ||
+		got.OutputGaps[len(got.OutputGaps)-1] != (processdomain.SeqRange{Start: 65, End: 68}) {
+		t.Fatalf("continuous durable gap = %+v", got)
+	}
+
+	record.State = processdomain.StateFailed
+	record.ExitCode = 1
+	record.UpdatedAt = time.Now().UTC()
+	record.EndedAt = timePointer(record.UpdatedAt)
+	if err := runtime.MarkTerminal(record); err != nil {
+		t.Fatal(err)
+	}
+	got = runtime.List(project.ID)[0]
+	if got.OutputLostLines != 36 || got.OutputGapCount != 33 ||
+		got.OutputGapNewestSeq != 68 || len(got.OutputGaps) != 32 {
+		t.Fatalf("terminal snapshot erased durable coverage: %+v", got)
+	}
+
+	restarted, err := newProcessRuntimePersistence(
+		dataDir,
+		[]Project{project},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = restarted.List(project.ID)[0]
+	if got.OutputLostLines != 36 || got.OutputGapCount != 33 ||
+		got.OutputGapOldestSeq != 1 || got.OutputGapNewestSeq != 68 {
+		t.Fatalf("restarted durable gap = %+v", got)
+	}
+}

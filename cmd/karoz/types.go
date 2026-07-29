@@ -7,6 +7,7 @@ import (
 	artifactdomain "github.com/karoz/karoz/internal/artifact"
 	collaborationdomain "github.com/karoz/karoz/internal/collaboration"
 	monitordomain "github.com/karoz/karoz/internal/monitor"
+	processdomain "github.com/karoz/karoz/internal/process"
 	projectdomain "github.com/karoz/karoz/internal/project"
 	runtimedomain "github.com/karoz/karoz/internal/runtime"
 	settingsdomain "github.com/karoz/karoz/internal/settings"
@@ -29,6 +30,10 @@ type app struct {
 	processOutputMonitorOnce           sync.Once
 	processOutputMonitorCh             chan processOutputObservation
 	processOutputBaselines             map[string]uint64
+	processOutputGapMu                 sync.Mutex
+	processOutputPendingGaps           map[string]processOutputGapDelta
+	processOutputGapWake               chan struct{}
+	processOutputGapWorkerOnce         sync.Once
 	backgroundOwnerMu                  sync.Mutex
 	backgroundOwnerDeleting            map[string]bool
 	projectRegistrationMu              sync.Mutex
@@ -104,6 +109,16 @@ type AgentMemoryEntry = agentdomain.AgentMemoryEntry
 
 type AgentBlackboardEntry = collaborationdomain.BlackboardEntry
 type Monitor = monitordomain.Monitor
+
+type processOutputGapDelta struct {
+	ProjectID string
+	ProcessID string
+	Recent    []processdomain.SeqRange
+	LostLines uint64
+	GapCount  uint64
+	OldestSeq uint64
+	NewestSeq uint64
+}
 type RuntimeEvent = runtimedomain.Event
 type AgentInboxMessage = collaborationdomain.Handoff
 

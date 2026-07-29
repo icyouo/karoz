@@ -163,11 +163,17 @@ type processOutputObservation struct {
 func (a *app) armProcessOutputMonitor() {
 	a.processOutputMonitorOnce.Do(func() {
 		go func() {
-			for observation := range a.processOutputMonitorCh {
-				a.evaluateProcessOutput(observation)
+			for {
+				select {
+				case <-a.supervisorCtx.Done():
+					return
+				case observation := <-a.processOutputMonitorCh:
+					a.evaluateProcessOutput(observation)
+				}
 			}
 		}()
 	})
+	a.armProcessOutputGapWorker()
 	// A new server deliberately begins at the current tail sequence: output
 	// before this process lifetime is coverage, not an event replay source.
 	for _, item := range a.monitorsForAllProjects() {
@@ -197,6 +203,40 @@ func (a *app) enqueueProcessOutputObservation(record processdomain.Process, line
 	item := processOutputObservation{ProjectID: record.ProjectID, ProcessID: record.ID, Line: line}
 	select {
 	case a.processOutputMonitorCh <- item:
+	default:
+		a.recordProcessOutputGap(record.ProjectID, record.ID, line.Sequence)
+	}
+}
+
+func (a *app) recordProcessOutputGap(projectID, processID string, sequence uint64) {
+	if sequence == 0 {
+		return
+	}
+	key := projectAgentKey(projectID, processID)
+	a.processOutputGapMu.Lock()
+	delta := a.processOutputPendingGaps[key]
+	delta.ProjectID = projectID
+	delta.ProcessID = processID
+	delta.LostLines++
+	if delta.OldestSeq == 0 || sequence < delta.OldestSeq {
+		delta.OldestSeq = sequence
+	}
+	if sequence > delta.NewestSeq {
+		delta.NewestSeq = sequence
+	}
+	if len(delta.Recent) > 0 && sequence == delta.Recent[len(delta.Recent)-1].End+1 {
+		delta.Recent[len(delta.Recent)-1].End = sequence
+	} else {
+		delta.GapCount++
+		if len(delta.Recent) == 32 {
+			delta.Recent = delta.Recent[1:]
+		}
+		delta.Recent = append(delta.Recent, processdomain.SeqRange{Start: sequence, End: sequence})
+	}
+	a.processOutputPendingGaps[key] = delta
+	a.processOutputGapMu.Unlock()
+	select {
+	case a.processOutputGapWake <- struct{}{}:
 	default:
 	}
 }
