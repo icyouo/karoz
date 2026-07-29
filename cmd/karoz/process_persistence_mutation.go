@@ -233,6 +233,12 @@ func (runtime *processRuntimePersistence) Abort(record processdomain.Process) er
 	if exists && durable.Event != nil {
 		return nil
 	}
+	if exists &&
+		durable.Process.State.Terminal() &&
+		durable.Reservation == nil &&
+		durable.AcknowledgedEventID == processTerminalEventID(record.ID) {
+		return nil
+	}
 	if exists {
 		return errors.New("cannot abort an admitted nonterminal process")
 	}

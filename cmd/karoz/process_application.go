@@ -29,6 +29,9 @@ func (a *app) bootstrapProcessRuntime() error {
 	}
 	supervisorConfig := releaseConfig.Supervisor
 	supervisorConfig.PrepareRecord = runtime.PrepareRecord
+	supervisorConfig.TerminalPersisted = func(processdomain.Process) {
+		a.wakeProcessTerminalOutbox()
+	}
 	supervisor, err := newProcessSupervisor(
 		a.supervisorCtx,
 		runtime,
@@ -43,6 +46,7 @@ func (a *app) bootstrapProcessRuntime() error {
 	}
 	a.processRuntime = runtime
 	a.processSupervisor = supervisor
+	a.startProcessTerminalOutbox()
 	return nil
 }
 
@@ -54,6 +58,7 @@ func (a *app) shutdownProcessRuntime(ctx context.Context) error {
 	if err := a.processSupervisor.Shutdown(ctx); err != nil {
 		return err
 	}
+	a.drainProcessTerminalOutbox()
 	a.supervisorCancel()
 	return nil
 }

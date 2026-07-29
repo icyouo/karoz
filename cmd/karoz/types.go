@@ -22,6 +22,13 @@ type app struct {
 	processRuntime                     *processRuntimePersistence
 	processSupervisor                  *processSupervisor
 	processPersistenceFail             func(processPersistenceFailpoint) error
+	processTerminalDrainMu             sync.Mutex
+	processTerminalSinkMu              sync.RWMutex
+	processTerminalSink                func(RuntimeEvent) error
+	processTerminalAfterDeliveryHook   func(RuntimeEvent) error
+	processTerminalDelivered           map[string]bool
+	processTerminalWake                chan struct{}
+	processTerminalWorkerOnce          sync.Once
 	backgroundOwnerMu                  sync.Mutex
 	projectRegistrationMu              sync.Mutex
 	projectCreateAfterRegistrationHook func()

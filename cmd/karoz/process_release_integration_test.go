@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	processdomain "github.com/karoz/karoz/internal/process"
 )
 
 func TestProcessReleaseChildServer(t *testing.T) {
@@ -472,6 +474,102 @@ func TestRunBackgroundApprovalSeparationAndInstantExit(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("instant process did not reach a terminal snapshot: %+v", payload.Process)
+}
+
+func TestLiveBackgroundTerminalEventIsVisibleOnceAndReleasesRetention(
+	t *testing.T,
+) {
+	fixture := newBackgroundProcessTestFixture(t)
+	events := make(chan RuntimeEvent, 4)
+	fixture.app.addRuntimeWatcher(fixture.project.ID, events)
+	defer fixture.app.removeRuntimeWatcher(fixture.project.ID, events)
+
+	result, err := fixture.app.executeResidentRunBackgroundTool(
+		context.Background(),
+		ResidentToolContext{
+			Project: fixture.project, Agent: fixture.agent,
+			RunID: "live-terminal", Workdir: fixture.project.Path,
+			TurnType: "dev",
+		},
+		map[string]any{"command": "true"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Process processView `json:"process"`
+	}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil ||
+		payload.Process.ID == "" {
+		t.Fatalf("start terminal process = %s err=%v", result, err)
+	}
+	processID := payload.Process.ID
+	var terminal RuntimeEvent
+	select {
+	case terminal = <-events:
+	case <-time.After(3 * time.Second):
+		t.Fatal("live terminal event was not delivered")
+	}
+	if terminal.ID != processTerminalEventID(processID) ||
+		terminal.Kind != processTerminalEventKind ||
+		terminal.ProjectID != fixture.project.ID ||
+		terminal.AgentID != fixture.agent.ID ||
+		terminal.EntityID != processID ||
+		terminal.RunID != "live-terminal" ||
+		terminal.To != string(processdomain.StateSucceeded) ||
+		terminal.ExitCode == nil ||
+		*terminal.ExitCode != 0 {
+		t.Fatalf("live terminal provenance = %+v", terminal)
+	}
+	select {
+	case duplicate := <-events:
+		t.Fatalf("duplicate live terminal event = %+v", duplicate)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		record, lookupErr := fixture.app.processRecord(
+			fixture.project.ID,
+			processID,
+		)
+		if lookupErr == nil && record.State.Terminal() {
+			durable, slots := processTerminalDurableRecord(
+				t,
+				fixture.app.processRuntime,
+				fixture.project.ID,
+				processID,
+			)
+			if durable.Event == nil && durable.Reservation == nil && slots == 0 {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assertProcessTerminalReleased(
+		t,
+		fixture.app.processRuntime,
+		fixture.project.ID,
+		processID,
+	)
+	if err := fixture.app.processRuntime.ApplyRetention(
+		fixture.project.ID,
+		processdomain.RetentionPolicy{
+			MaxRecords: 0, MaxTotalBytes: 0,
+		},
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if records := fixture.app.processRuntime.List(fixture.project.ID); len(records) != 0 {
+		t.Fatalf("released terminal process resisted retention: %+v", records)
+	}
+	if _, _, err := fixture.app.processRuntime.OpenLogReader(
+		fixture.project.ID,
+		processID,
+	); !errors.Is(err, errProcessLogGone) {
+		t.Fatalf("retired live process log error = %v, want gone", err)
+	}
 }
 
 type backgroundProcessTestFixture struct {

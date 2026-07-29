@@ -96,10 +96,12 @@ type Event struct {
 	ProjectID string `json:"project_id"`
 	Kind      string `json:"kind"`
 	EntityID  string `json:"entity_id"`
+	AgentID   string `json:"agent_id,omitempty"`
 	RunID     string `json:"run_id,omitempty"`
 	Trigger   string `json:"trigger,omitempty"`
 	From      string `json:"from,omitempty"`
 	To        string `json:"to,omitempty"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
 	// FromAgentID/ToAgentID carry the handoff participants for handoff_*
 	// events so clients can visualize agent-to-agent handoffs.
 	FromAgentID string    `json:"from_agent_id,omitempty"`

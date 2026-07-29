@@ -55,24 +55,25 @@ const (
 )
 
 type processSupervisorConfig struct {
-	LogBytes         int64
-	TailLines        int
-	MaxConcurrent    int
-	OutputEventBytes int64
-	ExitDrain        time.Duration
-	StopGrace        time.Duration
-	DefaultLifetime  time.Duration
-	MaxLifetime      time.Duration
-	TerminalRetry    time.Duration
-	TerminalRetries  int
-	Fail             func(processFailpoint) error
-	GuardExecutable  string
-	GuardArgsPrefix  []string
-	BoundaryFactory  func(*exec.Cmd) (processBoundary, error)
-	ProcessKill      func(*os.Process) error
-	ProcessWait      func(*exec.Cmd) error
-	BeforeFinalize   func()
-	PrepareRecord    func(processdomain.Process) (processdomain.Process, error)
+	LogBytes          int64
+	TailLines         int
+	MaxConcurrent     int
+	OutputEventBytes  int64
+	ExitDrain         time.Duration
+	StopGrace         time.Duration
+	DefaultLifetime   time.Duration
+	MaxLifetime       time.Duration
+	TerminalRetry     time.Duration
+	TerminalRetries   int
+	Fail              func(processFailpoint) error
+	GuardExecutable   string
+	GuardArgsPrefix   []string
+	BoundaryFactory   func(*exec.Cmd) (processBoundary, error)
+	ProcessKill       func(*os.Process) error
+	ProcessWait       func(*exec.Cmd) error
+	BeforeFinalize    func()
+	PrepareRecord     func(processdomain.Process) (processdomain.Process, error)
+	TerminalPersisted func(processdomain.Process)
 }
 
 type processStartRequest struct {
@@ -807,6 +808,9 @@ func (supervisor *processSupervisor) persistTerminal(record processdomain.Proces
 	var lastErr error
 	for attempt := 0; attempt < supervisor.config.TerminalRetries; attempt++ {
 		if err := supervisor.store.MarkTerminal(record); err == nil {
+			if supervisor.config.TerminalPersisted != nil {
+				supervisor.config.TerminalPersisted(record)
+			}
 			return nil
 		} else {
 			lastErr = err
