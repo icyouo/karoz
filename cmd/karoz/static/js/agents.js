@@ -83,9 +83,31 @@
       if (!state.project || !state.agent || state.chatStreaming || !window.EventSource) return;
       const projectID = state.project.id;
       const agentID = currentAgentID();
-      const status = await api('/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID) + '/run').catch(() => null);
+      let status;
+      try {
+        status = await api('/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID) + '/run');
+      } catch {
+        return;
+      }
+      if (!state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       const run = status && status.active && status.run;
-      if (!run || !run.id || !state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
+      if (!run || !run.id) {
+        setLocalAgentWorking(agentID, false);
+        if (state.agent && state.agent.id === agentID) {
+          if (state.agent.state === 'working') state.agent.state = 'idle';
+          if (state.agent.status_message === 'working') state.agent.status_message = 'ready';
+        }
+        if (agentRunEventsKey.startsWith(projectID + ':' + agentID + ':')) {
+          agentRunEvents?.close();
+          agentRunEvents = null;
+          agentRunEventsKey = '';
+        }
+        if (state.activeRunAgentID === agentID) state.activeRunID = '';
+        renderAgentWorkingState();
+        return;
+      }
+      setLocalAgentWorking(agentID, true);
+      renderAgentWorkingState();
       const key = projectID + ':' + agentID + ':' + run.id;
       if (agentRunEventsKey === key && agentRunEvents) return;
       if (agentRunEvents) agentRunEvents.close();
@@ -547,5 +569,6 @@
         agentRunControlPresentation,
         agentComposerEnterAction,
         stopActiveAgentRun,
+        syncActiveRunEvents,
       };
     }

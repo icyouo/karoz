@@ -7,6 +7,7 @@ const {
   agentRunControlPresentation,
   agentComposerEnterAction,
   stopActiveAgentRun,
+  syncActiveRunEvents,
 } = require('./agents.js');
 
 assert.deepEqual(agentRunControlPresentation(false, false), {
@@ -111,7 +112,68 @@ async function testStopRequest() {
   assert.deepEqual(state.agentRunStoppingByKey, {});
 }
 
-testStopRequest()
+async function testActiveRunSynchronization() {
+  const elements = {
+    sendAgent: {
+      textContent: '',
+      title: '',
+      disabled: false,
+      setAttribute() {},
+      classList: { toggle() {} },
+    },
+    agentWorkingPulse: { hidden: false },
+  };
+  global.$ = id => elements[id] || null;
+  global.state = {
+    project: { id: 'project' },
+    agent: { id: 'scheduled', nickname: 'Scheduled', state: 'idle', status_message: 'ready' },
+    agents: [],
+    providers: [],
+    agentWorkingById: {},
+    agentRunStoppingByKey: {},
+    chatStreaming: false,
+    activeRunID: '',
+    activeRunAgentID: '',
+    lastRunSeq: 0,
+  };
+  global.agentRunEvents = null;
+  global.agentRunEventsKey = '';
+  global.clearActiveRunReplay = () => {};
+  class FakeEventSource {
+    constructor(url) {
+      this.url = url;
+      this.closed = false;
+    }
+    addEventListener() {}
+    close() { this.closed = true; }
+  }
+  global.window = { EventSource: FakeEventSource };
+  global.EventSource = FakeEventSource;
+  global.api = async () => ({ active: true, run: { id: 'run-1' } });
+
+  await syncActiveRunEvents();
+  assert.equal(state.agentWorkingById.scheduled, true);
+  assert.equal(state.activeRunID, 'run-1');
+  assert.equal(elements.sendAgent.textContent, 'Stop');
+  assert.match(agentRunEvents.url, /\/agents\/scheduled\/runs\/run-1\/events/);
+
+  global.api = async () => { throw new Error('offline'); };
+  await syncActiveRunEvents();
+  assert.equal(state.agentWorkingById.scheduled, true);
+  assert.equal(elements.sendAgent.textContent, 'Stop');
+
+  const previousEvents = agentRunEvents;
+  global.api = async () => ({ active: false, run: null });
+  await syncActiveRunEvents();
+  assert.equal(state.agentWorkingById.scheduled, undefined);
+  assert.equal(state.activeRunID, '');
+  assert.equal(previousEvents.closed, true);
+  assert.equal(elements.sendAgent.textContent, 'Send ↗');
+}
+
+Promise.resolve()
+  .then(testStopRequest)
+  .then(testActiveRunSynchronization)
   .then(() => console.log('agent run control: ok'))
   .catch(error => {
     console.error(error);
