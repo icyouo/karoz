@@ -460,6 +460,7 @@
     }
     function setLocalAgentWorking(agentId, working) {
       if (!agentId) return;
+      state.agentWorkingById ||= {};
       if (working) state.agentWorkingById[agentId] = true;
       else delete state.agentWorkingById[agentId];
     }
@@ -477,9 +478,10 @@
     }
     function currentAgentStopping() {
       if (!state.project || !state.agent) return false;
-      return !!state.agentRunStoppingByKey[agentRunControlKey(state.project.id, state.agent.id)];
+      return !!(state.agentRunStoppingByKey || {})[agentRunControlKey(state.project.id, state.agent.id)];
     }
     function setAgentRunStopping(projectID, agentID, stopping) {
+      state.agentRunStoppingByKey ||= {};
       const key = agentRunControlKey(projectID, agentID);
       if (stopping) state.agentRunStoppingByKey[key] = true;
       else delete state.agentRunStoppingByKey[key];
@@ -519,6 +521,7 @@
       if (!state.project || !state.agent) return;
       const projectID = state.project.id;
       const agentID = state.agent.id;
+      state.agentRunStoppingByKey ||= {};
       if (!claimAgentRunStop(state.agentRunStoppingByKey, projectID, agentID)) return;
       renderAgentWorkingState();
       try {
