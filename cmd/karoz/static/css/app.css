@@ -959,6 +959,9 @@
       font-weight: 720;
     }
     .chat-send:hover { border-color: #e1e993; background: #e1e993; }
+    .chat-send.danger { border-color: rgba(212, 121, 112, .72); background: rgba(212, 121, 112, .16); color: #efb0aa; }
+    .chat-send.danger:hover { border-color: #e29a92; background: rgba(212, 121, 112, .24); color: #ffd0ca; }
+    .chat-send.danger:disabled { border-color: var(--border-subtle); background: rgba(212, 121, 112, .08); color: var(--text-tertiary); }
     .attachment-chip { border-radius: 8px; background: rgba(5, 11, 7, .36); }
     .skill-suggest {
       border-color: var(--border);

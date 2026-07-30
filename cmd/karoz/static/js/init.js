@@ -50,7 +50,9 @@
       }
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
-        $('sendAgent').click();
+        const action = agentComposerEnterAction(currentAgentWorking(), currentAgentStopping());
+        if (action === 'interrupt') void sendAgentMessage();
+        else if (action === 'send') $('sendAgent').click();
       }
     });
     $('createTask').onclick = async () => {

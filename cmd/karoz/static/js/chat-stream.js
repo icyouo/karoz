@@ -7,7 +7,6 @@
       const activeAgentId = currentAgentID();
       const wasWorking = currentAgentWorking();
       const contextMessage = messagePreviewWithAttachments(message, attachments);
-      $('sendAgent').disabled = true;
       appendAgentMessage('you', contextMessage);
       if (wasWorking) appendCurrentContextEvent('user', 'interrupt', contextMessage);
       else beginCurrentContextTurn(contextMessage);
@@ -39,7 +38,7 @@
           await refreshActiveAgentChat();
           if (!state.chatStreaming) clearCurrentContextTurn();
           await refreshAgentStates();
-          $('sendAgent').disabled = false;
+          renderAgentWorkingState();
           $('agentMessage').focus();
         }
         return;
@@ -56,6 +55,7 @@
       }
       renderAgents();
       renderRuntimeStrip();
+      renderAgentWorkingState();
       $('agentStatus').textContent = currentAgentLabel() + ' · working ·';
       const assistantItem = appendAgentMessage(currentAgentID(), '');
       const assistantBubble = assistantItem.querySelector('.chat-bubble');
@@ -149,7 +149,7 @@
         clearCurrentContextTurn();
         await refreshAgentStates();
         renderRuntimeStrip();
-        $('sendAgent').disabled = false;
+        renderAgentWorkingState();
         $('agentMessage').focus();
       }
     }

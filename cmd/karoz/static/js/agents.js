@@ -189,7 +189,10 @@
     }
     function renderAgents() {
       const box = $('agentList'); box.innerHTML = '';
-      if (!state.project) return;
+      if (!state.project) {
+        renderAgentWorkingState();
+        return;
+      }
       state.agents.forEach(agent => {
         const b = document.createElement('button');
         b.className = 'nav-item' + (state.agent && state.agent.id === agent.id ? ' active' : '');
@@ -201,6 +204,7 @@
         b.onclick = () => selectAgent(agent, { push: true });
         box.appendChild(b);
       });
+      renderAgentWorkingState();
     }
     // Handoff animation: a dot travels from the source agent's row to the
     // target's in the sidebar, and both rows pulse. Deduped per handoff
@@ -437,9 +441,111 @@
       if (working) state.agentWorkingById[agentId] = true;
       else delete state.agentWorkingById[agentId];
     }
+    function agentRunControlKey(projectID, agentID) {
+      return String(projectID || '') + ':' + String(agentID || '');
+    }
+    function agentRunCancelPath(projectID, agentID) {
+      return '/api/projects/' + encodeURIComponent(projectID) + '/agents/' + encodeURIComponent(agentID) + '/run/cancel';
+    }
+    function claimAgentRunStop(stoppingByKey, projectID, agentID) {
+      const key = agentRunControlKey(projectID, agentID);
+      if (stoppingByKey[key]) return false;
+      stoppingByKey[key] = true;
+      return true;
+    }
+    function currentAgentStopping() {
+      if (!state.project || !state.agent) return false;
+      return !!state.agentRunStoppingByKey[agentRunControlKey(state.project.id, state.agent.id)];
+    }
+    function setAgentRunStopping(projectID, agentID, stopping) {
+      const key = agentRunControlKey(projectID, agentID);
+      if (stopping) state.agentRunStoppingByKey[key] = true;
+      else delete state.agentRunStoppingByKey[key];
+    }
+    function agentRunControlPresentation(working, stopping) {
+      if (stopping) {
+        return {
+          text: 'Stopping…',
+          title: 'Stopping active run',
+          ariaLabel: 'Stopping active agent run',
+          danger: true,
+          disabled: true,
+        };
+      }
+      if (working) {
+        return {
+          text: 'Stop',
+          title: 'Stop active run',
+          ariaLabel: 'Stop active agent run',
+          danger: true,
+          disabled: false,
+        };
+      }
+      return {
+        text: 'Send ↗',
+        title: 'Send message',
+        ariaLabel: 'Send message to agent',
+        danger: false,
+        disabled: false,
+      };
+    }
+    function agentComposerEnterAction(working, stopping) {
+      if (stopping) return 'none';
+      return working ? 'interrupt' : 'send';
+    }
+    async function stopActiveAgentRun() {
+      if (!state.project || !state.agent) return;
+      const projectID = state.project.id;
+      const agentID = state.agent.id;
+      if (!claimAgentRunStop(state.agentRunStoppingByKey, projectID, agentID)) return;
+      renderAgentWorkingState();
+      try {
+        await api(agentRunCancelPath(projectID, agentID), {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+        if (state.project && state.project.id === projectID &&
+            state.agent && state.agent.id === agentID) {
+          $('agentStatus').textContent = currentAgentLabel() + ' · cancelled · refreshing';
+        }
+        await refreshAgentStates();
+      } catch (err) {
+        setAgentRunStopping(projectID, agentID, false);
+        if (err && err.status === 409) {
+          await refreshAgentStates();
+          renderAgentWorkingState();
+          return;
+        }
+        renderAgentWorkingState();
+        notify('Could not stop agent run: ' + ((err && err.message) || String(err)), 'error');
+      }
+    }
     function renderAgentWorkingState() {
       const pulse = $('agentWorkingPulse');
-      if (!pulse) return;
-      pulse.hidden = !currentAgentWorking();
+      const send = $('sendAgent');
+      const working = currentAgentWorking();
+      let stopping = currentAgentStopping();
+      if (stopping && !working && state.project && state.agent) {
+        setAgentRunStopping(state.project.id, state.agent.id, false);
+        stopping = false;
+      }
+      if (pulse) pulse.hidden = !(working || stopping);
+      if (send) {
+        const presentation = agentRunControlPresentation(working, stopping);
+        send.textContent = presentation.text;
+        send.title = presentation.title;
+        send.setAttribute('aria-label', presentation.ariaLabel);
+        send.classList.toggle('danger', presentation.danger);
+        send.disabled = presentation.disabled;
+      }
       restoreAgentModelSettings();
+    }
+    if (typeof module !== 'undefined' && module.exports) {
+      module.exports = {
+        agentRunCancelPath,
+        claimAgentRunStop,
+        agentRunControlPresentation,
+        agentComposerEnterAction,
+        stopActiveAgentRun,
+      };
     }

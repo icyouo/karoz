@@ -266,4 +266,10 @@
       await selectProject(project);
       notify('Project ready.', 'success');
     };
-    $('sendAgent').onclick = () => sendAgentMessage();
+    $('sendAgent').onclick = () => {
+      if (currentAgentWorking() || currentAgentStopping()) {
+        void stopActiveAgentRun();
+        return;
+      }
+      void sendAgentMessage();
+    };

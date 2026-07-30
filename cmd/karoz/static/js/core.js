@@ -1,4 +1,4 @@
-    const state = { settings: null, providers: [], projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, sidePanel: null, backgroundProcesses: [], backgroundMonitors: [], backgroundActivityView: 'processes', backgroundProbeSupported: true, backgroundEditor: null, backgroundLog: null, backgroundProbeApproval: null, backgroundCheckResults: {}, agentWorkingById: {}, chatMessages: [], modelContext: [], currentContextTurn: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, chatStreaming: false, activeRunID: '', activeRunAgentID: '', lastRunSeq: 0, activeRunReplay: null, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
+    const state = { settings: null, providers: [], projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, sidePanel: null, backgroundProcesses: [], backgroundMonitors: [], backgroundActivityView: 'processes', backgroundProbeSupported: true, backgroundEditor: null, backgroundLog: null, backgroundProbeApproval: null, backgroundCheckResults: {}, agentWorkingById: {}, agentRunStoppingByKey: {}, chatMessages: [], modelContext: [], currentContextTurn: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, chatStreaming: false, activeRunID: '', activeRunAgentID: '', lastRunSeq: 0, activeRunReplay: null, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
     let taskPollTimer = null;
     let agentPollTimer = null;
     let runtimeStateRefreshTimer = null;
@@ -76,7 +76,11 @@
     $('acceptConfirm').onclick = () => finishConfirmation(true);
     async function api(path, opts = {}) {
       const res = await fetch(path, { headers: { 'content-type': 'application/json' }, ...opts });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        const error = new Error(await res.text());
+        error.status = res.status;
+        throw error;
+      }
       const type = res.headers.get('content-type') || '';
       return type.includes('application/json') ? res.json() : res.text();
     }
