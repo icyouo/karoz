@@ -56,14 +56,22 @@
               <div class="agent-chat-tools" aria-label="Workspace tools">
                 <div id="agentRuntimeTools" class="agent-runtime-tools" aria-label="Agent runtime views"></div>
                 <span class="agent-tool-separator" aria-hidden="true"></span>
-                <button id="togglePreviewPane" class="secondary" title="Preview">Preview</button>
+                <button id="togglePreviewPane" class="secondary icon preview-toggle" title="Preview" aria-label="Preview" aria-pressed="false">
+                  <svg viewBox="0 0 23.3887 17.9785" fill="none" focusable="false" aria-hidden="true">
+                    <path d="M3.06641 17.9785L19.9609 17.9785C22.0117 17.9785 23.0273 16.9727 23.0273 14.9609L23.0273 3.02734C23.0273 1.01562 22.0117 0 19.9609 0L3.06641 0C1.02539 0 0 1.01562 0 3.02734L0 14.9609C0 16.9727 1.02539 17.9785 3.06641 17.9785ZM3.08594 16.4062C2.10938 16.4062 1.57227 15.8887 1.57227 14.873L1.57227 3.11523C1.57227 2.09961 2.10938 1.57227 3.08594 1.57227L19.9414 1.57227C20.9082 1.57227 21.4551 2.09961 21.4551 3.11523L21.4551 14.873C21.4551 15.8887 20.9082 16.4062 19.9414 16.4062Z" fill="currentColor" fill-opacity="0.85"/>
+                    <path d="M16.5137 15.0781L19.2676 15.0781C19.8828 15.0781 20.127 14.8242 20.127 14.1992L20.127 3.78906C20.127 3.16406 19.8828 2.91016 19.2676 2.91016L16.5137 2.91016C15.8984 2.91016 15.6543 3.16406 15.6543 3.78906L15.6543 14.1992C15.6543 14.8242 15.8984 15.0781 16.5137 15.0781Z" fill="currentColor" fill-opacity="0.85"/>
+                  </svg>
+                </button>
               </div>
             </header>
             <div id="agentOutput" class="chat-viewport custom-scrollbar"></div>
             <div class="chat-composer">
               <div class="chat-composer-box">
                 <div class="chat-composer-top">
-                  <span id="agentStatus" class="chat-composer-label">resident session</span>
+                  <div class="chat-composer-status">
+                    <span id="agentStatus" class="chat-composer-label">resident session</span>
+                    <span id="contextTokenUsage" class="context-token-usage" title="Estimated active chat context / model context window">0 / —</span>
+                  </div>
                   <div class="chat-mode-tabs" role="tablist" aria-label="Chat mode">
                     <button class="chat-mode active" role="tab" aria-selected="true" data-chat-type="ask">Ask</button>
                     <button class="chat-mode" role="tab" aria-selected="false" data-chat-type="plan">Plan</button>
@@ -106,6 +114,9 @@
               <div class="task-actions">
                 <span id="taskStatusText" class="status-pill">pending</span>
                 <button id="runTask" class="icon" title="Run task" aria-label="Run task"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg></button>
+				<button id="cancelTask" class="secondary" hidden>Cancel</button>
+				<button id="retryTaskMerge" class="secondary" hidden>Retry merge</button>
+				<button id="cleanupTask" class="secondary" hidden>Clean up worktree</button>
               </div>
             </div>
             <div class="task-section">
@@ -193,6 +204,7 @@
         <div class="form-actions">
           <button id="saveSettings">Save Settings</button>
         </div>
+        <div id="workspaceSettingsDockerNotice" class="workspace-settings-notice" role="note" hidden>Workspace settings are unavailable when Karoz is running in Docker. Docker workspace mounts are configured at startup and cannot be changed from this page.</div>
       </div>
     </div>
   </div>
@@ -257,6 +269,18 @@
           <label>Goal</label>
           <textarea id="taskGoal" placeholder="Task goal"></textarea>
         </div>
+        <div class="field">
+          <label>Maximum runtime</label>
+          <select id="taskMaxRuntime">
+            <option value="3600000">1 hour</option>
+            <option value="10800000">3 hours</option>
+            <option value="21600000">6 hours</option>
+            <option value="43200000">12 hours</option>
+            <option value="86400000">24 hours</option>
+            <option value="0">Unlimited</option>
+          </select>
+          <div class="field-note">The limit applies to this task each time it runs.</div>
+        </div>
         <div class="form-actions">
           <button id="createTask">Create Task</button>
         </div>
@@ -284,23 +308,27 @@
             <button id="saveAgentConfig">Save Agent</button>
             <button id="deleteAgent" class="danger">Delete Agent</button>
           </div>
-          <div class="panel" style="margin: 0;">
-            <h3>Communication Scope</h3>
-            <div class="route-row">
-              <select id="routeFrom"></select>
-              <select id="routeTo"></select>
-              <select id="routeIntent">
-                <option value="request">request</option>
-                <option value="handoff">handoff</option>
-                <option value="question">question</option>
-                <option value="status">status</option>
-                <option value="note">note</option>
-                <option value="result">result</option>
-              </select>
-              <button id="addRoute" class="icon" title="Add route">+</button>
+          <div class="panel communication-scope">
+            <div class="communication-scope-head">
+              <span class="scope-kicker">Team routing</span>
+              <h3>Communication scope</h3>
+              <p>Allow only the agent-to-agent routes this resident should use.</p>
+            </div>
+            <div class="route-builder">
+              <label class="route-field"><span>From</span><select id="routeFrom"></select></label>
+              <label class="route-field"><span>To</span><select id="routeTo"></select></label>
+              <label class="route-field"><span>Intent</span><select id="routeIntent">
+                  <option value="request">request</option>
+                  <option value="handoff">handoff</option>
+                  <option value="question">question</option>
+                  <option value="status">status</option>
+                  <option value="note">note</option>
+                  <option value="result">result</option>
+              </select></label>
+              <button id="addRoute" class="secondary add-route-button" title="Add route"><span aria-hidden="true">+</span>Add route</button>
             </div>
             <div id="routeList" class="route-list stack custom-scrollbar"></div>
-            <button id="saveAgentRoutes">Save Routes</button>
+            <div class="route-actions"><button id="saveAgentRoutes">Save routes</button></div>
           </div>
         </div>
       </div>
@@ -324,13 +352,16 @@
     </div>
   </div>
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <script src="/static/js/context-tokens.js"></script>
   <script src="/static/js/core.js"></script>
   <script src="/static/js/router.js"></script>
   <script src="/static/js/agents.js"></script>
+  <script src="/static/js/background-activity.js"></script>
   <script src="/static/js/panels.js"></script>
   <script src="/static/js/projects-tasks.js"></script>
   <script src="/static/js/chat-render.js"></script>
   <script src="/static/js/bindings.js"></script>
+  <script src="/static/js/run-replay.js"></script>
   <script src="/static/js/chat-stream.js"></script>
   <script src="/static/js/init.js"></script>
 </body>

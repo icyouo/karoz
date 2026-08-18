@@ -30,7 +30,7 @@ func TestProjectAuditExport(t *testing.T) {
 	}
 	blackboardEntry := a.appendBlackboardEntry(project.ID, Agent{ID: "worker-a", ProjectID: project.ID, Nickname: "Worker A"}, "progress", "audit marker", "audit detail", "")
 	now := time.Now().UTC()
-	a.memories[projectAgentKey(project.ID, "worker-a")] = []AgentMemoryEntry{{
+	a.memoryStoreLocked().entries[projectAgentKey(project.ID, "worker-a")] = []AgentMemoryEntry{{
 		ID: "audit-mem-1", ProjectID: project.ID, AgentID: "worker-a", Layer: "fact", State: "active",
 		Summary: "audit memory", Detail: "remembered for audit", CreatedAt: now, UpdatedAt: now,
 	}}

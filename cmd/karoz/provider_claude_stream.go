@@ -27,7 +27,13 @@ type claudeToolAccumulator struct {
 }
 
 func invokeClaudeDirectStream(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
-	return invokeResidentToolLoop(ctx, newClaudeStreamWire(workdir, prompt, model, effort), tools, callbacks, executeTool)
+	return invokeClaudeDirectStreamWithBudget(ctx, workdir, prompt, model, effort, nil, tools, callbacks, residentTurnBudgetFor("ask"), func(_ context.Context, call codexToolCall) (string, error) {
+		return executeTool(call)
+	})
+}
+
+func invokeClaudeDirectStreamWithBudget(ctx context.Context, workdir, prompt, model, effort string, transcript []AgentTranscriptItem, tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, executeTool residentToolExecutor) error {
+	return invokeResidentToolLoop(ctx, newClaudeStreamWire(workdir, prompt, model, effort, transcript), tools, callbacks, budget, executeTool)
 }
 
 // claudeStreamWire adapts the Claude messages SSE protocol to the shared
@@ -40,12 +46,52 @@ type claudeStreamWire struct {
 	results  []map[string]any
 }
 
-func newClaudeStreamWire(workdir, prompt, model, effort string) *claudeStreamWire {
+func newClaudeStreamWire(workdir, prompt, model, effort string, transcript []AgentTranscriptItem) *claudeStreamWire {
+	messages := claudeTranscriptMessages(transcript)
+	messages = appendClaudeHistoryContent(messages, "user", []map[string]any{{
+		"type": "text", "text": prompt + "\n\nProject workspace: " + workdir,
+	}})
 	return &claudeStreamWire{
-		messages: []map[string]any{{"role": "user", "content": prompt + "\n\nProject workspace: " + workdir}},
+		messages: messages,
 		model:    model,
 		effort:   effort,
 	}
+}
+
+func claudeTranscriptMessages(items []AgentTranscriptItem) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, unit := range projectResidentHistoryUnits(items) {
+		if unit.Native {
+			call, result := unit.Items[0], unit.Items[1]
+			var input any = map[string]any{}
+			if arguments := boundedTranscriptToolArguments(call); strings.TrimSpace(arguments) != "" {
+				_ = json.Unmarshal([]byte(arguments), &input)
+			}
+			out = appendClaudeHistoryContent(out, "assistant", []map[string]any{{"type": "tool_use", "id": call.ToolCallID, "name": call.ToolName, "input": input}})
+			out = appendClaudeHistoryContent(out, "user", []map[string]any{{"type": "tool_result", "tool_use_id": call.ToolCallID, "content": boundedTranscriptToolResult(result), "is_error": result.ToolSuccess != nil && !*result.ToolSuccess}})
+			continue
+		}
+		for _, item := range unit.Items {
+			role := transcriptTextRole(item)
+			if role == "system" {
+				role = "user"
+			}
+			out = appendClaudeHistoryContent(out, role, []map[string]any{{"type": "text", "text": boundedTranscriptText(item)}})
+		}
+	}
+	return out
+}
+
+func appendClaudeHistoryContent(messages []map[string]any, role string, content []map[string]any) []map[string]any {
+	if len(content) == 0 {
+		return messages
+	}
+	if len(messages) > 0 && messages[len(messages)-1]["role"] == role {
+		existing, _ := messages[len(messages)-1]["content"].([]map[string]any)
+		messages[len(messages)-1]["content"] = append(existing, content...)
+		return messages
+	}
+	return append(messages, map[string]any{"role": role, "content": content})
 }
 
 func (w *claudeStreamWire) step(ctx context.Context, tools []map[string]any, callbacks AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {

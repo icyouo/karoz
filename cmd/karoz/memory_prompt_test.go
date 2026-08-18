@@ -9,25 +9,21 @@ import (
 func TestResidentPromptInjectsRelevantFactsAndDecisions(t *testing.T) {
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
 	a := &app{
-		settings:      Settings{DataDir: t.TempDir()},
-		agents:        map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Nickname: "Karoz"}}},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
-		memories:      map[string][]AgentMemoryEntry{},
-		archives:      map[string][]AgentArchiveMessage{},
-		blackboard:    map[string][]AgentBlackboardEntry{},
-		inbox:         map[string][]AgentInboxMessage{},
+		settings:       Settings{DataDir: t.TempDir()},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Nickname: "Karoz"}}}),
+		conversation:   newConversationService(),
+		memoryStore:    newMemoryStore(),
 	}
 	now := time.Now().UTC()
 	archivedAt := now
-	a.memories[projectAgentKey("p1", "karoz")] = []AgentMemoryEntry{
+	a.memoryStoreLocked().entries[projectAgentKey("p1", "karoz")] = []AgentMemoryEntry{
 		{ID: "fact-pg", ProjectID: "p1", AgentID: "karoz", Layer: "fact", State: "active", Summary: "Postgres is the durable store", Detail: "All project state lives in Postgres 16.", CreatedAt: now, UpdatedAt: now},
 		{ID: "decision-vue", ProjectID: "p1", AgentID: "karoz", Layer: "decision", State: "active", Summary: "Dashboard framework choice", Detail: "The dashboard uses Vue.", CreatedAt: now, UpdatedAt: now},
 		{ID: "pending-pg", ProjectID: "p1", AgentID: "karoz", Layer: "pending", State: "active", Priority: 3, Summary: "Verify Postgres backup", Detail: "Postgres backups need verification.", CreatedAt: now, UpdatedAt: now},
 		{ID: "archived-pg", ProjectID: "p1", AgentID: "karoz", Layer: "fact", State: "archived", Summary: "Old Postgres tuning notes", Detail: "Archived Postgres detail.", CreatedAt: now, UpdatedAt: now, ArchivedAt: &archivedAt},
 	}
 
-	prompt := a.buildResidentAgentPrompt(project, a.agents["p1"][0], "How is Postgres configured?", "ask")
+	prompt := a.buildResidentAgentPrompt(project, a.agentDirectoryLocked().agents["p1"][0], "How is Postgres configured?", "ask")
 	section := promptSection(prompt, "### Relevant remembered facts and decisions")
 	if section == "" {
 		t.Fatalf("prompt missing relevant memory section:\n%s", prompt)
@@ -45,7 +41,7 @@ func TestResidentPromptInjectsRelevantFactsAndDecisions(t *testing.T) {
 		t.Fatalf("archived memory leaked into section:\n%s", section)
 	}
 
-	unrelated := a.buildResidentAgentPrompt(project, a.agents["p1"][0], "zzz qqq", "ask")
+	unrelated := a.buildResidentAgentPrompt(project, a.agentDirectoryLocked().agents["p1"][0], "zzz qqq", "ask")
 	if strings.Contains(unrelated, "### Relevant remembered facts and decisions") {
 		t.Fatalf("section should be skipped when no memory matches:\n%s", unrelated)
 	}

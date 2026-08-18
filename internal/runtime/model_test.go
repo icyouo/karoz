@@ -12,10 +12,10 @@ func TestRunAndScheduledContracts(t *testing.T) {
 	if StateDone.Active() || StateFailed.Active() || StateCancelled.Active() || !StateExecutingTool.Active() {
 		t.Fatal("run terminal/active state contract changed")
 	}
-	job := ScheduledRun{ID: "run-1", ProjectID: "p1", AgentID: "designer", Trigger: TriggerHandoff, TimeoutMS: 1500}
+	job := ScheduledRun{ID: "run-1", ProjectID: "p1", AgentID: "designer", Trigger: TriggerHandoff, TimeoutMS: 1500, StartWaitMS: 750}
 	input := job.RunInput()
-	if input.RunID != job.ID || input.Trigger != TriggerHandoff || job.Timeout(time.Minute) != 1500*time.Millisecond {
-		t.Fatalf("scheduled run contract = input=%+v timeout=%s", input, job.Timeout(time.Minute))
+	if input.RunID != job.ID || input.Trigger != TriggerHandoff || job.Timeout(time.Minute) != 1500*time.Millisecond || job.StartWait(time.Minute) != 750*time.Millisecond {
+		t.Fatalf("scheduled run contract = input=%+v execution_timeout=%s start_wait=%s", input, job.Timeout(time.Minute), job.StartWait(time.Minute))
 	}
 }
 

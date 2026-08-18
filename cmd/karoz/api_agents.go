@@ -97,13 +97,11 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 		return
 	}
 	if len(parts) == 2 && parts[1] == "memory" && r.Method == http.MethodGet {
-		writeJSON(w, a.activeMemoriesFor(project.ID, agent.ID, "", 100))
+		writeJSON(w, a.memorySummaries(a.visibleActiveMemoriesFor(project.ID, agent.ID, 100)))
 		return
 	}
 	if len(parts) == 2 && parts[1] == "archive" && r.Method == http.MethodGet {
-		a.mu.Lock()
-		items := append([]AgentArchiveMessage{}, a.archives[projectAgentKey(project.ID, agent.ID)]...)
-		a.mu.Unlock()
+		items := a.conversationServiceLocked().ArchivedMessagesFor(projectAgentKey(project.ID, agent.ID))
 		if items == nil {
 			items = []AgentArchiveMessage{}
 		}
@@ -122,6 +120,11 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 			return
 		}
 		writeJSON(w, map[string]any{"cancelled": true, "run": run})
+		return
+	}
+	if len(parts) == 4 && parts[1] == "runs" && parts[3] == "events" && r.Method == http.MethodGet {
+		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+		a.streamRunLedger(w, r, parts[2], after)
 		return
 	}
 	if len(parts) >= 2 && parts[1] == "workspace" {
@@ -151,13 +154,18 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 		}
 		run, started := a.beginAgentRun(AgentRunInput{ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: turnType})
 		messageStored := false
+		currentInput := AgentMessage{}
 		if !started {
-			if isResidentBashChoice(req.ChoiceID) {
-				writeError(w, http.StatusConflict, errors.New("wait for the active agent run to finish before resolving a bash approval"))
+			if isResidentBashChoice(req.ChoiceID) || isMonitorProbeChoice(req.ChoiceID) {
+				writeError(w, http.StatusConflict, errors.New("wait for the active agent run to finish before resolving an approval"))
 				return
 			}
-			msg := a.appendAgentMessage(project.ID, agent.ID, "user", "interrupt", userText)
+			msg, appended := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", "interrupt", userText)
+			if !appended {
+				msg = a.appendAgentMessage(project.ID, agent.ID, "user", "interrupt", userText)
+			}
 			messageStored = true
+			currentInput = msg
 			item, queued := a.enqueueAgentInterrupt(project.ID, agent.ID, msg, turnType)
 			if queued {
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -178,21 +186,24 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 				return
 			}
 		}
-		if _, err := a.resolveResidentBashChoice(project.ID, agent.ID, run.ID, req.ChoiceID); err != nil {
+		recognized, err := a.resolveResidentBashChoice(project.ID, agent.ID, run.ID, req.ChoiceID)
+		if err == nil && !recognized {
+			_, err = a.resolveMonitorProbeChoice(project.ID, agent.ID, run.ID, req.ChoiceID)
+		}
+		if err != nil {
 			a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateCancelled, err)
 			writeError(w, http.StatusConflict, err)
 			return
 		}
-		defer a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateDone, nil)
-		runCtx, bound := a.bindAgentRunContext(r.Context(), project.ID, agent.ID, run.ID)
-		if !bound {
-			writeError(w, http.StatusConflict, errors.New("agent run changed before execution; retry"))
-			return
-		}
 		if !messageStored {
-			a.appendAgentMessage(project.ID, agent.ID, "user", turnType, userText)
+			var appended bool
+			currentInput, appended = a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", turnType, userText)
+			if !appended {
+				currentInput = a.appendAgentMessage(project.ID, agent.ID, "user", turnType, userText)
+			}
 		}
-		a.streamAgentMessage(w, r.Clone(runCtx), project, agent, run.ID, userText, turnType)
+		a.startAgentRunWorker(project, agent, run, userText, turnType, AgentTranscriptItem{ID: currentInput.ID, Seq: currentInput.Seq})
+		a.streamRunLedger(w, r, run.ID, 0)
 		return
 	}
 	http.NotFound(w, r)

@@ -47,6 +47,7 @@ type Capabilities struct {
 	CanManageRoutes       bool
 	CanInspectProjectWide bool
 	CanReconcileBacklog   bool
+	CanReviewArtifacts    bool
 }
 
 func IsKaroz(agent Agent) bool {
@@ -76,6 +77,7 @@ func CapabilitiesFor(agent Agent) Capabilities {
 	capabilities := Capabilities{
 		CanDirectChat: true, CanCreateTasks: true, CanDelegate: true, CanCreateArtifacts: true,
 		CanDesignArtifacts: IsDesign(agent),
+		CanReviewArtifacts: IsReviewer(agent),
 	}
 	if IsKaroz(agent) {
 		capabilities.CanManageAgents = true
@@ -112,10 +114,52 @@ type AgentMessage struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// AgentTranscriptItem is the provider-neutral record used to rebuild model
+// context. AgentMessage remains the stable visible-chat API; a transcript item
+// adds Run and tool correlation without changing that response shape. Both are
+// projections of the canonical session event log.
+type AgentTranscriptItem struct {
+	ID            string    `json:"id"`
+	MessageID     string    `json:"message_id,omitempty"`
+	ProjectID     string    `json:"project_id"`
+	AgentID       string    `json:"agent_id"`
+	SessionID     string    `json:"session_id"`
+	Seq           int64     `json:"seq"`
+	RunID         string    `json:"run_id,omitempty"`
+	Role          string    `json:"role"`
+	Kind          string    `json:"kind"`
+	Intent        string    `json:"intent,omitempty"`
+	Body          string    `json:"body,omitempty"`
+	ToolCallID    string    `json:"tool_call_id,omitempty"`
+	ToolName      string    `json:"tool_name,omitempty"`
+	ToolArguments string    `json:"tool_arguments,omitempty"`
+	ToolResult    string    `json:"tool_result,omitempty"`
+	ToolSuccess   *bool     `json:"tool_success,omitempty"`
+	Visible       bool      `json:"visible"`
+	ModelOnly     bool      `json:"model_only,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// AgentContextMessage is the bounded, server-projected transcript window used
+// by the local Studio context meter. It intentionally carries only the fields
+// the meter needs: raw transcript details (including hidden scheduled inputs)
+// are never returned by this projection.
+type AgentContextMessage struct {
+	ID     string `json:"id,omitempty"`
+	Seq    int64  `json:"seq"`
+	Role   string `json:"role"`
+	Intent string `json:"intent,omitempty"`
+	Body   string `json:"body"`
+}
+
 type AgentMessagesPage struct {
 	Messages      []AgentMessage `json:"messages"`
 	HasMore       bool           `json:"has_more"`
 	NextBeforeSeq int64          `json:"next_before_seq,omitempty"`
+	// ModelContext is deliberately not rendered as chat. It is already filtered
+	// to the resident short-term window and normalized with the same limits as
+	// the model transcript, so older display history cannot inflate the meter.
+	ModelContext []AgentContextMessage `json:"model_context"`
 }
 
 type AgentArchiveMessage struct {
@@ -132,19 +176,22 @@ type AgentArchiveMessage struct {
 }
 
 type AgentMemoryEntry struct {
-	ID         string         `json:"id"`
-	ProjectID  string         `json:"project_id"`
-	AgentID    string         `json:"agent_id"`
-	SessionID  string         `json:"session_id"`
-	Layer      string         `json:"layer"`
-	State      string         `json:"state"`
-	Priority   int            `json:"priority"`
-	Summary    string         `json:"summary"`
-	Detail     string         `json:"detail"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
-	ArchivedAt *time.Time     `json:"archived_at,omitempty"`
+	ID             string         `json:"id"`
+	ProjectID      string         `json:"project_id"`
+	AgentID        string         `json:"agent_id"`
+	SessionID      string         `json:"session_id"`
+	Layer          string         `json:"layer"`
+	Scope          string         `json:"scope,omitempty"`
+	State          string         `json:"state"`
+	Priority       int            `json:"priority"`
+	Summary        string         `json:"summary"`
+	Detail         string         `json:"detail"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+	SupersedesID   string         `json:"supersedes_id,omitempty"`
+	SupersededByID string         `json:"superseded_by_id,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	ArchivedAt     *time.Time     `json:"archived_at,omitempty"`
 }
 
 type AgentRoute struct {

@@ -1,30 +1,56 @@
 package task
 
-import "time"
+import (
+	runtimedomain "github.com/karoz/karoz/internal/runtime"
+	"time"
+)
 
 type Task struct {
-	ID             string     `json:"id"`
-	ProjectID      string     `json:"project_id"`
-	Type           string     `json:"type"`
-	Status         string     `json:"status"`
-	Title          string     `json:"title"`
-	Description    string     `json:"description"`
-	Goal           string     `json:"goal"`
-	ArtifactIDs    []string   `json:"artifact_ids,omitempty"`
-	OwnerAgentID   string     `json:"owner_agent_id,omitempty"`
-	PlanID         string     `json:"plan_id,omitempty"`
-	PlanStepID     string     `json:"plan_step_id,omitempty"`
-	Attempt        int        `json:"attempt,omitempty"`
-	ParentTaskID   string     `json:"parent_task_id,omitempty"`
-	Result         string     `json:"result,omitempty"`
-	FailureSummary string     `json:"failure_summary,omitempty"`
-	WorktreePath   string     `json:"worktree_path,omitempty"`
-	BaseBranch     string     `json:"base_branch,omitempty"`
-	TaskBranch     string     `json:"task_branch,omitempty"`
-	CommitSHA      string     `json:"commit_sha,omitempty"`
-	MergedAt       *time.Time `json:"merged_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID          string `json:"id"`
+	ProjectID   string `json:"project_id"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Goal        string `json:"goal"`
+	// MaxRuntimeMS is nil on legacy records (treated as one hour), zero for no
+	// limit, and positive for a per-run deadline.
+	MaxRuntimeMS *int64 `json:"max_runtime_ms,omitempty"`
+	// SandboxMode is "host" (default) or "required". Required tasks may only
+	// start when every requested OS restriction has an enforcing adapter.
+	SandboxMode        string     `json:"sandbox_mode,omitempty"`
+	ArtifactIDs        []string   `json:"artifact_ids,omitempty"`
+	OwnerAgentID       string     `json:"owner_agent_id,omitempty"`
+	PlanID             string     `json:"plan_id,omitempty"`
+	PlanStepID         string     `json:"plan_step_id,omitempty"`
+	Attempt            int        `json:"attempt,omitempty"`
+	ParentTaskID       string     `json:"parent_task_id,omitempty"`
+	Result             string     `json:"result,omitempty"`
+	FailureSummary     string     `json:"failure_summary,omitempty"`
+	WorktreePath       string     `json:"worktree_path,omitempty"`
+	BaseBranch         string     `json:"base_branch,omitempty"`
+	BaseCommit         string     `json:"base_commit,omitempty"`
+	TaskBranch         string     `json:"task_branch,omitempty"`
+	CommitSHA          string     `json:"commit_sha,omitempty"`
+	MergedAt           *time.Time `json:"merged_at,omitempty"`
+	MergeBlockedReason string     `json:"merge_blocked_reason,omitempty"`
+	MergeBlockedDetail string     `json:"merge_blocked_detail,omitempty"`
+	MergeAttempts      int        `json:"merge_attempts,omitempty"`
+	WorktreeState      string     `json:"worktree_state,omitempty"`
+	WorktreeDetail     string     `json:"worktree_detail,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	// StartedAt is the durable start of the current execution attempt.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+func (task Task) Operation(defaultRuntime time.Duration) runtimedomain.Operation {
+	return runtimedomain.Operation{
+		ID: task.ID, OwnerID: task.ProjectID + "/" + task.OwnerAgentID,
+		Class: "task/" + task.Type, State: task.Status,
+		Deadline:  runtimedomain.DeadlineFromMilliseconds(task.MaxRuntimeMS, defaultRuntime),
+		StartedAt: task.StartedAt, UpdatedAt: task.UpdatedAt,
+	}
 }
 
 type TaskRuntimeHook struct {

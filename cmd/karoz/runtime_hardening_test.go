@@ -21,7 +21,7 @@ func TestStaleRunCannotMutateReplacementRun(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
 	agent := Agent{ID: "designer", ProjectID: project.ID}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 
 	first, started := a.beginAgentRun(AgentRunInput{RunID: "run-old", ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect})
 	if !started {
@@ -101,8 +101,12 @@ func TestResidentToolPolicyAndReadOnlyRepositoryTools(t *testing.T) {
 		t.Fatalf("ask policy = %+v", ask)
 	}
 	plan := askSpecs("plan")
-	if plan["write_workspace_file"] || !plan["bash"] || plan["create_task"] || !plan["save_plan_draft"] || !plan["advance_plan"] {
+	if plan["write_workspace_file"] || !plan["bash"] || plan["create_task"] || !plan["save_plan_draft"] || plan["advance_plan"] {
 		t.Fatalf("plan policy = %+v", plan)
+	}
+	replacePlansForTest(a, project.ID, []WorkPlan{{ID: "owned-active", ProjectID: project.ID, OwnerAgentID: agent.ID, Status: PlanActive}})
+	if !askSpecs("plan")["advance_plan"] {
+		t.Fatal("advance_plan should be advertised when the actor owns an active plan")
 	}
 	dev := askSpecs("dev")
 	if !dev["write_workspace_file"] || !dev["create_task"] || !dev["bash"] {
@@ -133,6 +137,54 @@ func TestResidentToolPolicyAndReadOnlyRepositoryTools(t *testing.T) {
 	forbidden, err := a.executeResidentTool(context.Background(), ctx, codexToolCall{Name: "write_workspace_file", Arguments: `{"path":"x.txt","content":"x"}`})
 	if err != nil || !strings.Contains(forbidden, "tool_forbidden") {
 		t.Fatalf("forbidden write = %s err=%v", forbidden, err)
+	}
+	for _, name := range []string{"create_task", "update_task_status", "save_plan_draft"} {
+		forbidden, err = a.executeResidentTool(context.Background(), ctx, codexToolCall{Name: name, Arguments: `{}`})
+		if err != nil || !strings.Contains(forbidden, "tool_forbidden") {
+			t.Fatalf("ask turn accepted %s: result=%s err=%v", name, forbidden, err)
+		}
+	}
+}
+
+func TestResidentTaskStatusTransitionsAreMechanicallyEnforced(t *testing.T) {
+	a, project := newHandlerTestApp(t)
+	agent, ok := a.projectAgent(project, "worker-a")
+	if !ok {
+		t.Fatal("worker-a missing")
+	}
+	task := Task{ID: "resident-task-transition", ProjectID: project.ID, Status: "pending", Title: "Validate resident transition"}
+	a.projectTasksLocked().tasks[project.ID] = []Task{task}
+	a.projectTasksLocked().hooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{
+		ID: "hook-transition", ProjectID: project.ID, TaskID: task.ID, AgentID: "karoz",
+		HookType: "resident_task_completion", Status: "pending",
+	}}
+	ctx := ResidentToolContext{Project: project, Agent: agent, Workdir: project.Path, TurnType: "dev", EnforcePolicy: true}
+
+	blocked, err := a.executeResidentTool(context.Background(), ctx, codexToolCall{Name: "update_task_status", Arguments: `{"task_id":"resident-task-transition","status":"merging","result":"must not claim merge ownership"}`})
+	if err != nil || !strings.Contains(blocked, "invalid_task_transition") {
+		t.Fatalf("executor-owned transition was accepted: result=%s err=%v", blocked, err)
+	}
+	if current, found := a.findTask(project.ID, task.ID); !found || current.Status != "pending" || current.Result != "" {
+		t.Fatalf("blocked transition mutated task: %+v found=%v", current, found)
+	}
+
+	completed, err := a.executeResidentTool(context.Background(), ctx, codexToolCall{Name: "update_task_status", Arguments: `{"task_id":"resident-task-transition","status":"done","result":"completed by resident"}`})
+	if err != nil || strings.Contains(completed, `"error"`) {
+		t.Fatalf("pending -> done rejected: result=%s err=%v", completed, err)
+	}
+	if current, found := a.findTask(project.ID, task.ID); !found || current.Status != "done" || current.Result != "completed by resident" {
+		t.Fatalf("valid terminal transition missing: %+v found=%v", current, found)
+	}
+	if got := a.projectTasksLocked().hooks[project.ID+"/"+task.ID][0].Status; got != "delivered" {
+		t.Fatalf("terminal transition did not deliver task hook: %s", got)
+	}
+
+	reopen, err := a.executeResidentTool(context.Background(), ctx, codexToolCall{Name: "update_task_status", Arguments: `{"task_id":"resident-task-transition","status":"pending"}`})
+	if err != nil || !strings.Contains(reopen, "invalid_task_transition") {
+		t.Fatalf("terminal task was reopened by resident tool: result=%s err=%v", reopen, err)
+	}
+	if current, _ := a.findTask(project.ID, task.ID); current.Status != "done" {
+		t.Fatalf("rejected terminal transition changed status: %+v", current)
 	}
 }
 
@@ -245,7 +297,7 @@ func TestResidentBashApprovalIsRevokedWhenRunFinishes(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
 	agent := Agent{ID: "designer", ProjectID: project.ID}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 	command := "printf revoked"
 	request := a.requestResidentBashApproval(ResidentToolContext{Project: project, Agent: agent}, command)
 	choiceID := bashChoiceID(t, request, residentBashApprovePrefix)
@@ -259,6 +311,132 @@ func TestResidentBashApprovalIsRevokedWhenRunFinishes(t *testing.T) {
 	a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateDone, nil)
 	if a.consumeResidentBashApproval(project.ID, agent.ID, run.ID, command) {
 		t.Fatal("approval survived its run")
+	}
+}
+
+func TestResidentBashApprovalsAreRevokedWhenOwnerIsDeletedAndRecreated(
+	t *testing.T,
+) {
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
+	created := time.Now().UTC().Add(-time.Minute)
+	agent := Agent{
+		ID: "designer", ProjectID: project.ID, CreatedAt: created,
+	}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{
+		{ID: "karoz", ProjectID: project.ID, CreatedAt: created},
+		agent,
+	}
+	command := "printf revoked"
+	subjects := []residentBashSubject{}
+	for _, operation := range []string{
+		residentBashOperationForeground,
+		residentBashOperationBackgroundStart,
+		residentBashOperationBackgroundStop,
+	} {
+		processID := ""
+		if operation == residentBashOperationBackgroundStop {
+			processID = "owned-process"
+		}
+		subject, err := newResidentBashSubject(
+			operation,
+			project.ID,
+			agent.ID,
+			project.Path,
+			command,
+			processID,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		subjects = append(subjects, subject)
+	}
+	context := ResidentToolContext{
+		Project: project, Agent: agent, RunID: "old-run", Workdir: project.Path,
+	}
+	choices := make([]string, 0, len(subjects))
+	for _, subject := range subjects {
+		request := a.requestResidentBashApprovalSubject(context, subject, command)
+		choices = append(
+			choices,
+			bashChoiceID(t, request, residentBashApprovePrefix),
+		)
+	}
+	if err := a.deleteProjectAgent(project, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	recreated := agent
+	recreated.CreatedAt = time.Now().UTC()
+	a.mu.Lock()
+	a.agentDirectoryLocked().agents[project.ID] = append(a.agentDirectoryLocked().agents[project.ID], recreated)
+	a.mu.Unlock()
+
+	for index, choice := range choices {
+		recognized, err := a.resolveResidentBashChoice(
+			project.ID,
+			recreated.ID,
+			"new-run",
+			choice,
+		)
+		if !recognized || err == nil {
+			t.Fatalf(
+				"deleted owner approval %d survived identity reuse: recognized=%t err=%v",
+				index,
+				recognized,
+				err,
+			)
+		}
+		if a.consumeResidentBashApprovalSubject("new-run", subjects[index]) {
+			t.Fatalf("deleted owner approval %d was consumed after recreation", index)
+		}
+	}
+	a.mu.Lock()
+	remaining := len(a.agentRuntimeLocked().residentBashApprovals)
+	a.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("deleted owner retained %d resident approvals", remaining)
+	}
+}
+
+func TestAgentDeletionSaveFailureRevokesApprovalsAndClearsFence(
+	t *testing.T,
+) {
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
+	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
+	created := time.Now().UTC()
+	agent := Agent{
+		ID: "designer", ProjectID: project.ID, CreatedAt: created,
+	}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{
+		{ID: "karoz", ProjectID: project.ID, CreatedAt: created},
+		agent,
+	}
+	request := a.requestResidentBashApproval(
+		ResidentToolContext{Project: project, Agent: agent},
+		"printf pending",
+	)
+	if !toolResultIsChoiceRequest(request) {
+		t.Fatalf("pending approval = %s", request)
+	}
+	saveErr := errors.New("injected agent deletion queue save failure")
+	a.agentRuntimeLocked().scheduledRunsSaveOverride = func(scheduledRunSnapshot) error {
+		return saveErr
+	}
+	if err := a.deleteProjectAgent(project, agent.ID); !errors.Is(err, saveErr) {
+		t.Fatalf("delete save failure = %v, want %v", err, saveErr)
+	}
+	if _, exists := a.projectAgent(project, agent.ID); !exists {
+		t.Fatal("failed deletion removed the agent")
+	}
+	a.mu.Lock()
+	deleting := a.agentRuntimeLocked().backgroundOwnerDeleting[projectAgentKey(project.ID, agent.ID)]
+	approvals := len(a.agentRuntimeLocked().residentBashApprovals)
+	a.mu.Unlock()
+	if deleting {
+		t.Fatal("failed pre-removal deletion left the owner fence set")
+	}
+	if approvals != 0 {
+		t.Fatalf("failed deletion retained %d stale approvals", approvals)
 	}
 }
 
@@ -286,7 +464,7 @@ func TestResidentProviderWithoutRuntimeCapabilitiesIsRejected(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
 	agent := Agent{ID: "karoz", ProjectID: project.ID}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 	_, err := a.runResidentAgentTurn(context.Background(), project, agent, "hello", "ask", nil)
 	if err == nil || !strings.Contains(err.Error(), "required streaming, tool, and interrupt capabilities") {
 		t.Fatalf("capability error = %v", err)
@@ -317,7 +495,7 @@ func TestCodexStreamInterruptsToollessResponse(t *testing.T) {
 	startedAt := time.Now()
 	var delivered atomic.Bool
 	var observed atomic.Int32
-	streamed, interrupts, err := streamCodexStep(context.Background(), []map[string]any{codexMessage("user", "hello")}, "", "", nil, AgentStreamCallbacks{
+	streamed, interrupts, err := streamCodexStep(context.Background(), []any{codexMessage("user", "hello")}, "", "", nil, AgentStreamCallbacks{
 		PollInterrupts: func() []AgentInterrupt {
 			if time.Since(startedAt) < 70*time.Millisecond || delivered.Swap(true) {
 				return nil

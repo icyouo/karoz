@@ -3,13 +3,14 @@
       const projectID = state.project.id;
       const agentID = currentAgentID();
       const agentPath = '/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID);
-      const [inbox, memory, blackboard, artifactPayload, groupPayload, planPayload] = await Promise.all([
+      const [inbox, memory, blackboard, artifactPayload, groupPayload, planPayload, backgroundPayload] = await Promise.all([
         api(agentPath + '/inbox').catch(() => []),
         api(agentPath + '/memory').catch(() => []),
         api('/api/projects/' + projectID + '/agent-blackboard').catch(() => []),
 		api('/api/projects/' + projectID + '/artifacts').catch(() => ({ artifacts: [] })),
         api('/api/projects/' + projectID + '/groups').catch(() => ({ groups: [] })),
         api('/api/projects/' + projectID + '/plans').catch(() => ({ plans: [] })),
+        loadBackgroundActivityState({ render: false }).catch(() => null),
       ]);
       if (!state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       state.inbox = inbox || [];
@@ -18,23 +19,34 @@
 	  state.artifacts = (artifactPayload && artifactPayload.artifacts) || [];
       state.groups = (groupPayload && groupPayload.groups) || [];
       state.plans = (planPayload && planPayload.plans) || [];
+      void backgroundPayload;
       renderRuntimeStrip();
     }
     function renderRuntimeStrip() {
       const pending = (state.memory || []).filter(item => item.layer === 'pending').length;
       const boardCount = (state.blackboard || []).length;
+      const inboxCount = (state.inbox || []).length;
+      const updatesCount = inboxCount + boardCount;
       const role = titleCaseCompact(shortAgentRole());
       const workText = currentAgentWorking() ? ' · Working' : '';
-      const chip = (panel, label, count, title, attention = 0) => '<button class="runtime-tool secondary ' + (state.sidePanel === panel ? 'active' : '') + '" data-side-panel="' + panel + '" title="' + escapeHTML(title || ('Open ' + label)) + '"><span>' + label + '</span><strong>' + count + '</strong>' + (attention > 0 ? '<i title="' + attention + ' pending" aria-label="' + attention + ' pending"></i>' : '') + '</button>';
+      const chip = (panel, label, count, title, attention = 0) => {
+        const total = Number(count) || 0;
+        if (total <= 0) return '';
+        const countMarkup = total > 0 ? '<strong>' + total + '</strong>' : '';
+        const accessibleLabel = total > 0 ? label + ' ' + total : label;
+        const attentionMarkup = Number(attention) > 0 ? '<i title="' + attention + ' pending" aria-label="' + attention + ' pending"></i>' : '';
+        return '<button class="runtime-tool secondary ' + (state.sidePanel === panel ? 'active' : '') + '" data-side-panel="' + panel + '" aria-label="' + escapeHTML(accessibleLabel) + '" title="' + escapeHTML(title || ('Open ' + label)) + '"><span>' + label + '</span>' + countMarkup + attentionMarkup + '</button>';
+      };
       $('agentHeaderMeta').textContent = role + workText;
-      $('agentRuntimeTools').innerHTML = chip('inbox', 'Inbox', (state.inbox || []).length)
+      $('agentRuntimeTools').innerHTML = chip('updates', 'Updates', updatesCount, inboxCount + ' attention · ' + boardCount + ' activity')
         + chip('plans', 'Plans', (state.plans || []).filter(item => !['completed', 'cancelled'].includes(item.status)).length, 'Open WorkPlans')
 		+ chip('artifacts', 'Artifacts', (state.artifacts || []).filter(item => item.status !== 'superseded').length)
         + chip('memory', 'Memory', (state.memory || []).length, pending > 0 ? ('Open Memory · ' + pending + ' pending') : 'Open Memory', pending)
-        + chip('blackboard', 'Activity', boardCount, 'Open agent activity');
-      $('agentHeaderMeta').title = 'inbox ' + (state.inbox || []).length + ' · memory ' + (state.memory || []).length + ' · pending ' + pending + ' · blackboard ' + boardCount + ' · archived ' + (state.archive || []).length;
+        + chip('background', 'Background', (state.backgroundProcesses || []).length + (state.backgroundMonitors || []).length, (state.backgroundProcesses || []).length + ' processes · ' + (state.backgroundMonitors || []).length + ' monitors');
+      $('agentHeaderMeta').title = 'updates ' + updatesCount + ' · memory ' + (state.memory || []).length + ' · pending ' + pending + ' · archived ' + (state.archive || []).length;
       renderAgentWorkingState();
-      if (['blackboard', 'artifacts', 'plans', 'inbox', 'memory', 'pending'].includes(state.sidePanel)) renderSidePane();
+      if (['updates', 'artifacts', 'plans', 'memory', 'pending', 'background'].includes(state.sidePanel) &&
+          !(state.sidePanel === 'background' && state.backgroundEditor)) renderSidePane();
     }
     async function loadWorkspaceFiles() {
       if (!state.project || !state.agent) return;
@@ -60,7 +72,8 @@
       }
       state.sidePanel = panel;
       renderSidePane();
-      await loadResidentRuntimeState();
+      if (panel === 'background') await loadBackgroundActivityState();
+      else await loadResidentRuntimeState();
       state.sidePanel = panel;
       renderSidePane();
       renderRuntimeStrip();
@@ -70,7 +83,11 @@
       const body = $('sidePaneBody');
       const open = !!state.sidePanel && (state.sidePanel !== 'preview' || !!state.preview);
       shell.classList.toggle('side-open', open);
-      $('togglePreviewPane').classList.toggle('active', state.sidePanel === 'preview' && !!state.preview);
+      const previewToggle = $('togglePreviewPane');
+      previewToggle.classList.toggle('active', open);
+      previewToggle.setAttribute('aria-pressed', open ? 'true' : 'false');
+      previewToggle.title = open ? 'Close side panel' : 'Preview';
+      previewToggle.setAttribute('aria-label', open ? 'Close side panel' : 'Preview');
       document.querySelectorAll('#agentRuntimeTools button[data-side-panel]').forEach(button => {
         button.classList.toggle('active', state.sidePanel === button.dataset.sidePanel);
       });
@@ -80,20 +97,16 @@
         return;
       }
       try {
-        if (state.sidePanel === 'blackboard') {
-          renderBlackboardPane(body);
-          return;
-        }
+		if (state.sidePanel === 'updates') {
+		  renderUpdatesPane(body);
+		  return;
+		}
 		if (state.sidePanel === 'artifacts') {
 		  renderArtifactsPane(body);
 		  return;
 		}
         if (state.sidePanel === 'plans') {
           renderPlansPane(body);
-          return;
-        }
-        if (state.sidePanel === 'inbox') {
-          renderRuntimeListPane(body, 'Inbox', state.inbox || [], renderInboxEntry);
           return;
         }
         if (state.sidePanel === 'memory') {
@@ -104,11 +117,35 @@
           renderRuntimeListPane(body, 'Pending', (state.memory || []).filter(item => item.layer === 'pending'), renderMemoryEntry);
           return;
         }
+        if (state.sidePanel === 'background') {
+          renderBackgroundActivityPane(body);
+          return;
+        }
         renderPreviewPane(body);
       } catch (err) {
         $('sidePaneTitle').textContent = 'Panel';
         body.innerHTML = '<div class="blackboard-view"><div class="blackboard-section-title">Unable to render</div><div class="blackboard-entry"><div class="blackboard-entry-summary">' + escapeHTML(err.message || String(err)) + '</div></div></div>';
       }
+    }
+    function renderUpdatesPane(body) {
+      const view = state.updatesView === 'activity' ? 'activity' : 'attention';
+      const inboxCount = (state.inbox || []).length;
+      const boardCount = (state.blackboard || []).length;
+      body.innerHTML = '<div class="updates-view">'
+        + '<div class="artifact-view-tabs updates-tabs" role="tablist" aria-label="Updates view">'
+        + '<button type="button" role="tab" aria-selected="' + (view === 'attention') + '" data-updates-view="attention" class="' + (view === 'attention' ? 'active' : '') + '">Needs attention' + (inboxCount ? ' · ' + inboxCount : '') + '</button>'
+        + '<button type="button" role="tab" aria-selected="' + (view === 'activity') + '" data-updates-view="activity" class="' + (view === 'activity' ? 'active' : '') + '">Activity' + (boardCount ? ' · ' + boardCount : '') + '</button>'
+        + '</div><div id="updatesContent" class="updates-content"></div></div>';
+      body.querySelectorAll('[data-updates-view]').forEach(button => {
+        button.onclick = () => {
+          state.updatesView = button.dataset.updatesView === 'activity' ? 'activity' : 'attention';
+          renderUpdatesPane(body);
+        };
+      });
+      const content = $('updatesContent');
+      if (view === 'activity') renderBlackboardPane(content);
+      else renderRuntimeListPane(content, 'Needs attention', state.inbox || [], renderInboxEntry);
+      $('sidePaneTitle').textContent = 'Updates';
     }
     function renderPreviewPane(body) {
       $('sidePaneTitle').textContent = state.preview.filename || 'Preview';
@@ -458,9 +495,11 @@
       const page = await api('/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID) + '/messages?limit=80') || {};
       if (!state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       state.chatMessages = Array.isArray(page.messages) ? page.messages : (Array.isArray(page) ? page : []);
+      state.modelContext = Array.isArray(page.model_context) ? page.model_context : [];
       state.chatHasMore = !!page.has_more;
       state.chatNextBeforeSeq = page.next_before_seq || (state.chatMessages[0] && state.chatMessages[0].seq) || 0;
       renderChatMessages();
+      renderActiveRunReplay();
       $('agentOutput').scrollTop = $('agentOutput').scrollHeight;
     }
     function scheduleChatRefresh() {
@@ -482,6 +521,7 @@
       if (!page || !state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       if (state.chatStreaming || state.chatLoadingHistory) return;
       const latest = Array.isArray(page.messages) ? page.messages : (Array.isArray(page) ? page : []);
+      const nextModelContext = Array.isArray(page.model_context) ? page.model_context : [];
       const wasEmpty = !(state.chatMessages || []).length;
       const byKey = new Map();
       (state.chatMessages || []).forEach(m => byKey.set(m.id || String(m.seq), m));
@@ -494,7 +534,9 @@
           changed = true;
         }
       });
-      if (!changed) return;
+      const contextChanged = JSON.stringify(state.modelContext || []) !== JSON.stringify(nextModelContext);
+      state.modelContext = nextModelContext;
+      if (!changed && !contextChanged) return;
       state.chatMessages = Array.from(byKey.values()).sort((a, b) => (a.seq || 0) - (b.seq || 0));
       if (wasEmpty) {
         state.chatHasMore = !!page.has_more;
@@ -503,6 +545,7 @@
       const box = $('agentOutput');
       const stickToBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
       renderChatMessages();
+      renderActiveRunReplay();
       if (stickToBottom) box.scrollTop = box.scrollHeight;
     }
     async function loadEarlierAgentMessages() {
@@ -518,16 +561,19 @@
       state.chatLoadingHistory = false;
       if (!page || !state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       const older = Array.isArray(page.messages) ? page.messages : [];
+      state.modelContext = Array.isArray(page.model_context) ? page.model_context : state.modelContext || [];
       const seen = new Set(state.chatMessages.map(message => message.id || String(message.seq)));
       state.chatMessages = older.filter(message => !seen.has(message.id || String(message.seq))).concat(state.chatMessages);
       state.chatHasMore = !!page.has_more;
       state.chatNextBeforeSeq = page.next_before_seq || (state.chatMessages[0] && state.chatMessages[0].seq) || 0;
       renderChatMessages();
+      renderActiveRunReplay();
       box.scrollTop = box.scrollHeight - previousHeight;
     }
     function renderChatMessages() {
       const messages = state.chatMessages || [];
       const box = $('agentOutput'); box.innerHTML = '';
+      renderContextTokenUsage();
       if (state.chatHasMore) {
         const loadMore = document.createElement('button');
         loadMore.type = 'button';

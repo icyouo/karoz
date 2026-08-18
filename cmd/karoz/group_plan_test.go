@@ -21,8 +21,8 @@ func planTestApp(t *testing.T) (*app, Project, Agent, Agent) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
 	coordinator := Agent{ID: "lead", ProjectID: project.ID, Nickname: "Lead", GroupID: "build", GroupName: "Build", GroupRole: "coordinator", GroupOrder: 1}
 	builder := Agent{ID: "builder", ProjectID: project.ID, Nickname: "Builder", GroupID: "build", GroupName: "Build", GroupRole: "builder", GroupOrder: 2}
-	a.agents[project.ID] = []Agent{{ID: "karoz", ProjectID: project.ID, Nickname: "Karoz"}, coordinator, builder}
-	a.agentRoutes[project.ID] = []AgentRoute{{ID: "karoz-build", ProjectID: project.ID, FromAgentID: "karoz", ToAgentID: coordinator.ID, Intent: "request", Enabled: true}}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{ID: "karoz", ProjectID: project.ID, Nickname: "Karoz"}, coordinator, builder}
+	replaceRoutesForTest(a, project.ID, []AgentRoute{{ID: "karoz-build", ProjectID: project.ID, FromAgentID: "karoz", ToAgentID: coordinator.ID, Intent: "request", Enabled: true}})
 	if _, err := a.upsertAgentGroup(project.ID, "build", "Build", "", coordinator.ID, []Agent{coordinator, builder}); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestGroupAllowsOnlyOneExecutionPlan(t *testing.T) {
 
 	otherLead := Agent{ID: "other-lead", ProjectID: project.ID, Nickname: "Other Lead", GroupID: "other", GroupName: "Other", GroupRole: "coordinator"}
 	otherBuilder := Agent{ID: "other-builder", ProjectID: project.ID, Nickname: "Other Builder", GroupID: "other", GroupName: "Other", GroupRole: "builder"}
-	a.agents[project.ID] = append(a.agents[project.ID], otherLead, otherBuilder)
+	a.agentDirectoryLocked().agents[project.ID] = append(a.agentDirectoryLocked().agents[project.ID], otherLead, otherBuilder)
 	if _, err := a.upsertAgentGroup(project.ID, "other", "Other", "", otherLead.ID, []Agent{otherLead, otherBuilder}); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestGroupAllowsOnlyOneExecutionPlan(t *testing.T) {
 	}
 
 	standalone := Agent{ID: "solo", ProjectID: project.ID, Nickname: "Solo"}
-	a.agents[project.ID] = append(a.agents[project.ID], standalone)
+	a.agentDirectoryLocked().agents[project.ID] = append(a.agentDirectoryLocked().agents[project.ID], standalone)
 	soloFirst := draft(standalone, "Solo first")
 	soloSecond := draft(standalone, "Solo second")
 	if _, err := a.activatePlan(project, soloFirst.ID, "user", soloFirst.Version); err != nil {
@@ -184,9 +184,9 @@ func TestAcceptedPlanStepSchedulesOwnerContinuation(t *testing.T) {
 			{ID: "step-2", Title: "Second", Status: PlanStepPending, Dependencies: []string{"step-1"}, Version: 1},
 		},
 	}
-	a.plans[project.ID] = []WorkPlan{plan}
+	replacePlansForTest(a, project.ID, []WorkPlan{plan})
 	jobs := make(chan ScheduledRun, 1)
-	a.schedulerExecutors[ScheduledRunPlanEvent] = func(_ context.Context, job ScheduledRun) error {
+	a.agentRuntimeLocked().schedulerExecutors[ScheduledRunPlanEvent] = func(_ context.Context, job ScheduledRun) error {
 		jobs <- job
 		return nil
 	}
@@ -252,9 +252,9 @@ func TestResumeActionablePlansSchedulesRecoveredOwner(t *testing.T) {
 		OwnerType: "group", OwnerGroupID: "build", OwnerAgentID: coordinator.ID, MaxConcurrency: 1, Version: 4,
 		Steps: []PlanStep{{ID: "next", Title: "Next", Status: PlanStepReady, Version: 2}},
 	}
-	a.plans[project.ID] = []WorkPlan{plan}
+	replacePlansForTest(a, project.ID, []WorkPlan{plan})
 	jobs := make(chan ScheduledRun, 1)
-	a.schedulerExecutors[ScheduledRunPlanEvent] = func(_ context.Context, job ScheduledRun) error {
+	a.agentRuntimeLocked().schedulerExecutors[ScheduledRunPlanEvent] = func(_ context.Context, job ScheduledRun) error {
 		jobs <- job
 		return nil
 	}
@@ -293,15 +293,16 @@ func TestKarozCannotOwnPlanAndGroupedWorkUsesGroupInbox(t *testing.T) {
 		t.Fatalf("direct grouped route = %s", direct)
 	}
 	routed := a.sendToGroup(project.ID, karoz.ID, "", map[string]any{"group_id": "build", "body": "implement", "subject": "Runtime"})
-	if containsToolError(routed, "") || len(a.groupInbox[project.ID]) != 1 {
-		t.Fatalf("group route = %s inbox=%+v", routed, a.groupInbox[project.ID])
+	inbox := a.collaboration.GroupInboxFor(project.ID)
+	if containsToolError(routed, "") || len(inbox) != 1 {
+		t.Fatalf("group route = %s inbox=%+v", routed, inbox)
 	}
 }
 
 func TestPlanOwnerReconcilesTerminalTasksCreatedBeforePlan(t *testing.T) {
 	a, project, coordinator, builder := planTestApp(t)
 	now := time.Now().UTC()
-	a.tasks[project.ID] = []Task{
+	a.projectTasksLocked().tasks[project.ID] = []Task{
 		{ID: "task-m0", ProjectID: project.ID, Title: "M0 data probe", Status: "done", Result: "merged and independently verified", CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-time.Hour)},
 		{ID: "task-m1", ProjectID: project.ID, Title: "M1 watchlist", Status: "completed", Result: "tests pass; final review pending", CreatedAt: now.Add(-time.Hour), UpdatedAt: now},
 	}

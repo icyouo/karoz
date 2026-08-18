@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"encoding/json"
+	monitordomain "github.com/karoz/karoz/internal/monitor"
 	"time"
 )
 
@@ -12,12 +13,13 @@ const (
 	TriggerHandoff    Trigger = "handoff"
 	TriggerTaskEvent  Trigger = "task_event"
 	TriggerPlanEvent  Trigger = "plan_event"
+	TriggerMonitor    Trigger = "monitor"
 	TriggerSystem     Trigger = "system"
 )
 
 func NormalizeTrigger(trigger Trigger) Trigger {
 	switch trigger {
-	case TriggerUserDirect, TriggerHandoff, TriggerTaskEvent, TriggerPlanEvent, TriggerSystem:
+	case TriggerUserDirect, TriggerHandoff, TriggerTaskEvent, TriggerPlanEvent, TriggerMonitor, TriggerSystem:
 		return trigger
 	default:
 		return TriggerSystem
@@ -48,17 +50,18 @@ func (state State) Active() bool {
 }
 
 type RunInput struct {
-	RunID              string  `json:"run_id,omitempty"`
-	ProjectID          string  `json:"project_id"`
-	AgentID            string  `json:"agent_id"`
-	Trigger            Trigger `json:"trigger"`
-	TurnType           string  `json:"turn_type,omitempty"`
-	SourceID           string  `json:"source_id,omitempty"`
-	MessageID          string  `json:"message_id,omitempty"`
-	Provider           string  `json:"provider,omitempty"`
-	Model              string  `json:"model,omitempty"`
-	ThinkingEffort     string  `json:"thinking_effort,omitempty"`
-	ModelConfigVersion int64   `json:"model_config_version,omitempty"`
+	RunID              string               `json:"run_id,omitempty"`
+	ProjectID          string               `json:"project_id"`
+	AgentID            string               `json:"agent_id"`
+	Trigger            Trigger              `json:"trigger"`
+	TurnType           string               `json:"turn_type,omitempty"`
+	SourceID           string               `json:"source_id,omitempty"`
+	MessageID          string               `json:"message_id,omitempty"`
+	Provider           string               `json:"provider,omitempty"`
+	Model              string               `json:"model,omitempty"`
+	ThinkingEffort     string               `json:"thinking_effort,omitempty"`
+	ModelConfigVersion int64                `json:"model_config_version,omitempty"`
+	Origin             monitordomain.Origin `json:"origin,omitempty"`
 }
 
 type Interrupt struct {
@@ -72,23 +75,24 @@ type Interrupt struct {
 }
 
 type Run struct {
-	ID                 string      `json:"id"`
-	ProjectID          string      `json:"project_id"`
-	AgentID            string      `json:"agent_id"`
-	Trigger            Trigger     `json:"trigger"`
-	TurnType           string      `json:"turn_type,omitempty"`
-	SourceID           string      `json:"source_id,omitempty"`
-	MessageID          string      `json:"message_id,omitempty"`
-	Provider           string      `json:"provider,omitempty"`
-	Model              string      `json:"model,omitempty"`
-	ThinkingEffort     string      `json:"thinking_effort,omitempty"`
-	ModelConfigVersion int64       `json:"model_config_version,omitempty"`
-	State              State       `json:"state"`
-	Error              string      `json:"error,omitempty"`
-	StartedAt          time.Time   `json:"started_at"`
-	UpdatedAt          time.Time   `json:"updated_at"`
-	EndedAt            *time.Time  `json:"ended_at,omitempty"`
-	Interrupts         []Interrupt `json:"interrupts,omitempty"`
+	ID                 string               `json:"id"`
+	ProjectID          string               `json:"project_id"`
+	AgentID            string               `json:"agent_id"`
+	Trigger            Trigger              `json:"trigger"`
+	TurnType           string               `json:"turn_type,omitempty"`
+	SourceID           string               `json:"source_id,omitempty"`
+	MessageID          string               `json:"message_id,omitempty"`
+	Provider           string               `json:"provider,omitempty"`
+	Model              string               `json:"model,omitempty"`
+	ThinkingEffort     string               `json:"thinking_effort,omitempty"`
+	ModelConfigVersion int64                `json:"model_config_version,omitempty"`
+	Origin             monitordomain.Origin `json:"origin,omitempty"`
+	State              State                `json:"state"`
+	Error              string               `json:"error,omitempty"`
+	StartedAt          time.Time            `json:"started_at"`
+	UpdatedAt          time.Time            `json:"updated_at"`
+	EndedAt            *time.Time           `json:"ended_at,omitempty"`
+	Interrupts         []Interrupt          `json:"interrupts,omitempty"`
 }
 
 type Event struct {
@@ -96,16 +100,19 @@ type Event struct {
 	ProjectID string `json:"project_id"`
 	Kind      string `json:"kind"`
 	EntityID  string `json:"entity_id"`
+	AgentID   string `json:"agent_id,omitempty"`
 	RunID     string `json:"run_id,omitempty"`
 	Trigger   string `json:"trigger,omitempty"`
 	From      string `json:"from,omitempty"`
 	To        string `json:"to,omitempty"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
 	// FromAgentID/ToAgentID carry the handoff participants for handoff_*
 	// events so clients can visualize agent-to-agent handoffs.
-	FromAgentID string    `json:"from_agent_id,omitempty"`
-	ToAgentID   string    `json:"to_agent_id,omitempty"`
-	Reason      string    `json:"reason,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	FromAgentID string               `json:"from_agent_id,omitempty"`
+	ToAgentID   string               `json:"to_agent_id,omitempty"`
+	Reason      string               `json:"reason,omitempty"`
+	Origin      monitordomain.Origin `json:"origin,omitempty"`
+	CreatedAt   time.Time            `json:"created_at"`
 }
 
 type ScheduledKind string
@@ -115,6 +122,7 @@ const (
 	ScheduledTaskEvent     ScheduledKind = "task_event"
 	ScheduledPlanEvent     ScheduledKind = "plan_event"
 	ScheduledIdleReconcile ScheduledKind = "idle_reconcile"
+	ScheduledMonitorEvent  ScheduledKind = "monitor_event"
 )
 
 type ScheduledStatus string
@@ -127,27 +135,35 @@ const (
 )
 
 type ScheduledRun struct {
-	ID               string          `json:"id"`
-	ProjectID        string          `json:"project_id"`
-	AgentID          string          `json:"agent_id"`
-	Kind             ScheduledKind   `json:"kind"`
-	Trigger          Trigger         `json:"trigger"`
-	TurnType         string          `json:"turn_type,omitempty"`
-	SourceID         string          `json:"source_id,omitempty"`
-	MessageID        string          `json:"message_id,omitempty"`
-	DedupKey         string          `json:"dedup_key,omitempty"`
-	Payload          json.RawMessage `json:"payload,omitempty"`
-	Status           ScheduledStatus `json:"status"`
-	Attempt          int             `json:"attempt"`
-	MaxAttempts      int             `json:"max_attempts"`
-	TimeoutMS        int64           `json:"timeout_ms"`
-	Error            string          `json:"error,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
-	StartedAt        *time.Time      `json:"started_at,omitempty"`
-	LastFailedAt     *time.Time      `json:"last_failed_at,omitempty"`
-	EffectsStarted   bool            `json:"effects_started,omitempty"`
-	EffectsStartedAt *time.Time      `json:"effects_started_at,omitempty"`
+	ID          string          `json:"id"`
+	ProjectID   string          `json:"project_id"`
+	AgentID     string          `json:"agent_id"`
+	Kind        ScheduledKind   `json:"kind"`
+	Trigger     Trigger         `json:"trigger"`
+	TurnType    string          `json:"turn_type,omitempty"`
+	SourceID    string          `json:"source_id,omitempty"`
+	MessageID   string          `json:"message_id,omitempty"`
+	DedupKey    string          `json:"dedup_key,omitempty"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
+	Status      ScheduledStatus `json:"status"`
+	Attempt     int             `json:"attempt"`
+	MaxAttempts int             `json:"max_attempts"`
+	// TimeoutMS is the execution deadline, measured from when the scheduler
+	// acquires the agent and begins this Run. Keep the JSON name compatible
+	// with pre-split scheduled-run snapshots.
+	TimeoutMS int64 `json:"timeout_ms"`
+	// StartWaitMS independently bounds the time spent waiting for a busy agent
+	// before Begin succeeds. Zero means the worker's bounded default for
+	// legacy snapshots.
+	StartWaitMS      int64                `json:"start_wait_ms,omitempty"`
+	Error            string               `json:"error,omitempty"`
+	CreatedAt        time.Time            `json:"created_at"`
+	UpdatedAt        time.Time            `json:"updated_at"`
+	StartedAt        *time.Time           `json:"started_at,omitempty"`
+	LastFailedAt     *time.Time           `json:"last_failed_at,omitempty"`
+	EffectsStarted   bool                 `json:"effects_started,omitempty"`
+	EffectsStartedAt *time.Time           `json:"effects_started_at,omitempty"`
+	Origin           monitordomain.Origin `json:"origin,omitempty"`
 }
 
 func (job ScheduledRun) Timeout(defaultTimeout time.Duration) time.Duration {
@@ -157,9 +173,17 @@ func (job ScheduledRun) Timeout(defaultTimeout time.Duration) time.Duration {
 	return time.Duration(job.TimeoutMS) * time.Millisecond
 }
 
+func (job ScheduledRun) StartWait(defaultTimeout time.Duration) time.Duration {
+	if job.StartWaitMS <= 0 {
+		return defaultTimeout
+	}
+	return time.Duration(job.StartWaitMS) * time.Millisecond
+}
+
 func (job ScheduledRun) RunInput() RunInput {
 	return RunInput{
 		RunID: job.ID, ProjectID: job.ProjectID, AgentID: job.AgentID, Trigger: job.Trigger,
 		TurnType: job.TurnType, SourceID: job.SourceID, MessageID: job.MessageID,
+		Origin: job.Origin,
 	}
 }

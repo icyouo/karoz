@@ -29,7 +29,7 @@ func newHandlerTestApp(t *testing.T) (*app, Project) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
 	a.modelProvider = fakeModelProvider{}
 	project := Project{ID: projectID(projectPath), Name: "demo", Path: projectPath, WorkspaceRoot: root, WorkspaceType: "main", DefaultBranch: "main"}
-	a.agents[project.ID] = []Agent{
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{
 		{ID: "karoz", ProjectID: project.ID, Name: "karoz", Nickname: "Karoz"},
 		{ID: "worker-a", ProjectID: project.ID, Name: "implementation-lead", Nickname: "Worker A"},
 		{ID: "worker-b", ProjectID: project.ID, Name: "quality-reviewer", Nickname: "Worker B"},
@@ -340,7 +340,7 @@ func TestConcurrencyHandoffQueueAndInboxListing(t *testing.T) {
 	}
 
 	// The persisted inbox reloads to the same terminal state.
-	reloaded := &app{settings: a.settings, inbox: map[string][]AgentInboxMessage{}}
+	reloaded := &app{settings: a.settings, collaboration: newCollaborationService()}
 	if err := reloaded.loadInbox(); err != nil {
 		t.Fatal(err)
 	}

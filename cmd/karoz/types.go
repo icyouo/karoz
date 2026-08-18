@@ -6,6 +6,9 @@ import (
 	agentdomain "github.com/karoz/karoz/internal/agent"
 	artifactdomain "github.com/karoz/karoz/internal/artifact"
 	collaborationdomain "github.com/karoz/karoz/internal/collaboration"
+	executiondomain "github.com/karoz/karoz/internal/execution"
+	monitordomain "github.com/karoz/karoz/internal/monitor"
+	processdomain "github.com/karoz/karoz/internal/process"
 	projectdomain "github.com/karoz/karoz/internal/project"
 	runtimedomain "github.com/karoz/karoz/internal/runtime"
 	settingsdomain "github.com/karoz/karoz/internal/settings"
@@ -16,39 +19,32 @@ import (
 )
 
 type app struct {
-	mu                    sync.Mutex
-	artifactOpsMu         sync.Mutex
-	handoffOpsMu          sync.Mutex
-	handoffReplyMu        sync.Mutex
-	schedulerPersistMu    sync.Mutex
-	settings              Settings
-	tasks                 map[string][]Task
-	agents                map[string][]Agent
-	archives              map[string][]AgentArchiveMessage
-	memories              map[string][]AgentMemoryEntry
-	blackboard            map[string][]AgentBlackboardEntry
-	artifacts             map[string][]Artifact
-	groups                map[string][]AgentGroup
-	groupInbox            map[string][]GroupInboxMessage
-	plans                 map[string][]WorkPlan
-	inbox                 map[string][]AgentInboxMessage
-	taskHooks             map[string][]TaskRuntimeHook
-	agentRoutes           map[string][]AgentRoute
-	agentMessages         map[string][]AgentMessage
-	agentSessions         map[string]AgentSessionState
-	projectAliases        map[string]string
-	agentRuns             map[string]AgentRun
-	agentRunCancels       map[string]context.CancelFunc
-	residentBashApprovals map[string]ResidentBashApproval
-	schedulerQueue        *runtimedomain.SchedulerQueue
-	schedulerExecutors    map[ScheduledRunKind]ScheduledRunExecutor
-	runtimeHooks          map[string]bool
-	runtimeWatchers       map[string]map[chan RuntimeEvent]bool
-	residentToolsOnce     sync.Once
-	residentTools         *tooldomain.Registry[ResidentToolContext]
-	modelProvider         runtimedomain.ModelProvider[CLI2APIRequest, ResidentToolContext, AgentStreamCallbacks]
-	dynamicTools          tooldomain.DynamicProvider
-	memoryAnalyzer        memoryAnalyzerFunc
+	mu               sync.Mutex
+	supervisorCtx    context.Context
+	supervisorCancel context.CancelFunc
+	processRuntimeCoordinator
+	processTerminalOutbox *processTerminalOutboxCoordinator
+	processOutputRuntime  *processOutputCoordinator
+	monitorRuntimeCoordinator
+	settings             Settings
+	projectTasks         *projectTaskCoordinator
+	agentDirectory       *agentDirectory
+	memoryStore          *memoryStore
+	artifactCatalog      *artifactCatalog
+	conversation         *conversationService
+	collaboration        *collaborationService
+	projectRegistry      *projectRegistry
+	agentRuntime         *agentRuntimeCoordinator
+	checkpointTimeout    time.Duration
+	checkpointRetryDelay time.Duration
+	residentTools        *tooldomain.Registry[ResidentToolContext]
+	modelProvider        runtimedomain.ModelProvider[CLI2APIRequest, ResidentToolContext, AgentStreamCallbacks]
+	dynamicTools         tooldomain.DynamicProvider
+	commandRunner        executiondomain.Runner
+	streamRunner         executiondomain.StreamRunner
+	sandboxEnforcer      executiondomain.SandboxEnforcer
+	agentService         *agentdomain.Service
+	taskService          *taskdomain.Service
 }
 
 type Settings = settingsdomain.Settings
@@ -61,11 +57,65 @@ type Agent = agentdomain.Agent
 type AgentTemplate = agentdomain.AgentTemplate
 
 type AgentMessage = agentdomain.AgentMessage
+type AgentTranscriptItem = agentdomain.AgentTranscriptItem
+type AgentContextMessage = agentdomain.AgentContextMessage
 type AgentMessagesPage = agentdomain.AgentMessagesPage
 type AgentArchiveMessage = agentdomain.AgentArchiveMessage
 type AgentMemoryEntry = agentdomain.AgentMemoryEntry
 
 type AgentBlackboardEntry = collaborationdomain.BlackboardEntry
+type Monitor = monitordomain.Monitor
+
+type monitorProbeReservation struct {
+	ID              string    `json:"id"`
+	ProjectID       string    `json:"project_id"`
+	AgentID         string    `json:"agent_id"`
+	OwnerCreatedAt  time.Time `json:"owner_created_at"`
+	MonitorID       string    `json:"monitor_id"`
+	TriggerRevision int       `json:"trigger_revision"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+type monitorProbeChallenge struct {
+	ID                string    `json:"id"`
+	ReservationID     string    `json:"reservation_id"`
+	OperatorSessionID string    `json:"operator_session_id"`
+	ApprovalRunID     string    `json:"approval_run_id,omitempty"`
+	ChoiceRequestID   string    `json:"choice_request_id,omitempty"`
+	ProjectID         string    `json:"project_id"`
+	AgentID           string    `json:"agent_id"`
+	MonitorID         string    `json:"monitor_id"`
+	TriggerRevision   int       `json:"trigger_revision"`
+	CanonicalWorkdir  string    `json:"canonical_workdir"`
+	Language          string    `json:"language"`
+	NormalizedSource  []byte    `json:"normalized_source"`
+	SourceSHA256      string    `json:"source_sha256"`
+	IntervalMS        int64     `json:"interval_ms"`
+	TimeoutMS         int64     `json:"timeout_ms"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	State             string    `json:"state"`
+	StagingReceiptID  string    `json:"staging_receipt_id,omitempty"`
+	StagingPath       string    `json:"staging_path,omitempty"`
+	ConsumedReceiptID string    `json:"consumed_receipt_id,omitempty"`
+}
+
+type monitorProbeOperatorSession struct {
+	ID           string    `json:"id"`
+	ProjectID    string    `json:"project_id"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastActiveAt time.Time `json:"last_active_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+type processOutputGapDelta struct {
+	ProjectID string
+	ProcessID string
+	Recent    []processdomain.SeqRange
+	LostLines uint64
+	GapCount  uint64
+	OldestSeq uint64
+	NewestSeq uint64
+}
 type RuntimeEvent = runtimedomain.Event
 type AgentInboxMessage = collaborationdomain.Handoff
 
@@ -160,12 +210,14 @@ type AgentUpdateRequest struct {
 }
 
 type CLI2APIRequest struct {
-	Provider       string `json:"provider"`
-	Model          string `json:"model,omitempty"`
-	ThinkingEffort string `json:"thinking_effort,omitempty"`
-	Prompt         string `json:"prompt"`
-	Workdir        string `json:"workdir,omitempty"`
-	Mode           string `json:"mode,omitempty"`
+	Provider       string                `json:"provider"`
+	Model          string                `json:"model,omitempty"`
+	ThinkingEffort string                `json:"thinking_effort,omitempty"`
+	Prompt         string                `json:"prompt"`
+	Workdir        string                `json:"workdir,omitempty"`
+	Mode           string                `json:"mode,omitempty"`
+	NoTools        bool                  `json:"-"`
+	Transcript     []AgentTranscriptItem `json:"-"`
 }
 
 type CLI2APIResponse struct {
@@ -175,10 +227,11 @@ type CLI2APIResponse struct {
 }
 
 type ResidentModelDescriptor struct {
-	Provider     string   `json:"provider"`
-	ID           string   `json:"id"`
-	DisplayName  string   `json:"display_name"`
-	EffortLevels []string `json:"effort_levels"`
+	Provider      string   `json:"provider"`
+	ID            string   `json:"id"`
+	DisplayName   string   `json:"display_name"`
+	EffortLevels  []string `json:"effort_levels"`
+	ContextWindow int64    `json:"context_window"`
 }
 
 type ResidentProviderDescriptor struct {
@@ -213,22 +266,23 @@ type BashToolResult struct {
 }
 
 type ResidentBashApproval struct {
-	ID        string
-	ProjectID string
-	AgentID   string
-	RunID     string
-	Command   string
-	State     string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	ID             string
+	RequestRunID   string
+	RunID          string
+	Subject        residentBashSubject
+	State          string
+	OwnerCreatedAt time.Time
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
 }
 
 type AgentStreamCallbacks struct {
-	OnDelta        func(string)
-	OnToolStart    func(codexToolCall)
-	OnToolResult   func(codexToolCall, string, bool)
-	OnInterrupt    func([]AgentInterrupt)
-	PollInterrupts func() []AgentInterrupt
+	OnDelta           func(string)
+	OnToolStart       func(codexToolCall)
+	OnToolResult      func(codexToolCall, string, bool)
+	OnBudgetExhausted func(map[string]any)
+	OnInterrupt       func([]AgentInterrupt)
+	PollInterrupts    func() []AgentInterrupt
 }
 
 type AgentInterrupt = runtimedomain.Interrupt
@@ -240,6 +294,8 @@ type TaskCreateRequest struct {
 	Title        string   `json:"title"`
 	Description  string   `json:"description"`
 	Goal         string   `json:"goal"`
+	MaxRuntimeMS *int64   `json:"max_runtime_ms,omitempty"`
+	SandboxMode  string   `json:"sandbox_mode,omitempty"`
 	ArtifactIDs  []string `json:"artifact_ids,omitempty"`
 	OwnerAgentID string   `json:"owner_agent_id,omitempty"`
 	PlanID       string   `json:"plan_id,omitempty"`

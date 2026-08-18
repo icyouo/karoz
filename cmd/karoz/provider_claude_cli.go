@@ -2,17 +2,19 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	executiondomain "github.com/karoz/karoz/internal/execution"
 )
 
 type claudeBridgeEvent struct {
@@ -23,31 +25,50 @@ type claudeBridgeEvent struct {
 }
 
 func claudeCLIAuthenticated(ctx context.Context) bool {
+	return claudeCLIAuthenticatedWithRunner(ctx, executiondomain.NewHostRunner())
+}
+
+func claudeCLIAuthenticatedWithRunner(ctx context.Context, runner executiondomain.Runner) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("KAROZ_CLAUDE_CLI_AUTH"))) {
 	case "1", "true", "available":
 		return true
 	case "0", "false", "disabled", "unavailable":
 		return false
 	}
-	if _, err := exec.LookPath("claude"); err != nil {
-		return false
+	if runner == nil {
+		runner = executiondomain.NewHostRunner()
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(probeCtx, "claude", "auth", "status", "--json").Output()
+	result, err := runner.Run(probeCtx, commandRequest("", "claude", "auth", "status", "--json"))
 	if err != nil {
 		return false
 	}
 	var status struct {
 		LoggedIn bool `json:"loggedIn"`
 	}
-	return json.Unmarshal(output, &status) == nil && status.LoggedIn
+	return json.Unmarshal([]byte(result.Output()), &status) == nil && status.LoggedIn
 }
 
-func invokeClaudeCLIStream(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
+func invokeClaudeCLIStreamWithBudgetAndRunner(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, runner executiondomain.StreamRunner, executeTool residentToolExecutor) error {
+	if runner == nil {
+		runner = executiondomain.NewHostStreamRunner()
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	started := time.Now()
+	turnCtx, cancelTurn := context.WithTimeout(ctx, budget.TotalDuration)
+	defer cancelTurn()
+	toolWindow := budget.ToolPhaseDuration
+	if maximum := budget.TotalDuration - budget.FinalResponseReserve; toolWindow > maximum {
+		toolWindow = maximum
+	}
+	toolCtx, cancelTools := context.WithTimeout(turnCtx, toolWindow)
+	defer cancelTools()
 	currentPrompt := prompt
-	for round := 0; round < 8; round++ {
-		partial, interrupts, err := streamClaudeCLIOnce(ctx, workdir, currentPrompt, model, effort, tools, callbacks, executeTool)
+	for round := 0; round < budget.MaxModelRounds; round++ {
+		partial, interrupts, err := streamClaudeCLIOnceWithRunner(turnCtx, toolCtx, started, budget, workdir, currentPrompt, model, effort, tools, callbacks, runner, executeTool)
 		if err != nil {
 			return err
 		}
@@ -59,8 +80,30 @@ func invokeClaudeCLIStream(ctx context.Context, workdir, prompt, model, effort s
 	return errors.New("Claude interrupt restart limit reached")
 }
 
-func streamClaudeCLIOnce(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) (string, []AgentInterrupt, error) {
-	bridge, err := startClaudeToolBridge(tools, executeTool)
+func invokeClaudeCLINoToolsOnceWithRunner(ctx context.Context, workdir, prompt, model, effort string, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, runner executiondomain.StreamRunner) error {
+	if runner == nil {
+		runner = executiondomain.NewHostStreamRunner()
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, interrupts, err := streamClaudeCLIOnceWithRunner(ctx, ctx, time.Now(), budget, workdir, prompt, model, effort, nil, callbacks, runner, func(context.Context, codexToolCall) (string, error) {
+		return "", errors.New("tools are disabled for this request")
+	})
+	if err != nil {
+		return err
+	}
+	if len(interrupts) > 0 {
+		return errors.New("interrupts are disabled for no-tools model requests")
+	}
+	return nil
+}
+
+func streamClaudeCLIOnceWithRunner(ctx, toolCtx context.Context, started time.Time, budget ResidentTurnBudget, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, runner executiondomain.StreamRunner, executeTool residentToolExecutor) (string, []AgentInterrupt, error) {
+	if runner == nil {
+		runner = executiondomain.NewHostStreamRunner()
+	}
+	bridge, err := startClaudeToolBridge(tools, callbacks, budget, started, ctx, toolCtx, executeTool)
 	if err != nil {
 		return "", nil, err
 	}
@@ -73,21 +116,16 @@ func streamClaudeCLIOnce(ctx context.Context, workdir, prompt, model, effort str
 	if len(bridge.AllowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(bridge.AllowedTools, ","))
 	}
-	command := exec.CommandContext(stepCtx, "claude", args...)
-	command.Dir = workdir
-	stdout, err := command.StdoutPipe()
+	stream, err := runner.Start(stepCtx, executiondomain.StreamCommandRequest{
+		Name: "claude", Args: args, Dir: workdir, Configure: configureResidentCommand,
+	})
 	if err != nil {
-		return "", nil, err
-	}
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	if err := command.Start(); err != nil {
 		return "", nil, err
 	}
 	lines := make(chan string, 32)
 	scanErr := make(chan error, 1)
 	go func() {
-		scanner := bufio.NewScanner(stdout)
+		scanner := bufio.NewScanner(stream.Stdout)
 		scanner.Buffer(make([]byte, 64*1024), 8<<20)
 		for scanner.Scan() {
 			lines <- scanner.Text()
@@ -95,8 +133,14 @@ func streamClaudeCLIOnce(ctx context.Context, workdir, prompt, model, effort str
 		close(lines)
 		scanErr <- scanner.Err()
 	}()
+	stderrDone := make(chan string, 1)
+	go func() {
+		data, _ := io.ReadAll(stream.Stderr)
+		_ = stream.Stderr.Close()
+		stderrDone <- string(data)
+	}()
 	waitErr := make(chan error, 1)
-	go func() { waitErr <- command.Wait() }()
+	go func() { waitErr <- stream.Cmd.Wait() }()
 	ticker := time.NewTicker(40 * time.Millisecond)
 	defer ticker.Stop()
 	var output strings.Builder
@@ -145,6 +189,7 @@ func streamClaudeCLIOnce(ctx context.Context, workdir, prompt, model, effort str
 		return output.String(), nil, err
 	}
 	commandErr := <-waitErr
+	stderrText := <-stderrDone
 	for {
 		select {
 		case event := <-bridge.Events:
@@ -169,7 +214,7 @@ drained:
 		return output.String(), nil, errors.New(resultError)
 	}
 	if commandErr != nil {
-		return output.String(), nil, fmt.Errorf("claude CLI failed: %w: %s", commandErr, strings.TrimSpace(stderr.String()))
+		return output.String(), nil, fmt.Errorf("claude CLI failed: %w: %s", commandErr, strings.TrimSpace(stderrText))
 	}
 	return output.String(), nil, nil
 }
@@ -200,14 +245,22 @@ func claudeCLILineDelta(line string) (string, string) {
 }
 
 type claudeToolBridge struct {
-	Config       string
-	AllowedTools []string
-	Events       chan claudeBridgeEvent
-	listener     net.Listener
-	tempDir      string
+	Config         string
+	AllowedTools   []string
+	Events         chan claudeBridgeEvent
+	listener       net.Listener
+	tempDir        string
+	callbacks      AgentStreamCallbacks
+	budget         ResidentTurnBudget
+	started        time.Time
+	turnCtx        context.Context
+	toolCtx        context.Context
+	mu             sync.Mutex
+	toolCalls      int
+	reportedBudget bool
 }
 
-func startClaudeToolBridge(tools []map[string]any, executeTool func(codexToolCall) (string, error)) (*claudeToolBridge, error) {
+func startClaudeToolBridge(tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, started time.Time, turnCtx, toolCtx context.Context, executeTool residentToolExecutor) (*claudeToolBridge, error) {
 	tempDir, err := os.MkdirTemp("", "karoz-claude-bridge-")
 	if err != nil {
 		return nil, err
@@ -238,7 +291,10 @@ func startClaudeToolBridge(tools []map[string]any, executeTool func(codexToolCal
 		return nil, err
 	}
 	config, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"karoz": map[string]any{"type": "stdio", "command": executable, "args": []string{"mcp-bridge", "--socket", socketPath, "--token", token, "--specs", specsPath}}}})
-	bridge := &claudeToolBridge{Config: string(config), Events: make(chan claudeBridgeEvent, 128), listener: listener, tempDir: tempDir}
+	bridge := &claudeToolBridge{
+		Config: string(config), Events: make(chan claudeBridgeEvent, 128), listener: listener, tempDir: tempDir,
+		callbacks: callbacks, budget: budget, started: started, turnCtx: turnCtx, toolCtx: toolCtx,
+	}
 	for _, spec := range specs {
 		if name, _ := spec["name"].(string); name != "" {
 			bridge.AllowedTools = append(bridge.AllowedTools, "mcp__karoz__"+name)
@@ -248,7 +304,7 @@ func startClaudeToolBridge(tools []map[string]any, executeTool func(codexToolCal
 	return bridge, nil
 }
 
-func (bridge *claudeToolBridge) serve(token string, executeTool func(codexToolCall) (string, error)) {
+func (bridge *claudeToolBridge) serve(token string, executeTool residentToolExecutor) {
 	for {
 		connection, err := bridge.listener.Accept()
 		if err != nil {
@@ -263,27 +319,58 @@ func (bridge *claudeToolBridge) serve(token string, executeTool func(codexToolCa
 			}
 			call := codexToolCall{ID: randomID(), CallID: randomID(), Name: request.Name, Arguments: request.Arguments}
 			bridge.Events <- claudeBridgeEvent{Kind: "start", Call: call}
-			result, callErr := executeTool(call)
-			success := callErr == nil && toolResultSuccess(result)
-			if callErr != nil {
-				result = `{"error":"tool_failed","message":` + fmt.Sprintf("%q", callErr.Error()) + `}`
-			}
-			result = limitToolResultForModel(result)
+			result, success := bridge.executeToolCall(call, executeTool)
 			bridge.Events <- claudeBridgeEvent{Kind: "result", Call: call, Result: result, Success: success}
 			response := claudeBridgeResponse{Result: result}
 			if !success {
-				response.Error = firstNonEmpty(errorString(callErr), "tool returned an error")
+				response.Error = "tool returned an error"
 			}
 			_ = json.NewEncoder(connection).Encode(response)
 		}()
 	}
 }
 
-func errorString(err error) string {
-	if err == nil {
-		return ""
+func (bridge *claudeToolBridge) executeToolCall(call codexToolCall, executeTool residentToolExecutor) (string, bool) {
+	bridge.mu.Lock()
+	if bridge.toolCalls >= bridge.budget.MaxToolRounds {
+		payload := residentRoundBudgetExhaustion("tool_rounds", bridge.started, bridge.budget.MaxToolRounds)
+		bridge.reportBudgetLocked(payload)
+		bridge.mu.Unlock()
+		return toolJSON(payload), false
 	}
-	return err.Error()
+	bridge.toolCalls++
+	bridge.mu.Unlock()
+
+	result, callErr := executeTool(bridge.toolCtx, call)
+	success := callErr == nil && toolResultSuccess(result)
+	if callErr != nil {
+		if errors.Is(callErr, context.DeadlineExceeded) && bridge.turnCtx.Err() == nil && bridge.toolCtx.Err() != nil {
+			payload := residentTimeBudgetExhaustion("tool", bridge.started, bridge.toolBudgetWindow())
+			bridge.mu.Lock()
+			bridge.reportBudgetLocked(payload)
+			bridge.mu.Unlock()
+			result = toolJSON(payload)
+		} else {
+			result = `{"error":"tool_failed","message":` + fmt.Sprintf("%q", callErr.Error()) + `}`
+		}
+	}
+	return limitToolResultForBudget(result, bridge.budget.MaxToolOutputChars), success
+}
+
+func (bridge *claudeToolBridge) toolBudgetWindow() time.Duration {
+	window := bridge.budget.ToolPhaseDuration
+	if maximum := bridge.budget.TotalDuration - bridge.budget.FinalResponseReserve; window > maximum {
+		return maximum
+	}
+	return window
+}
+
+func (bridge *claudeToolBridge) reportBudgetLocked(payload map[string]any) {
+	if bridge.reportedBudget {
+		return
+	}
+	bridge.reportedBudget = true
+	reportResidentBudgetExhaustion(bridge.callbacks, payload)
 }
 
 func (bridge *claudeToolBridge) Close() {

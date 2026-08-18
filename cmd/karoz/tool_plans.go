@@ -104,7 +104,9 @@ func (a *app) listTasksFromResidentTool(projectID string, args map[string]any) s
 			"id": task.ID, "title": task.Title, "status": task.Status, "type": task.Type,
 			"owner_agent_id": task.OwnerAgentID, "plan_id": task.PlanID, "plan_step_id": task.PlanStepID,
 			"result": limitString(task.Result, 1200), "failure_summary": limitString(task.FailureSummary, 600),
-			"commit_sha": task.CommitSHA, "merged_at": task.MergedAt, "updated_at": task.UpdatedAt,
+			"base_branch": task.BaseBranch, "base_commit": task.BaseCommit, "commit_sha": task.CommitSHA,
+			"merge_blocked_reason": task.MergeBlockedReason, "merge_blocked_detail": limitString(task.MergeBlockedDetail, 600),
+			"merge_attempts": task.MergeAttempts, "merged_at": task.MergedAt, "updated_at": task.UpdatedAt,
 		})
 		if len(out) >= limit {
 			break

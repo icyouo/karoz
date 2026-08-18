@@ -1,4 +1,5 @@
     $('saveSettings').onclick = async () => {
+      if (workspaceSettingsLocked()) return;
       const payload = {
         projects_root: $('projectsRoot').value,
         extra_projects_roots: settingsExtraRoots()
@@ -13,6 +14,7 @@
       notify('Workspace settings saved.', 'success');
     };
     $('addExtraWorkspace').onclick = () => {
+      if (workspaceSettingsLocked()) return;
       const input = $('extraWorkspaceInput');
       const value = input.value.trim();
       if (!value) return;
@@ -25,6 +27,7 @@
       renderExtraWorkspaces();
     };
     $('chooseProjectsRoot').onclick = async () => {
+      if (workspaceSettingsLocked()) return;
       try {
         const path = await chooseFolder('Choose the main Karoz workspace');
         if (path) $('projectsRoot').value = path;
@@ -33,6 +36,7 @@
       }
     };
     $('chooseExtraWorkspace').onclick = async () => {
+      if (workspaceSettingsLocked()) return;
       try {
         const path = await chooseFolder('Choose an extra workspace');
         if (path) $('extraWorkspaceInput').value = path;
@@ -65,6 +69,7 @@
     };
     $('openSettings').onclick = () => {
       renderExtraWorkspaces();
+      syncWorkspaceSettingsLock();
       openModal('settingsModal');
     };
     $('agentRuntimeTools').onclick = async (event) => {
@@ -73,7 +78,7 @@
       await openRuntimePanel(button.dataset.sidePanel);
     };
     $('togglePreviewPane').onclick = async () => {
-      if (state.sidePanel === 'preview') {
+      if (state.sidePanel) {
         closeSidePane();
         return;
       }
@@ -261,4 +266,10 @@
       await selectProject(project);
       notify('Project ready.', 'success');
     };
-    $('sendAgent').onclick = () => sendAgentMessage();
+    $('sendAgent').onclick = () => {
+      if (currentAgentWorking() || currentAgentStopping()) {
+        void stopActiveAgentRun();
+        return;
+      }
+      void sendAgentMessage();
+    };

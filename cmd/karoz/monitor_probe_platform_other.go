@@ -1,0 +1,41 @@
+//go:build !darwin && !linux && !freebsd && !netbsd && !openbsd && !dragonfly && !windows
+
+package main
+
+import (
+	"context"
+	"time"
+
+	executiondomain "github.com/karoz/karoz/internal/execution"
+	monitordomain "github.com/karoz/karoz/internal/monitor"
+)
+
+const scriptProbeSupported = false
+
+func readMonitorProbeSnapshot(
+	*secureRuntimeStore,
+	string,
+) (monitorProbeSnapshot, error) {
+	return monitorProbeSnapshot{}, errScriptProbeUnsupported
+}
+
+func executeMonitorProbe(
+	context.Context,
+	string,
+	string,
+	[]byte,
+	time.Duration,
+) (monitordomain.ProbeExecution, string, error) {
+	return monitordomain.ProbeExecution{}, "", errScriptProbeUnsupported
+}
+
+func executeMonitorProbeWithRunner(
+	executiondomain.Runner,
+	context.Context,
+	string,
+	string,
+	[]byte,
+	time.Duration,
+) (monitordomain.ProbeExecution, string, error) {
+	return monitordomain.ProbeExecution{}, "", errScriptProbeUnsupported
+}

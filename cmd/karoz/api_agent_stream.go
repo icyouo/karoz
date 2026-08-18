@@ -72,6 +72,10 @@ func (a *app) streamAgentMessage(w http.ResponseWriter, r *http.Request, project
 			}
 			flusher.Flush()
 		},
+		OnBudgetExhausted: func(payload map[string]any) {
+			writeSSE(w, "budget_exhausted", payload)
+			flusher.Flush()
+		},
 		OnInterrupt: func(items []AgentInterrupt) {
 			writeSSE(w, "interrupt", map[string]any{"interrupts": items})
 			flusher.Flush()

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -9,12 +10,23 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "process-guard" {
+		os.Exit(runBackgroundProcessGuard(os.Args[2:]))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp-bridge" {
 		if err := runClaudeMCPBridge(os.Args[2:], os.Stdin, os.Stdout); err != nil {
 			log.Printf("mcp bridge: %v", err)
 			os.Exit(1)
 		}
 		return
+	}
+	addr := getenv("KAROZ_ADDR", "127.0.0.1:8088")
+	allowNonLoopbackListen := envFlagEnabled("KAROZ_ALLOW_NON_LOOPBACK_LISTEN")
+	// Validate before opening persistence files, recovering tasks, or making
+	// project directories. A rejected network binding must be a true failed
+	// startup, not a partially initialized Studio.
+	if err := validateStudioListenAddr(addr, allowNonLoopbackListen); err != nil {
+		log.Fatalf("invalid KAROZ_ADDR: %v", err)
 	}
 	projectsRootFromEnv := strings.TrimSpace(os.Getenv("KAROZ_PROJECTS_ROOT")) != ""
 	settings := Settings{
@@ -52,34 +64,52 @@ func main() {
 	a.resumeScheduledRuns()
 	a.resumeActionablePlans()
 
-	addr := getenv("KAROZ_ADDR", "127.0.0.1:8088")
-	warnIfNonLoopbackAddr(addr)
-	log.Printf("karoz listening on %s projects_root=%s data_dir=%s", addr, a.settings.ProjectsRoot, a.settings.DataDir)
-	if err := http.ListenAndServe(addr, withLogging(withRecovery(a.httpHandler()))); err != nil {
-		log.Fatal(err)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: withLogging(withRecovery(a.httpHandler()))}
+	signals, stopSignals := applicationSignals()
+	log.Printf("karoz listening on %s projects_root=%s data_dir=%s", listener.Addr(), a.settings.ProjectsRoot, a.settings.DataDir)
+	err = serveApplication(a, server, listener, signals, applicationShutdownTimeout)
+	stopSignals()
+	if err != nil {
+		log.Fatalf("shutdown: %v", err)
 	}
 }
 
-// warnIfNonLoopbackAddr logs a prominent warning when Karoz is configured to
-// listen on anything other than a loopback address. Karoz has no HTTP
-// authentication, so it must never be reachable from a LAN or public network.
-func warnIfNonLoopbackAddr(addr string) {
-	host, _, err := net.SplitHostPort(addr)
+func envFlagEnabled(name string) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
+// validateStudioListenAddr keeps a host-run unauthenticated Studio private to
+// the local machine. Containers must listen on their network interface for a
+// loopback-only published port to reach them, so Compose explicitly permits
+// only wildcard addresses; concrete non-loopback addresses stay rejected even
+// when the exception is enabled.
+func validateStudioListenAddr(addr string, allowNonLoopbackListen bool) error {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
 	if err != nil {
-		host = addr
+		return fmt.Errorf("invalid listen address %q: %w", addr, err)
 	}
 	host = strings.Trim(strings.TrimSpace(host), "[]")
-	if host == "" || strings.EqualFold(host, "localhost") {
-		return
+	if strings.EqualFold(host, "localhost") {
+		return nil
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return
+		return nil
 	}
-	log.Printf("\n"+
-		"==============================================================\n"+
-		" WARNING: Karoz is listening on a non-loopback address (%s).\n"+
-		" Karoz has NO authentication: anyone who can reach this port\n"+
-		" can drive agents and execute commands on this machine.\n"+
-		" Do NOT expose Karoz to a LAN or public network.\n"+
-		"==============================================================", addr)
+	if allowNonLoopbackListen {
+		if host == "" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+			return nil
+		}
+	}
+	if host == "" || (net.ParseIP(host) != nil && net.ParseIP(host).IsUnspecified()) {
+		return fmt.Errorf("%q is a wildcard address; set KAROZ_ALLOW_NON_LOOPBACK_LISTEN=1 only with an explicitly loopback-published container port", addr)
+	}
+	return fmt.Errorf("%q is not localhost or a loopback IP", addr)
 }

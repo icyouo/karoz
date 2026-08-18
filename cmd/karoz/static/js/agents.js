@@ -10,6 +10,7 @@
       await loadAgentMessages();
       if (!state.project || state.project.id !== projectID) return;
       await loadResidentRuntimeState();
+      requestActiveRunSync();
     }
     async function refreshAgentStates() {
       if (!state.project) return;
@@ -20,8 +21,12 @@
       state.agent = agents.find(agent => agent.id === previousId) || state.agent || agents[0] || null;
       renderAgents();
       renderRuntimeStrip();
-      // Backstop: SSE events can be missed or dropped; while the open
-      // conversation's agent is working, keep its messages syncing.
+      // A scheduled Run can begin after the runtime snapshot was produced,
+      // leaving the agent list temporarily idle. Probe the Run endpoint
+      // independently so a refresh still attaches to its replay stream.
+      if (state.agent && !state.chatStreaming && state.view === 'agent') requestActiveRunSync();
+      // Backstop: SSE events can be missed or dropped; a visibly working
+      // conversation also needs a persisted-history refresh.
       if (state.agent && agentWorking(state.agent) && !state.chatStreaming && state.view === 'agent') scheduleChatRefresh();
     }
     function syncAgentPolling() {
@@ -37,6 +42,10 @@
 		clearTimeout(runtimeStateRefreshTimer);
 		runtimeStateRefreshTimer = null;
 	  }
+      if (backgroundActivityRefreshTimer) {
+        clearTimeout(backgroundActivityRefreshTimer);
+        backgroundActivityRefreshTimer = null;
+      }
       if (agentPollTimer) {
         clearInterval(agentPollTimer);
         agentPollTimer = null;
@@ -45,7 +54,98 @@
         runtimeEvents.close();
         runtimeEvents = null;
       }
+      if (agentRunEvents) {
+        agentRunEvents.close();
+        agentRunEvents = null;
+      }
+      agentRunEventsKey = '';
       runtimeEventsProjectID = '';
+      agentRunSyncQueued = false;
+    }
+    function requestActiveRunSync() {
+      agentRunSyncQueued = true;
+      if (agentRunSyncInFlight) return;
+      agentRunSyncInFlight = true;
+      void (async () => {
+        try {
+          while (agentRunSyncQueued) {
+            agentRunSyncQueued = false;
+            try { await syncActiveRunEvents(); } catch {}
+          }
+        } finally {
+          agentRunSyncInFlight = false;
+          // A runtime event can arrive while the final probe resolves.
+          if (agentRunSyncQueued) requestActiveRunSync();
+        }
+      })();
+    }
+    async function syncActiveRunEvents() {
+      if (!state.project || !state.agent || state.chatStreaming || !window.EventSource) return;
+      const projectID = state.project.id;
+      const agentID = currentAgentID();
+      let status;
+      try {
+        status = await api('/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID) + '/run');
+      } catch {
+        return;
+      }
+      if (!state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
+      const run = status && status.active && status.run;
+      if (!run || !run.id) {
+        setLocalAgentWorking(agentID, false);
+        if (state.agent && state.agent.id === agentID) {
+          if (state.agent.state === 'working') state.agent.state = 'idle';
+          if (state.agent.status_message === 'working') state.agent.status_message = 'ready';
+        }
+        if (agentRunEventsKey.startsWith(projectID + ':' + agentID + ':')) {
+          agentRunEvents?.close();
+          agentRunEvents = null;
+          agentRunEventsKey = '';
+        }
+        if (state.activeRunAgentID === agentID) state.activeRunID = '';
+        renderAgentWorkingState();
+        return;
+      }
+      setLocalAgentWorking(agentID, true);
+      renderAgentWorkingState();
+      const key = projectID + ':' + agentID + ':' + run.id;
+      if (agentRunEventsKey === key && agentRunEvents) return;
+      if (agentRunEvents) agentRunEvents.close();
+      if (state.activeRunID !== run.id || state.activeRunAgentID !== agentID) {
+        state.activeRunID = run.id;
+        state.activeRunAgentID = agentID;
+        state.lastRunSeq = 0;
+        clearActiveRunReplay();
+      }
+      agentRunEventsKey = key;
+      agentRunEvents = new EventSource('/api/projects/' + projectID + '/agents/' + encodeURIComponent(agentID) + '/runs/' + encodeURIComponent(run.id) + '/events?after=' + encodeURIComponent(state.lastRunSeq));
+      const replay = event => {
+        try {
+          dispatchAgentSSE('event: ' + event.type + '\\ndata: ' + event.data, {
+            onDelta: appendActiveRunReplayDelta,
+            onToolStart: appendActiveRunReplayToolStart,
+            onToolResult: appendActiveRunReplayToolResult,
+            onPreview: scheduleChatRefresh,
+            onInterrupt: scheduleChatRefresh,
+            onReset: () => { clearActiveRunReplay(run.id); clearCurrentContextTurn(); },
+            onDone: async () => { agentRunEvents?.close(); agentRunEvents = null; agentRunEventsKey = ''; await refreshActiveAgentChat(); clearActiveRunReplay(run.id); clearCurrentContextTurn(); await refreshAgentStates(); },
+            onCancelled: async () => { agentRunEvents?.close(); agentRunEvents = null; agentRunEventsKey = ''; await refreshActiveAgentChat(); clearActiveRunReplay(run.id); clearCurrentContextTurn(); await refreshAgentStates(); },
+            onError: async () => { agentRunEvents?.close(); agentRunEvents = null; agentRunEventsKey = ''; await refreshActiveAgentChat(); clearActiveRunReplay(run.id); clearCurrentContextTurn(); await refreshAgentStates(); },
+          });
+        } catch {}
+      };
+      ['meta', 'delta', 'tool_start', 'tool_result', 'preview', 'interrupt', 'done', 'cancelled', 'error', 'reset'].forEach(type => agentRunEvents.addEventListener(type, replay));
+      agentRunEvents.onerror = () => {
+        if (agentRunEventsKey !== key) return;
+        agentRunEvents?.close();
+        agentRunEvents = null;
+        setTimeout(() => {
+          if (state.project && state.project.id === projectID && currentAgentID() === agentID && agentRunEventsKey === key) {
+            agentRunEventsKey = '';
+            requestActiveRunSync();
+          }
+        }, 1000);
+      };
     }
     function syncRuntimeEvents() {
       if (runtimeEvents) {
@@ -69,15 +169,26 @@
         }
       };
       runtimeEvents.addEventListener('snapshot', event => {
-        try { applyPayload(JSON.parse(event.data)); scheduleChatRefresh(); } catch {}
+        try {
+          applyPayload(JSON.parse(event.data));
+          // Do not gate this on agentWorking(): scheduled Runs may not yet
+          // be reflected in the agents snapshot.
+          requestActiveRunSync();
+          scheduleChatRefresh();
+          scheduleBackgroundActivityRefresh();
+        } catch {}
       });
       runtimeEvents.addEventListener('runtime', event => {
 		try {
 		  const payload = JSON.parse(event.data);
 		  applyPayload(payload);
+		  // Runtime events are the prompt notification for Runs that start
+		  // after the page loaded, including scheduled jobs with stale state.
+		  requestActiveRunSync();
 		  if (payload && payload.event) maybeAnimateHandoff(payload.event);
 		  clearTimeout(runtimeStateRefreshTimer);
 		  runtimeStateRefreshTimer = setTimeout(() => loadResidentRuntimeState(), 120);
+		  scheduleBackgroundActivityRefresh();
 		  scheduleChatRefresh();
 		} catch {}
       });
@@ -100,7 +211,10 @@
     }
     function renderAgents() {
       const box = $('agentList'); box.innerHTML = '';
-      if (!state.project) return;
+      if (!state.project) {
+        renderAgentWorkingState();
+        return;
+      }
       state.agents.forEach(agent => {
         const b = document.createElement('button');
         b.className = 'nav-item' + (state.agent && state.agent.id === agent.id ? ' active' : '');
@@ -112,6 +226,7 @@
         b.onclick = () => selectAgent(agent, { push: true });
         box.appendChild(b);
       });
+      renderAgentWorkingState();
     }
     // Handoff animation: a dot travels from the source agent's row to the
     // target's in the sidebar, and both rows pulse. Deduped per handoff
@@ -156,6 +271,15 @@
       if (!state.project || !agent) return;
       const projectID = state.project.id;
       const agentID = agent.id;
+      if (state.activeRunAgentID !== agentID) {
+        if (agentRunEvents) agentRunEvents.close();
+        agentRunEvents = null;
+        agentRunEventsKey = '';
+        state.activeRunID = '';
+        state.activeRunAgentID = agentID;
+        state.lastRunSeq = 0;
+        clearActiveRunReplay();
+      }
       state.agent = agent;
       renderAgents();
       updateAgentChrome();
@@ -164,6 +288,7 @@
       await loadResidentRuntimeState();
       if (!state.project || state.project.id !== projectID || currentAgentID() !== agentID) return;
       switchView('agent');
+      requestActiveRunSync();
       syncRouteHash(Boolean(opts.push));
     }
     function currentAgentID() {
@@ -229,6 +354,7 @@
       modelSelect.value = model;
       syncEffortOptionsForSelectedModel(String((state.agent && state.agent.thinking_effort) || 'medium').toLowerCase());
       modelSelect.disabled = currentAgentWorking();
+      renderContextTokenUsage();
     }
     function syncEffortOptionsForSelectedModel(preferred = 'medium') {
       const effortSelect = $('agentThinkingEffort');
@@ -319,6 +445,7 @@
       restoreAgentModelSettings();
       $('agentMessage').placeholder = 'Message ' + label + '...';
       $('agentStatus').textContent = label + ' resident session';
+      renderContextTokenUsage();
       $('agentHeaderName').textContent = label;
       renderAgentWorkingState();
       if (state.project) $('projectMeta').textContent = projectWorkspaceLabel(state.project) + ' · branch ' + state.project.default_branch + ' · agent ' + label;
@@ -333,12 +460,118 @@
     }
     function setLocalAgentWorking(agentId, working) {
       if (!agentId) return;
+      state.agentWorkingById ||= {};
       if (working) state.agentWorkingById[agentId] = true;
       else delete state.agentWorkingById[agentId];
     }
+    function agentRunControlKey(projectID, agentID) {
+      return String(projectID || '') + ':' + String(agentID || '');
+    }
+    function agentRunCancelPath(projectID, agentID) {
+      return '/api/projects/' + encodeURIComponent(projectID) + '/agents/' + encodeURIComponent(agentID) + '/run/cancel';
+    }
+    function claimAgentRunStop(stoppingByKey, projectID, agentID) {
+      const key = agentRunControlKey(projectID, agentID);
+      if (stoppingByKey[key]) return false;
+      stoppingByKey[key] = true;
+      return true;
+    }
+    function currentAgentStopping() {
+      if (!state.project || !state.agent) return false;
+      return !!(state.agentRunStoppingByKey || {})[agentRunControlKey(state.project.id, state.agent.id)];
+    }
+    function setAgentRunStopping(projectID, agentID, stopping) {
+      state.agentRunStoppingByKey ||= {};
+      const key = agentRunControlKey(projectID, agentID);
+      if (stopping) state.agentRunStoppingByKey[key] = true;
+      else delete state.agentRunStoppingByKey[key];
+    }
+    function agentRunControlPresentation(working, stopping) {
+      if (stopping) {
+        return {
+          text: 'Stopping…',
+          title: 'Stopping active run',
+          ariaLabel: 'Stopping active agent run',
+          danger: true,
+          disabled: true,
+        };
+      }
+      if (working) {
+        return {
+          text: 'Stop',
+          title: 'Stop active run',
+          ariaLabel: 'Stop active agent run',
+          danger: true,
+          disabled: false,
+        };
+      }
+      return {
+        text: 'Send ↗',
+        title: 'Send message',
+        ariaLabel: 'Send message to agent',
+        danger: false,
+        disabled: false,
+      };
+    }
+    function agentComposerEnterAction(working, stopping) {
+      if (stopping) return 'none';
+      return working ? 'interrupt' : 'send';
+    }
+    async function stopActiveAgentRun() {
+      if (!state.project || !state.agent) return;
+      const projectID = state.project.id;
+      const agentID = state.agent.id;
+      state.agentRunStoppingByKey ||= {};
+      if (!claimAgentRunStop(state.agentRunStoppingByKey, projectID, agentID)) return;
+      renderAgentWorkingState();
+      try {
+        await api(agentRunCancelPath(projectID, agentID), {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+        if (state.project && state.project.id === projectID &&
+            state.agent && state.agent.id === agentID) {
+          $('agentStatus').textContent = currentAgentLabel() + ' · cancelled · refreshing';
+        }
+        await refreshAgentStates();
+      } catch (err) {
+        setAgentRunStopping(projectID, agentID, false);
+        if (err && err.status === 409) {
+          await refreshAgentStates();
+          renderAgentWorkingState();
+          return;
+        }
+        renderAgentWorkingState();
+        notify('Could not stop agent run: ' + ((err && err.message) || String(err)), 'error');
+      }
+    }
     function renderAgentWorkingState() {
       const pulse = $('agentWorkingPulse');
-      if (!pulse) return;
-      pulse.hidden = !currentAgentWorking();
+      const send = $('sendAgent');
+      const working = currentAgentWorking();
+      let stopping = currentAgentStopping();
+      if (stopping && !working && state.project && state.agent) {
+        setAgentRunStopping(state.project.id, state.agent.id, false);
+        stopping = false;
+      }
+      if (pulse) pulse.hidden = !(working || stopping);
+      if (send) {
+        const presentation = agentRunControlPresentation(working, stopping);
+        send.textContent = presentation.text;
+        send.title = presentation.title;
+        send.setAttribute('aria-label', presentation.ariaLabel);
+        send.classList.toggle('danger', presentation.danger);
+        send.disabled = presentation.disabled;
+      }
       restoreAgentModelSettings();
+    }
+    if (typeof module !== 'undefined' && module.exports) {
+      module.exports = {
+        agentRunCancelPath,
+        claimAgentRunStop,
+        agentRunControlPresentation,
+        agentComposerEnterAction,
+        stopActiveAgentRun,
+        syncActiveRunEvents,
+      };
     }

@@ -23,7 +23,11 @@ func (a *app) handleTasks(w http.ResponseWriter, r *http.Request, project Projec
 				return
 			}
 			req.ArtifactIDs = artifactIDs
-			task := a.createTask(project, req)
+			task, err := a.createTask(project, req)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
 			a.startTaskAsync(project, task, "manual_create")
 			writeJSON(w, task)
 		default:
@@ -43,6 +47,33 @@ func (a *app) handleTasks(w http.ResponseWriter, r *http.Request, project Projec
 	}
 	if len(parts) == 2 && parts[1] == "run" && r.Method == http.MethodPost {
 		updated := a.runTaskAsync(project, task, "manual_run")
+		writeJSON(w, updated)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "merge" && r.Method == http.MethodPost {
+		updated, err := a.retryTaskMerge(project, task)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, updated)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost {
+		updated, err := a.cancelTask(project, task)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, updated)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "cleanup" && r.Method == http.MethodPost {
+		updated, err := a.cleanupTaskWorktree(project, task)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 		writeJSON(w, updated)
 		return
 	}

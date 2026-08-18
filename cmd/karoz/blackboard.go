@@ -120,32 +120,24 @@ func newDerivedBlackboardEntry(event RuntimeEvent, sourceType, sourceID, agentID
 }
 
 func (a *app) upsertBlackboardProjection(entry AgentBlackboardEntry) {
-	a.mu.Lock()
-	if a.blackboard == nil {
-		a.blackboard = map[string][]AgentBlackboardEntry{}
-	}
-	items := a.blackboard[entry.ProjectID]
-	for i := range items {
-		if !items[i].Derived || items[i].SourceType != entry.SourceType || items[i].SourceID != entry.SourceID {
-			continue
+	a.collaborationServiceLocked().MutateBlackboard(entry.ProjectID, func(items []AgentBlackboardEntry) []AgentBlackboardEntry {
+		for i := range items {
+			if !items[i].Derived || items[i].SourceType != entry.SourceType || items[i].SourceID != entry.SourceID {
+				continue
+			}
+			entry.ID, entry.CreatedAt = items[i].ID, items[i].CreatedAt
+			items[i] = entry
+			return items
 		}
-		entry.ID = items[i].ID
-		entry.CreatedAt = items[i].CreatedAt
-		items[i] = entry
-		a.blackboard[entry.ProjectID] = items
-		a.mu.Unlock()
-		a.saveOrLog("blackboard", a.saveBlackboard())
-		return
-	}
-	a.blackboard[entry.ProjectID] = append(items, entry)
-	a.mu.Unlock()
+		return append(items, entry)
+	})
 	a.saveOrLog("blackboard", a.saveBlackboard())
 }
 
 func (a *app) handoffByID(projectID, messageID string) (AgentInboxMessage, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, messages := range a.inbox {
+	for _, messages := range a.collaborationServiceLocked().InboxSnapshot() {
 		for _, msg := range messages {
 			if msg.ProjectID == projectID && msg.ID == messageID {
 				return msg, true
@@ -158,7 +150,7 @@ func (a *app) handoffByID(projectID, messageID string) (AgentInboxMessage, bool)
 func (a *app) agentLabel(projectID, agentID string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, agent := range a.agents[projectID] {
+	for _, agent := range a.agentDirectoryLocked().agents[projectID] {
 		if agent.ID == agentID {
 			return firstNonEmpty(agent.Nickname, agent.DisplayName, agent.Name, agent.ID)
 		}
@@ -167,29 +159,28 @@ func (a *app) agentLabel(projectID, agentID string) string {
 }
 
 func (a *app) rebuildBlackboardProjections() error {
-	a.mu.Lock()
-	if a.blackboard == nil {
-		a.blackboard = map[string][]AgentBlackboardEntry{}
-	}
-	for projectID, items := range a.blackboard {
+	blackboard := a.collaborationServiceLocked().BlackboardSnapshot()
+	for projectID, items := range blackboard {
 		manual := items[:0]
 		for _, entry := range items {
 			if !entry.Derived {
 				manual = append(manual, entry)
 			}
 		}
-		a.blackboard[projectID] = manual
+		blackboard[projectID] = manual
 	}
+	a.collaborationServiceLocked().ReplaceBlackboard(blackboard)
+	a.mu.Lock()
 	var handoffs []AgentInboxMessage
-	for _, messages := range a.inbox {
+	for _, messages := range a.collaborationServiceLocked().InboxSnapshot() {
 		handoffs = append(handoffs, messages...)
 	}
 	var tasks []Task
-	for _, projectTasks := range a.tasks {
+	for _, projectTasks := range a.projectTasksLocked().tasks {
 		tasks = append(tasks, projectTasks...)
 	}
 	var artifacts []Artifact
-	for _, projectArtifacts := range a.artifacts {
+	for _, projectArtifacts := range a.artifactCatalogLocked().artifacts {
 		artifacts = append(artifacts, projectArtifacts...)
 	}
 	a.mu.Unlock()

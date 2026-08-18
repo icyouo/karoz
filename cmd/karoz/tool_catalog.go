@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	tooldomain "github.com/karoz/karoz/internal/tool"
-	"strings"
 )
 
 func residentToolSpecs() []map[string]any {
@@ -14,6 +13,45 @@ func residentToolSpecs() []map[string]any {
 			"max_output":  map[string]any{"type": "integer", "description": "Optional maximum combined stdout/stderr characters. Default 20000, max 200000."},
 			"description": map[string]any{"type": "string", "description": "Short reason for running the command."},
 		}, []string{"command"}),
+		residentToolSpec("run_background", "Start a server-owned background command in the current project. The process continues after this resident turn or browser request ends. Ask and plan turns require explicit approval for the exact background-start subject.", map[string]any{
+			"command":     map[string]any{"type": "string", "description": "Bash command to start."},
+			"lifetime_ms": map[string]any{"type": "integer", "minimum": 0, "description": "Maximum runtime in milliseconds. Omit for the one-hour default, choose any positive duration, or use 0 for unlimited. A deployment may enforce an administrator-configured ceiling."},
+			"description": map[string]any{"type": "string", "description": "Short non-sensitive description."},
+		}, []string{"command"}),
+		residentToolSpec("list_processes", "List bounded, redacted background-process status owned by this resident agent.", map[string]any{
+			"limit": map[string]any{"type": "integer", "description": "Maximum processes from 1 to 100. Default 20."},
+		}, nil),
+		residentToolSpec("read_process_log", "Read a bounded, redacted window of one background-process log owned by this resident agent.", map[string]any{
+			"process_id": map[string]any{"type": "string"},
+			"offset":     map[string]any{"type": "integer", "description": "Zero-based line offset. Supplying it disables tail mode unless tail is explicitly true."},
+			"limit":      map[string]any{"type": "integer", "description": "Maximum lines from 1 to 200. Default 50."},
+			"tail":       map[string]any{"type": "boolean", "description": "Read the newest lines. Default true when offset is absent."},
+		}, []string{"process_id"}),
+		residentToolSpec("stop_process", "Stop one background process owned by this resident agent. Terminal processes are idempotent. Ask and plan turns require explicit approval bound to the exact process and original command subject.", map[string]any{
+			"process_id": map[string]any{"type": "string"},
+		}, []string{"process_id"}),
+		residentToolSpec("list_monitors", "List durable runtime-event and process-exit monitors in this project.", nil, nil),
+		residentToolSpec("prepare_monitor_probe", "Prepare an exact script-probe approval request. This does not create or update a monitor; after user approval, claim the returned receipt from a development turn.", map[string]any{
+			"monitor_id":  map[string]any{"type": "string", "description": "Optional existing monitor ID to update. Omit to reserve a new ID."},
+			"language":    map[string]any{"type": "string", "enum": []string{"shell", "javascript"}},
+			"workdir":     map[string]any{"type": "string", "description": "Optional project-contained workdir."},
+			"source":      map[string]any{"type": "string", "description": "Exact probe source, maximum 64 KiB."},
+			"interval_ms": map[string]any{"type": "integer", "description": "Default 60000; minimum 10000."},
+			"timeout_ms":  map[string]any{"type": "integer", "description": "Default 5000; maximum 30000."},
+		}, []string{"language", "source"}),
+		residentToolSpec("create_monitor", "Create a durable monitor owned by this resident agent. Script probes require a confirmed approval receipt and unique mutation_id in a dev turn.", map[string]any{
+			"monitor":             map[string]any{"type": "object"},
+			"approval_receipt_id": map[string]any{"type": "string"},
+			"mutation_id":         map[string]any{"type": "string"},
+		}, []string{"monitor"}),
+		residentToolSpec("update_monitor", "Update a durable monitor owned by this resident agent. Script-probe trigger replacement requires a newly confirmed approval receipt and unique mutation_id in a dev turn.", map[string]any{
+			"monitor":             map[string]any{"type": "object"},
+			"approval_receipt_id": map[string]any{"type": "string"},
+			"mutation_id":         map[string]any{"type": "string"},
+		}, []string{"monitor"}),
+		residentToolSpec("pause_monitor", "Pause one monitor owned by this resident agent.", map[string]any{"monitor_id": map[string]any{"type": "string"}}, []string{"monitor_id"}),
+		residentToolSpec("resume_monitor", "Resume one monitor owned by this resident agent.", map[string]any{"monitor_id": map[string]any{"type": "string"}}, []string{"monitor_id"}),
+		residentToolSpec("delete_monitor", "Delete one monitor owned by this resident agent.", map[string]any{"monitor_id": map[string]any{"type": "string"}}, []string{"monitor_id"}),
 		residentToolSpec("repo_list", "List files and directories inside the current project through a bounded read-only repository view.", map[string]any{
 			"path":        map[string]any{"type": "string", "description": "Optional relative repository path."},
 			"depth":       map[string]any{"type": "integer", "description": "Traversal depth from 0 to 6. Default 2."},
@@ -65,11 +103,13 @@ func residentToolSpecs() []map[string]any {
 		residentToolSpec("remember_fact", "Store a durable fact for this resident agent session.", map[string]any{
 			"summary": map[string]any{"type": "string"},
 			"detail":  map[string]any{"type": "string"},
+			"scope":   map[string]any{"type": "string", "enum": []string{"agent", "project"}, "description": "Optional visibility scope. Defaults to agent."},
 		}, []string{"summary", "detail"}),
 		residentToolSpec("record_decision", "Store a durable decision for this resident agent session, including rationale.", map[string]any{
-			"summary":   map[string]any{"type": "string"},
-			"detail":    map[string]any{"type": "string"},
-			"rationale": map[string]any{"type": "string"},
+			"summary":       map[string]any{"type": "string"},
+			"detail":        map[string]any{"type": "string"},
+			"rationale":     map[string]any{"type": "string"},
+			"supersedes_id": map[string]any{"type": "string", "description": "Optional active decision ID from this project and agent to supersede."},
 		}, []string{"summary", "detail", "rationale"}),
 		residentToolSpec("mark_done", "Store a completed work item for this resident agent session.", map[string]any{
 			"summary": map[string]any{"type": "string"},
@@ -124,12 +164,14 @@ func residentToolSpecs() []map[string]any {
 			"note":        map[string]any{"type": "string"},
 		}, []string{"artifact_id", "decision"}),
 		residentToolSpec("create_task", "Create a project task from the current resident agent session. Task type must be bug, feature, or deploy. bugfix and deployment are accepted as compatibility aliases.", map[string]any{
-			"title":        map[string]any{"type": "string"},
-			"description":  map[string]any{"type": "string"},
-			"goal":         map[string]any{"type": "string"},
-			"type":         map[string]any{"type": "string", "enum": []string{"bug", "feature", "deploy"}},
-			"assignee":     map[string]any{"type": "string", "description": "Optional compatibility hint; ignored in local OSS version."},
-			"artifact_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Referenced approved design or planning Artifacts."},
+			"title":          map[string]any{"type": "string"},
+			"description":    map[string]any{"type": "string"},
+			"goal":           map[string]any{"type": "string"},
+			"max_runtime_ms": map[string]any{"type": "integer", "description": "Maximum runtime in milliseconds. Defaults to 3600000 (one hour); use 0 for unlimited."},
+			"sandbox_mode":   map[string]any{"type": "string", "enum": []string{"host", "required"}, "description": "host is the default. required fails closed unless OS filesystem, network, and process isolation are all enforceable."},
+			"type":           map[string]any{"type": "string", "enum": []string{"bug", "feature", "deploy"}},
+			"assignee":       map[string]any{"type": "string", "description": "Optional compatibility hint; ignored in local OSS version."},
+			"artifact_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Referenced approved design or planning Artifacts."},
 		}, []string{"title", "description"}),
 		residentToolSpec("update_task_status", "Update the status of a project task in the current resident agent session project.", map[string]any{
 			"task_id": map[string]any{"type": "string"},
@@ -202,14 +244,26 @@ func residentAgentManagementToolSpecs() []map[string]any {
 	}
 }
 
+func residentStaticToolSpecs() []map[string]any {
+	specs := append([]map[string]any{}, residentToolSpecs()...)
+	specs = append(specs, residentPlanToolSpecs()...)
+	specs = append(specs, residentAgentManagementToolSpecs()...)
+	return specs
+}
+
 func (a *app) residentToolSpecsForContext(ctx context.Context, toolCtx ResidentToolContext) []map[string]any {
-	all := append(residentToolSpecs(), residentPlanToolSpecs()...)
-	if capabilitiesForAgent(toolCtx.Agent).CanManageAgents {
-		all = append(all, residentAgentManagementToolSpecs()...)
+	registry := a.residentToolRegistry()
+	if registry == nil {
+		return nil
+	}
+	registered := make(map[string]bool, len(registry.Definitions()))
+	for _, definition := range registry.Definitions() {
+		registered[definition.Name] = true
 	}
 	var specs []map[string]any
-	for _, spec := range all {
-		if residentToolAllowed(toolCtx, toolNameFromSpec(spec)) {
+	for _, spec := range residentStaticToolSpecs() {
+		name := toolNameFromSpec(spec)
+		if registered[name] && a.residentToolAdvertised(toolCtx, name) {
 			specs = append(specs, spec)
 		}
 	}
@@ -227,26 +281,4 @@ func toolNameFromSpec(spec map[string]any) string {
 func residentDynamicToolsAllowed(toolCtx ResidentToolContext) bool {
 	turnType := normalizeChatTurnType(toolCtx.TurnType)
 	return turnType == "dev"
-}
-
-func residentToolAllowed(toolCtx ResidentToolContext, name string) bool {
-	if name == "" {
-		return false
-	}
-	if strings.HasPrefix(name, "mcp__") {
-		return residentDynamicToolsAllowed(toolCtx)
-	}
-	turnType := normalizeChatTurnType(toolCtx.TurnType)
-	switch name {
-	case "write_workspace_file", "show_preview":
-		return turnType == "dev"
-	case "create_task", "update_task_status":
-		return turnType == "dev"
-	case "save_plan_draft", "submit_plan", "advance_plan", "reconcile_plan_history":
-		return turnType == "plan"
-	case "list_agent_templates", "add_agent", "create_agent_team", "delete_agent":
-		return capabilitiesForAgent(toolCtx.Agent).CanManageAgents
-	default:
-		return true
-	}
 }

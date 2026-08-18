@@ -55,24 +55,20 @@ func newHandoffTestApp(t *testing.T) (*app, Project, Agent, Agent) {
 	target := Agent{ID: "designer", ProjectID: project.ID, Name: "product-designer", Nickname: "Designer"}
 	a := &app{
 		settings:        Settings{DataDir: t.TempDir(), ProjectsRoot: root},
-		agents:          map[string][]Agent{project.ID: {source, target}},
-		inbox:           map[string][]AgentInboxMessage{},
-		agentMessages:   map[string][]AgentMessage{},
-		agentSessions:   map[string]AgentSessionState{},
-		agentRoutes:     map[string][]AgentRoute{},
-		tasks:           map[string][]Task{},
-		blackboard:      map[string][]AgentBlackboardEntry{},
-		artifacts:       map[string][]Artifact{},
-		runtimeHooks:    map[string]bool{},
-		runtimeWatchers: map[string]map[chan RuntimeEvent]bool{},
+		agentDirectory:  agentDirectoryForTest(map[string][]Agent{project.ID: {source, target}}),
+		conversation:    newConversationService(),
+		projectTasks:    newProjectTaskCoordinator(),
+		artifactCatalog: newArtifactCatalog(),
+		agentRuntime:    newAgentRuntimeCoordinator(),
 	}
+	initializeResidentToolsForTest(t, a)
 	return a, project, source, target
 }
 
 func TestHandoffProtocolCarriesRunCorrelationAndCloses(t *testing.T) {
 	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
 	a, project, source, target := newHandoffTestApp(t)
-	a.artifacts[project.ID] = []Artifact{
+	a.artifactCatalogLocked().artifacts[project.ID] = []Artifact{
 		{ID: "requirements-1", ProjectID: project.ID, AgentID: source.ID, Kind: "requirements", Status: ArtifactApproved},
 		{ID: "flow-2", ProjectID: project.ID, AgentID: source.ID, Kind: "user_flow", Status: ArtifactApproved},
 	}
@@ -233,10 +229,10 @@ func TestScheduledReplyIsReviewedThenAckedWithoutReplyLoop(t *testing.T) {
 func TestPeerRouteUsesNicknameAndDoesNotAuthorizeByIntent(t *testing.T) {
 	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
 	a, project, source, target := newHandoffTestApp(t)
-	a.agentRoutes[project.ID] = []AgentRoute{{
+	replaceRoutesForTest(a, project.ID, []AgentRoute{{
 		ID: "route-1", ProjectID: project.ID, FromAgentID: source.ID, ToAgentID: target.ID,
 		Intent: "request", Enabled: true,
-	}}
+	}})
 	args, _ := json.Marshal(map[string]any{
 		"target_agent_id": target.Nickname,
 		"intent":          "handoff",
@@ -249,6 +245,29 @@ func TestPeerRouteUsesNicknameAndDoesNotAuthorizeByIntent(t *testing.T) {
 	pending := a.pendingInboxFor(project.ID, target.ID, 10)
 	if len(pending) != 1 || pending[0].TargetAgentID != target.ID || pending[0].Intent != "handoff" {
 		t.Fatalf("nickname was not resolved to canonical target: %+v", pending)
+	}
+}
+
+func TestPeerRouteDenialPreventsInboxDelivery(t *testing.T) {
+	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
+	a, project, source, target := newHandoffTestApp(t)
+	// Presence of an unrelated route turns the route set into an explicit
+	// acceptance boundary. The source/target edge below is intentionally absent.
+	replaceRoutesForTest(a, project.ID, []AgentRoute{{
+		ID: "other-edge", ProjectID: project.ID, FromAgentID: target.ID, ToAgentID: source.ID,
+		Enabled: true,
+	}})
+	args, _ := json.Marshal(map[string]any{
+		"target_agent_id": target.Nickname,
+		"intent":          "handoff",
+		"body":            "This must not bypass the configured route graph.",
+	})
+	result, err := a.executeResidentTool(context.Background(), ResidentToolContext{Project: project, Agent: source, Workdir: project.Path}, codexToolCall{Name: "send_to", Arguments: string(args)})
+	if err != nil || !strings.Contains(result, "route_denied") {
+		t.Fatalf("unauthorized route result=%s err=%v", result, err)
+	}
+	if pending := a.pendingInboxFor(project.ID, target.ID, 10); len(pending) != 0 {
+		t.Fatalf("route-denied handoff was delivered: %+v", pending)
 	}
 }
 
@@ -280,7 +299,7 @@ func TestKarozDelegationReportsToCoordinatorAndDeliversResultOwner(t *testing.T)
 	karoz := Agent{ID: "karoz", ProjectID: project.ID, Nickname: "Karoz"}
 	architect := Agent{ID: "architect", ProjectID: project.ID, Nickname: "Architect"}
 	reviewer := Agent{ID: "reviewer", ProjectID: project.ID, Nickname: "Reviewer"}
-	a.agents[project.ID] = []Agent{karoz, architect, reviewer}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{karoz, architect, reviewer}
 	upstream := AgentInboxMessage{
 		ID: "architect-request", ProjectID: project.ID, SourceAgentID: architect.ID, TargetAgentID: karoz.ID,
 		CorrelationID: "corr-delegated", MessageType: "handoff", Intent: "request", Subject: "Coordinate review", Body: "Get a review",
@@ -422,7 +441,7 @@ func TestLoadInboxMigratesLegacyPendingHandoff(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "agent-inbox.json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	a := &app{settings: Settings{DataDir: dataDir}, inbox: map[string][]AgentInboxMessage{}}
+	a := &app{settings: Settings{DataDir: dataDir}, collaboration: newCollaborationService()}
 	if err := a.loadInbox(); err != nil {
 		t.Fatal(err)
 	}

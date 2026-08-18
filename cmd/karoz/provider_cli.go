@@ -11,41 +11,38 @@ import (
 	"time"
 )
 
-func invokeClaude(ctx context.Context, workdir, prompt, mode string) (CLI2APIResponse, error) {
+func (a *app) invokeClaude(ctx context.Context, workdir, prompt, mode string) (CLI2APIResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, taskExecutorTimeout())
 	defer cancel()
 	permissionMode := "plan"
 	if strings.EqualFold(mode, "edit") {
 		permissionMode = "bypassPermissions"
 	}
-	cmd := exec.CommandContext(ctx, "claude", "--print", "--permission-mode", permissionMode, "--output-format", "text", "--no-session-persistence", prompt)
-	cmd.Dir = workdir
-	out, err := cmd.CombinedOutput()
+	result, err := a.runCapturedCommand(ctx, workdir, "claude", "--print", "--permission-mode", permissionMode, "--output-format", "text", "--no-session-persistence", prompt)
 	if ctx.Err() != nil {
 		return CLI2APIResponse{}, ctx.Err()
 	}
 	if err != nil {
-		return CLI2APIResponse{}, fmt.Errorf("claude failed: %w: %s", err, strings.TrimSpace(string(out)))
+		return CLI2APIResponse{}, fmt.Errorf("claude failed: %w: %s", err, strings.TrimSpace(result.Output()))
 	}
-	return CLI2APIResponse{Provider: "claude", Output: strings.TrimSpace(string(out))}, nil
+	return CLI2APIResponse{Provider: "claude", Output: strings.TrimSpace(result.Output())}, nil
 }
 
-func invokeCodex(ctx context.Context, workdir, prompt, mode string) (CLI2APIResponse, error) {
+func (a *app) invokeCodex(ctx context.Context, workdir, prompt, mode string) (CLI2APIResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, taskExecutorTimeout())
 	defer cancel()
 	sandbox := "read-only"
 	if strings.EqualFold(mode, "edit") {
 		sandbox = "danger-full-access"
 	}
-	cmd := exec.CommandContext(ctx, "codex", "exec", "--sandbox", sandbox, "-C", workdir, prompt)
-	out, err := cmd.CombinedOutput()
+	result, err := a.runCapturedCommand(ctx, workdir, "codex", "exec", "--sandbox", sandbox, "-C", workdir, prompt)
 	if ctx.Err() != nil {
 		return CLI2APIResponse{}, ctx.Err()
 	}
 	if err != nil {
-		return CLI2APIResponse{}, fmt.Errorf("codex failed: %w: %s", err, strings.TrimSpace(string(out)))
+		return CLI2APIResponse{}, fmt.Errorf("codex failed: %w: %s", err, strings.TrimSpace(result.Output()))
 	}
-	return CLI2APIResponse{Provider: "codex", Output: strings.TrimSpace(string(out))}, nil
+	return CLI2APIResponse{Provider: "codex", Output: strings.TrimSpace(result.Output())}, nil
 }
 
 func taskExecutorTimeout() time.Duration {
@@ -62,7 +59,7 @@ func taskExecutorTimeout() time.Duration {
 	return 30 * time.Minute
 }
 
-func invokeTaskExecutor(ctx context.Context, req CLI2APIRequest) (CLI2APIResponse, error) {
+func (a *app) invokeTaskExecutor(ctx context.Context, req CLI2APIRequest) (CLI2APIResponse, error) {
 	provider := strings.ToLower(strings.TrimSpace(req.Provider))
 	if provider == "" || provider == "auto" {
 		if _, err := exec.LookPath("codex"); err == nil {
@@ -79,9 +76,9 @@ func invokeTaskExecutor(ctx context.Context, req CLI2APIRequest) (CLI2APIRespons
 	}
 	switch provider {
 	case "codex", "codex-cli":
-		return invokeCodex(ctx, workdir, req.Prompt, req.Mode)
+		return a.invokeCodex(ctx, workdir, req.Prompt, req.Mode)
 	case "claude", "claude-code":
-		return invokeClaude(ctx, workdir, req.Prompt, req.Mode)
+		return a.invokeClaude(ctx, workdir, req.Prompt, req.Mode)
 	case "codex-direct", "codex-oauth", "codex-api", "cliproxy", "cli2api", "external":
 		return CLI2APIResponse{}, fmt.Errorf("%s is not a task coding executor; use codex or claude for task execution", provider)
 	default:

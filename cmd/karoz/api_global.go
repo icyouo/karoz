@@ -5,10 +5,21 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+type SettingsResponse struct {
+	Settings
+	WorkspaceSettingsLocked bool `json:"workspace_settings_locked"`
+}
+
+func (a *app) settingsResponse() SettingsResponse {
+	return SettingsResponse{
+		Settings:                a.settings,
+		WorkspaceSettingsLocked: strings.EqualFold(strings.TrimSpace(os.Getenv("KAROZ_WORKSPACE_SETTINGS_LOCKED")), "1") || strings.EqualFold(strings.TrimSpace(os.Getenv("KAROZ_WORKSPACE_SETTINGS_LOCKED")), "true"),
+	}
+}
 
 func (a *app) handleCLI2API(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -42,12 +53,12 @@ func (a *app) handleFolderDialog(w http.ResponseWriter, r *http.Request) {
 		prompt = "Choose a folder"
 	}
 	script := `POSIX path of (choose folder with prompt ` + strconvQuoteAppleScript(prompt) + `)`
-	out, err := exec.CommandContext(r.Context(), "osascript", "-e", script).Output()
+	result, err := a.runCapturedCommand(r.Context(), "", "osascript", "-e", script)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("choose folder: %w", err))
 		return
 	}
-	path := filepath.Clean(strings.TrimSpace(string(out)))
+	path := filepath.Clean(strings.TrimSpace(result.Output()))
 	if path == "." || path == "" {
 		writeError(w, http.StatusBadRequest, errors.New("no folder selected"))
 		return
@@ -62,44 +73,74 @@ func strconvQuoteAppleScript(value string) string {
 func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, a.settings)
+		writeJSON(w, a.settingsResponse())
 	case http.MethodPut:
+		if a.settingsResponse().WorkspaceSettingsLocked {
+			writeError(w, http.StatusForbidden, errors.New("workspace settings are unavailable when Karoz is running in Docker"))
+			return
+		}
 		var req SettingsUpdateRequest
 		if err := readJSON(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		root := filepath.Clean(expandHome(strings.TrimSpace(req.ProjectsRoot)))
-		if root == "" {
-			writeError(w, http.StatusBadRequest, errors.New("projects_root is required"))
+		if err := a.updateSettings(req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := os.MkdirAll(root, 0755); err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("create projects root: %w", err))
-			return
-		}
-		extraRoots := normalizeWorkspaceRoots(req.ExtraProjectsRoots, root)
-		for _, extraRoot := range extraRoots {
-			if err := os.MkdirAll(extraRoot, 0755); err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Errorf("create extra projects root %s: %w", extraRoot, err))
-				return
-			}
-		}
-		a.mu.Lock()
-		a.settings.ProjectsRoot = root
-		a.settings.ExtraProjectsRoots = extraRoots
-		if req.MCPServers != nil {
-			a.settings.MCPServers = normalizeMCPServers(*req.MCPServers)
-		}
-		a.mu.Unlock()
-		if err := a.saveSettings(); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Errorf("save settings: %w", err))
-			return
-		}
-		writeJSON(w, a.settings)
+		writeJSON(w, a.settingsResponse())
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (a *app) updateSettings(req SettingsUpdateRequest) error {
+	root := filepath.Clean(expandHome(strings.TrimSpace(req.ProjectsRoot)))
+	if root == "" {
+		return errors.New("projects_root is required")
+	}
+	if hook := a.projectRegistryLocked().settingsUpdateBeforeRegistryHook; hook != nil {
+		hook()
+	}
+	a.projectRegistryLocked().registrationMu.Lock()
+	defer a.projectRegistryLocked().registrationMu.Unlock()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return fmt.Errorf("create projects root: %w", err)
+	}
+	extraRoots := normalizeWorkspaceRoots(req.ExtraProjectsRoots, root)
+	for _, extraRoot := range extraRoots {
+		if err := os.MkdirAll(extraRoot, 0o755); err != nil {
+			return fmt.Errorf("create extra projects root %s: %w", extraRoot, err)
+		}
+	}
+	a.mu.Lock()
+	previous := a.settings
+	proposed := previous
+	proposed.ProjectsRoot = root
+	proposed.ExtraProjectsRoots = extraRoots
+	if req.MCPServers != nil {
+		proposed.MCPServers = normalizeMCPServers(*req.MCPServers)
+	}
+	a.mu.Unlock()
+	projects, err := scanProjectsForSettings(proposed)
+	if err != nil {
+		return err
+	}
+	if a.processRuntime != nil {
+		if err := a.processRuntime.ValidateProjectConfiguration(projects); err != nil {
+			return err
+		}
+	}
+	a.mu.Lock()
+	a.settings = proposed
+	a.mu.Unlock()
+	if err := a.saveSettings(); err != nil {
+		a.mu.Lock()
+		a.settings = previous
+		a.mu.Unlock()
+		return fmt.Errorf("save settings: %w", err)
+	}
+	return nil
 }
 
 func (a *app) handleAgentTemplates(w http.ResponseWriter, r *http.Request) {
@@ -147,8 +188,8 @@ func (a *app) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err := os.Stat(a.settings.ProjectsRoot)
 	writeJSON(w, Diagnostics{
-		CodexCLI:       toolStatus("codex"),
-		ClaudeCLI:      toolStatus("claude"),
+		CodexCLI:       a.toolStatus("codex"),
+		ClaudeCLI:      a.toolStatus("claude"),
 		ProjectsRootOK: err == nil,
 	})
 }

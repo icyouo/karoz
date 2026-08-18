@@ -29,21 +29,21 @@ func residentModelCatalog() []ResidentProviderDescriptor {
 	}
 	codexDefault := getenv("KAROZ_CODEX_MODEL", "gpt-5.6-luna")
 	codexModels := []ResidentModelDescriptor{
-		{Provider: "codex", ID: codexDefault, DisplayName: codexDefault, EffortLevels: []string{"low", "medium", "high", "xhigh", "max"}},
-		{Provider: "codex", ID: "gpt-5.6-sol", DisplayName: "GPT-5.6 Sol", EffortLevels: []string{"low", "medium", "high", "xhigh", "max", "ultra"}},
-		{Provider: "codex", ID: "gpt-5.6-terra", DisplayName: "GPT-5.6 Terra", EffortLevels: []string{"low", "medium", "high", "xhigh", "max", "ultra"}},
-		{Provider: "codex", ID: "gpt-5.6-luna", DisplayName: "GPT-5.6 Luna", EffortLevels: []string{"low", "medium", "high", "xhigh", "max"}},
-		{Provider: "codex", ID: "gpt-5.3-codex", DisplayName: "GPT-5.3 Codex", EffortLevels: []string{"low", "medium", "high", "xhigh"}},
-		{Provider: "codex", ID: "gpt-5.2", DisplayName: "GPT-5.2", EffortLevels: []string{"low", "medium", "high", "xhigh"}},
+		{Provider: "codex", ID: codexDefault, DisplayName: codexDefault, EffortLevels: []string{"low", "medium", "high", "xhigh", "max"}, ContextWindow: 1_000_000},
+		{Provider: "codex", ID: "gpt-5.6-sol", DisplayName: "GPT-5.6 Sol", EffortLevels: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, ContextWindow: 1_000_000},
+		{Provider: "codex", ID: "gpt-5.6-terra", DisplayName: "GPT-5.6 Terra", EffortLevels: []string{"low", "medium", "high", "xhigh", "max", "ultra"}, ContextWindow: 1_000_000},
+		{Provider: "codex", ID: "gpt-5.6-luna", DisplayName: "GPT-5.6 Luna", EffortLevels: []string{"low", "medium", "high", "xhigh", "max"}, ContextWindow: 1_000_000},
+		{Provider: "codex", ID: "gpt-5.3-codex", DisplayName: "GPT-5.3 Codex", EffortLevels: []string{"low", "medium", "high", "xhigh"}, ContextWindow: 400_000},
+		{Provider: "codex", ID: "gpt-5.2", DisplayName: "GPT-5.2", EffortLevels: []string{"low", "medium", "high", "xhigh"}, ContextWindow: 400_000},
 	}
 	codexModels = uniqueResidentModels(codexModels)
 	return []ResidentProviderDescriptor{
 		{ID: "codex", DisplayName: "Codex", Transport: "codex-oauth", Available: codexAvailable, Reason: unavailableReason(codexAvailable, "Codex OAuth credentials were not found"), Models: codexModels},
 		{ID: "claude", DisplayName: "Claude", Transport: claudeTransport, Available: claudeAvailable, Reason: unavailableReason(claudeAvailable, "Claude CLI is not logged in and ANTHROPIC_API_KEY is not configured"), Models: []ResidentModelDescriptor{
-			{Provider: "claude", ID: "claude-opus-4-8", DisplayName: "Claude Opus 4.8", EffortLevels: []string{"low", "medium", "high", "xhigh", "max"}},
-			{Provider: "claude", ID: "claude-sonnet-5", DisplayName: "Claude Sonnet 5", EffortLevels: []string{"low", "medium", "high", "xhigh", "max"}},
-			{Provider: "claude", ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", EffortLevels: []string{"low", "medium", "high", "max"}},
-			{Provider: "claude", ID: "claude-haiku-4-5", DisplayName: "Claude Haiku 4.5", EffortLevels: []string{}},
+			{Provider: "claude", ID: "claude-opus-4-8", DisplayName: "Claude Opus 4.8", EffortLevels: []string{"low", "medium", "high", "xhigh", "max"}, ContextWindow: 1_000_000},
+			{Provider: "claude", ID: "claude-sonnet-5", DisplayName: "Claude Sonnet 5", EffortLevels: []string{"low", "medium", "high", "xhigh", "max"}, ContextWindow: 1_000_000},
+			{Provider: "claude", ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", EffortLevels: []string{"low", "medium", "high", "max"}, ContextWindow: 1_000_000},
+			{Provider: "claude", ID: "claude-haiku-4-5", DisplayName: "Claude Haiku 4.5", EffortLevels: []string{}, ContextWindow: 200_000},
 		}},
 	}
 }

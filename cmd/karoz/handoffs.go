@@ -40,7 +40,7 @@ func (a *app) collaborationCorrelationMessageCount(projectID, correlationID stri
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	count := 0
-	for _, items := range a.inbox {
+	for _, items := range a.collaborationServiceLocked().InboxSnapshot() {
 		for _, item := range items {
 			if item.ProjectID == projectID && item.CorrelationID == correlationID {
 				count++
@@ -107,8 +107,8 @@ func normalizeHandoffMessage(msg AgentInboxMessage) (AgentInboxMessage, bool) {
 }
 
 func (a *app) transitionHandoff(projectID, agentID, messageID, next, result string) (AgentInboxMessage, bool) {
-	a.handoffOpsMu.Lock()
-	defer a.handoffOpsMu.Unlock()
+	a.collaborationServiceLocked().handoffOpsMu.Lock()
+	defer a.collaborationServiceLocked().handoffOpsMu.Unlock()
 	updated, err := a.handoffService().Transition(projectID, agentID, messageID, next, result)
 	return updated, err == nil
 }

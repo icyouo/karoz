@@ -176,6 +176,24 @@ KAROZ_TRUST_PROJECT_MCP=0
 KAROZ_VERIFY_COMMAND=
 ```
 
+Resident Run budgets are selected by normalized turn type (`ask`, `plan`, or
+`dev`). `ask` retains the compatibility defaults; plan and dev have larger
+defaults. A local Studio operator can override an individual budget without a
+settings UI:
+
+```bash
+KAROZ_RESIDENT_ASK_TOTAL_TIMEOUT=2m
+KAROZ_RESIDENT_PLAN_TOOL_TIMEOUT=3m
+KAROZ_RESIDENT_DEV_FINAL_RESERVE=1m
+KAROZ_RESIDENT_DEV_MAX_MODEL_ROUNDS=32
+KAROZ_RESIDENT_DEV_MAX_TOOL_ROUNDS=16
+KAROZ_RESIDENT_DEV_MAX_TOOL_OUTPUT_CHARS=24000
+```
+
+Each override is optional. Invalid values fall back to the corresponding safe
+default; the tool phase is always capped so the final-response reserve remains
+available.
+
 `KAROZ_AGENT_PROVIDER` supplies the default for existing agents. Studio persists the selected provider, model, and thinking effort per resident agent; changes take effect on the next Run without restarting Karoz. An active Run keeps its provider snapshot and must be stopped before changing the selection.
 
 Resident providers:

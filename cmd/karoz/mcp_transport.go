@@ -9,13 +9,18 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	executiondomain "github.com/karoz/karoz/internal/execution"
 )
 
-func startMCPClient(ctx context.Context, workdir string, cfg MCPServerConfig) (*mcpClient, error) {
+func (a *app) startMCPClient(ctx context.Context, workdir string, cfg MCPServerConfig) (*mcpClient, error) {
+	return startMCPClientWithRunner(a.streamRunnerOrDefault(), ctx, workdir, cfg)
+}
+
+func startMCPClientWithRunner(runner executiondomain.StreamRunner, ctx context.Context, workdir string, cfg MCPServerConfig) (*mcpClient, error) {
 	if cfg.Type == "sse" || cfg.Type == "http" || cfg.Type == "streamable_http" {
 		return startSSEMCPClient(ctx, cfg)
 	}
@@ -23,39 +28,26 @@ func startMCPClient(ctx context.Context, workdir string, cfg MCPServerConfig) (*
 		return nil, errors.New("command is required")
 	}
 	processCtx, processCancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(processCtx, cfg.Command, cfg.Args...)
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			return cmd.Process.Kill()
-		}
-		return nil
-	}
-	if strings.TrimSpace(workdir) != "" {
-		cmd.Dir = filepath.Clean(workdir)
-	}
-	cmd.Env = os.Environ()
+	env := os.Environ()
 	for key, value := range cfg.Env {
-		cmd.Env = append(cmd.Env, key+"="+value)
+		env = append(env, key+"="+value)
 	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		processCancel()
-		return nil, err
-	}
-	stdout, err := cmd.StdoutPipe()
+	stream, err := runner.Start(processCtx, executiondomain.StreamCommandRequest{
+		Name: cfg.Command, Args: cfg.Args, Dir: filepath.Clean(workdir), Env: env, StdinPipe: true,
+		Configure: configureResidentCommand,
+	})
 	if err != nil {
 		processCancel()
 		return nil, err
 	}
 	client := &mcpClient{
-		cmd: cmd, stdin: stdin, reader: bufio.NewReader(stdout), processCancel: processCancel,
+		process: stream, stdin: stream.Stdin, reader: bufio.NewReader(stream.Stdout), processCancel: processCancel,
 		messages: make(chan []byte, 64), messageErrors: make(chan error, 1),
 	}
-	cmd.Stderr = &client.stderr
-	if err := cmd.Start(); err != nil {
-		processCancel()
-		return nil, err
-	}
+	go func() {
+		_, _ = io.Copy(&client.stderr, stream.Stderr)
+		_ = stream.Stderr.Close()
+	}()
 	go client.readStdio(processCtx)
 	initCtx, initCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer initCancel()

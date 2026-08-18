@@ -1,0 +1,114 @@
+{
+  "p1/designer": [
+    {
+      "id": "51b46428889cfdf75cf543fcc9b917b6",
+      "type": "run_state_changed",
+      "project_id": "p1",
+      "agent_id": "designer",
+      "session_id": "2abbfbbe79e513f4",
+      "event_seq": 1,
+      "seq": 0,
+      "created_at": "2026-08-14T16:36:40.761122Z",
+      "run": {
+        "id": "96a6b28fc42fda56168130b7b7228131",
+        "project_id": "p1",
+        "agent_id": "designer",
+        "trigger": "handoff",
+        "turn_type": "plan",
+        "source_id": "product",
+        "message_id": "handoff-1",
+        "origin": {
+          "kind": ""
+        },
+        "state": "preparing_context",
+        "started_at": "2026-08-14T16:36:40.761122Z",
+        "updated_at": "2026-08-14T16:36:40.761122Z"
+      },
+      "from_state": "idle",
+      "reason": "handoff"
+    },
+    {
+      "id": "3563650eafe10447fc842b28efc6ebba",
+      "type": "run_state_changed",
+      "project_id": "p1",
+      "agent_id": "designer",
+      "session_id": "2abbfbbe79e513f4",
+      "event_seq": 2,
+      "seq": 0,
+      "created_at": "2026-08-14T16:36:40.770957Z",
+      "run": {
+        "id": "96a6b28fc42fda56168130b7b7228131",
+        "project_id": "p1",
+        "agent_id": "designer",
+        "trigger": "handoff",
+        "turn_type": "plan",
+        "source_id": "product",
+        "message_id": "handoff-1",
+        "origin": {
+          "kind": ""
+        },
+        "state": "invoking_model",
+        "started_at": "2026-08-14T16:36:40.761122Z",
+        "updated_at": "2026-08-14T16:36:40.770957Z"
+      },
+      "from_state": "preparing_context",
+      "reason": "handoff"
+    },
+    {
+      "id": "655b6b72ceb0b109a45c33c46d1fb4b9",
+      "type": "run_state_changed",
+      "project_id": "p1",
+      "agent_id": "designer",
+      "session_id": "2abbfbbe79e513f4",
+      "event_seq": 3,
+      "seq": 0,
+      "created_at": "2026-08-14T16:36:40.780956Z",
+      "run": {
+        "id": "96a6b28fc42fda56168130b7b7228131",
+        "project_id": "p1",
+        "agent_id": "designer",
+        "trigger": "handoff",
+        "turn_type": "plan",
+        "source_id": "product",
+        "message_id": "handoff-1",
+        "origin": {
+          "kind": ""
+        },
+        "state": "executing_tool",
+        "started_at": "2026-08-14T16:36:40.761122Z",
+        "updated_at": "2026-08-14T16:36:40.780956Z"
+      },
+      "from_state": "invoking_model",
+      "reason": "handoff"
+    },
+    {
+      "id": "4fee37e8afe1b86dbcc0e5b700c0aee2",
+      "type": "run_state_changed",
+      "project_id": "p1",
+      "agent_id": "designer",
+      "session_id": "2abbfbbe79e513f4",
+      "event_seq": 4,
+      "seq": 0,
+      "created_at": "2026-08-14T16:36:40.789958Z",
+      "run": {
+        "id": "96a6b28fc42fda56168130b7b7228131",
+        "project_id": "p1",
+        "agent_id": "designer",
+        "trigger": "handoff",
+        "turn_type": "plan",
+        "source_id": "product",
+        "message_id": "handoff-1",
+        "origin": {
+          "kind": ""
+        },
+        "state": "failed",
+        "error": "provider failed",
+        "started_at": "2026-08-14T16:36:40.761122Z",
+        "updated_at": "2026-08-14T16:36:40.789958Z",
+        "ended_at": "2026-08-14T16:36:40.789958Z"
+      },
+      "from_state": "executing_tool",
+      "reason": "handoff"
+    }
+  ]
+}

@@ -38,8 +38,8 @@ func artifactContentHash(content []byte) string {
 }
 
 func (a *app) registerWorkspaceArtifact(projectID, agentID, runID, relPath, kind, title, description string, content []byte) (Artifact, error) {
-	a.artifactOpsMu.Lock()
-	defer a.artifactOpsMu.Unlock()
+	a.artifactCatalogLocked().opsMu.Lock()
+	defer a.artifactCatalogLocked().opsMu.Unlock()
 	return a.artifactService().RegisterRevision(workspaceArtifactRegistrationInput(projectID, agentID, runID, relPath, kind, title, description, content))
 }
 
@@ -65,7 +65,7 @@ func workspaceArtifactRegistrationInput(projectID, agentID, runID, relPath, kind
 
 func (a *app) artifactsForProject(projectID, agentID, kind, status string) []Artifact {
 	a.mu.Lock()
-	items := append([]Artifact{}, a.artifacts[projectID]...)
+	items := append([]Artifact{}, a.artifactCatalogLocked().artifacts[projectID]...)
 	a.mu.Unlock()
 	agentID = strings.TrimSpace(agentID)
 	kind = strings.ToLower(strings.TrimSpace(kind))
@@ -84,7 +84,7 @@ func (a *app) artifactsForProject(projectID, agentID, kind, status string) []Art
 func (a *app) artifactByID(projectID, artifactID string) (Artifact, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, artifact := range a.artifacts[projectID] {
+	for _, artifact := range a.artifactCatalogLocked().artifacts[projectID] {
 		if artifact.ID == artifactID {
 			return artifact, true
 		}
@@ -115,8 +115,8 @@ func validArtifactStatusTransition(from, to string) bool {
 }
 
 func (a *app) updateArtifactStatus(projectID, artifactID, actorID, next, note string) (Artifact, error) {
-	a.artifactOpsMu.Lock()
-	defer a.artifactOpsMu.Unlock()
+	a.artifactCatalogLocked().opsMu.Lock()
+	defer a.artifactCatalogLocked().opsMu.Unlock()
 	return a.artifactService().Transition(projectID, artifactID, actorID, next, note)
 }
 
@@ -160,11 +160,9 @@ func (a *app) reconcileWorkspaceArtifacts() error {
 		availableProjects[project.ID] = true
 	}
 	a.mu.Lock()
-	if a.artifacts == nil {
-		a.artifacts = map[string][]Artifact{}
-	}
+	a.artifactCatalogLocked()
 	agents := map[string][]Agent{}
-	for projectID, projectAgents := range a.agents {
+	for projectID, projectAgents := range a.agentDirectoryLocked().agents {
 		if !availableProjects[projectID] {
 			continue
 		}
@@ -208,7 +206,8 @@ func (a *app) reconcileWorkspaceArtifacts() error {
 					Revision: 1, Status: ArtifactDraft, Previewable: artifactPreviewable(file.MimeType), Revisions: []ArtifactRevision{revision}, CreatedAt: now, UpdatedAt: now,
 				}
 				a.mu.Lock()
-				a.artifacts[projectID] = append(a.artifacts[projectID], artifact)
+				catalog := a.artifactCatalogLocked()
+				catalog.artifacts[projectID] = append(catalog.artifacts[projectID], artifact)
 				a.mu.Unlock()
 				changed = true
 			}

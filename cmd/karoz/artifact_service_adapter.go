@@ -9,7 +9,7 @@ type appArtifactRepository struct{ app *app }
 func (repository appArtifactRepository) FindActiveByPath(projectID, agentID, path string) (Artifact, bool, error) {
 	repository.app.mu.Lock()
 	defer repository.app.mu.Unlock()
-	for _, artifact := range repository.app.artifacts[projectID] {
+	for _, artifact := range repository.app.artifactCatalogLocked().artifacts[projectID] {
 		if artifact.AgentID == agentID && artifact.Path == path && artifact.Status != ArtifactSuperseded {
 			return artifact, true, nil
 		}
@@ -24,10 +24,8 @@ func (repository appArtifactRepository) Get(projectID, artifactID string) (Artif
 
 func (repository appArtifactRepository) Save(artifact Artifact) error {
 	repository.app.mu.Lock()
-	if repository.app.artifacts == nil {
-		repository.app.artifacts = map[string][]Artifact{}
-	}
-	items := repository.app.artifacts[artifact.ProjectID]
+	catalog := repository.app.artifactCatalogLocked()
+	items := catalog.artifacts[artifact.ProjectID]
 	found := false
 	for i := range items {
 		if items[i].ID == artifact.ID {
@@ -39,7 +37,7 @@ func (repository appArtifactRepository) Save(artifact Artifact) error {
 	if !found {
 		items = append(items, artifact)
 	}
-	repository.app.artifacts[artifact.ProjectID] = items
+	catalog.artifacts[artifact.ProjectID] = items
 	repository.app.mu.Unlock()
 	return repository.app.saveArtifacts()
 }

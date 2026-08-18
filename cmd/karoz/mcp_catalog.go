@@ -10,10 +10,11 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	executiondomain "github.com/karoz/karoz/internal/execution"
 )
 
 type mcpTool struct {
@@ -26,7 +27,7 @@ type mcpTool struct {
 }
 
 type mcpClient struct {
-	cmd           *exec.Cmd
+	process       executiondomain.StreamProcess
 	stdin         io.WriteCloser
 	reader        *bufio.Reader
 	stderr        bytes.Buffer
@@ -104,7 +105,7 @@ func (a *app) discoverMCPTools(ctx context.Context, workdir string) ([]mcpTool, 
 		if cfg.Disabled {
 			continue
 		}
-		client, err := startMCPClient(ctx, workdir, cfg)
+		client, err := a.startMCPClient(ctx, workdir, cfg)
 		if err != nil {
 			log.Printf("mcp discovery: start server %s: %v", name, err)
 			continue
@@ -140,7 +141,7 @@ func (a *app) callMCPTool(ctx context.Context, workdir, fullName, rawArgs string
 	if args == nil {
 		args = map[string]any{}
 	}
-	client, err := startMCPClient(ctx, workdir, cfg)
+	client, err := a.startMCPClient(ctx, workdir, cfg)
 	if err != nil {
 		return toolJSON(map[string]any{"error": "mcp_start_failed", "message": err.Error()}), nil
 	}
@@ -190,7 +191,7 @@ func (a *app) resolveMCPTool(ctx context.Context, workdir, fullName string) (str
 	sort.SliceStable(candidates, func(i, j int) bool { return len(candidates[i].key) > len(candidates[j].key) })
 	for _, candidate := range candidates {
 		sanitizedTool := strings.TrimPrefix(name, candidate.key+"__")
-		client, err := startMCPClient(ctx, workdir, candidate.cfg)
+		client, err := a.startMCPClient(ctx, workdir, candidate.cfg)
 		if err != nil {
 			continue
 		}

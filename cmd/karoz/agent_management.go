@@ -10,16 +10,13 @@ import (
 )
 
 func (a *app) projectAgents(project Project) []Agent {
-	a.mu.Lock()
-	agents := append([]Agent{}, a.agents[project.ID]...)
-	a.mu.Unlock()
+	agents, created := a.ensureAgentService().Ensure(project.ID, func() Agent {
+		return newAgentFromTemplate(project, defaultKarozAgentTemplate(), "karoz", "Karoz")
+	})
 	if len(agents) == 0 {
-		agents = []Agent{newAgentFromTemplate(project, defaultKarozAgentTemplate(), "karoz", "Karoz")}
-		a.mu.Lock()
-		if len(a.agents[project.ID]) == 0 {
-			a.agents[project.ID] = agents
-		}
-		a.mu.Unlock()
+		return []Agent{}
+	}
+	if created {
 		if err := a.saveAgents(); err != nil {
 			log.Printf("save agents: %v", err)
 		}
@@ -160,9 +157,7 @@ func (a *app) createProjectAgent(project Project, req AgentCreateRequest) (Agent
 	agent.GroupName = strings.TrimSpace(req.GroupName)
 	agent.GroupRole = strings.TrimSpace(req.GroupRole)
 	agent.GroupOrder = req.GroupOrder
-	a.mu.Lock()
-	a.agents[project.ID] = append(a.agents[project.ID], agent)
-	a.mu.Unlock()
+	a.ensureAgentService().Insert(agent)
 	if err := a.saveAgents(); err != nil {
 		return Agent{}, err
 	}
@@ -312,40 +307,37 @@ func teamEdgeIntent(kind string) string {
 }
 
 func (a *app) updateProjectAgent(project Project, agentID string, req AgentUpdateRequest) (Agent, error) {
-	a.mu.Lock()
-	agents := a.agents[project.ID]
-	for i := range agents {
-		if agents[i].ID != agentID {
-			continue
-		}
-		agents[i] = normalizeAgentModelConfig(agents[i])
+	var updated Agent
+	var validationErr error
+	_, ok := a.ensureAgentService().Mutate(project.ID, agentID, func(current *Agent) bool {
+		candidate := normalizeAgentModelConfig(*current)
 		if nickname := strings.TrimSpace(req.Nickname); nickname != "" {
-			agents[i].Nickname = nickname
-			agents[i].DisplayName = nickname
+			candidate.Nickname = nickname
+			candidate.DisplayName = nickname
 		}
 		if req.SystemPrompt != nil {
-			agents[i].SystemPrompt = strings.TrimSpace(*req.SystemPrompt)
+			candidate.SystemPrompt = strings.TrimSpace(*req.SystemPrompt)
 		}
 		if req.ChatMode != nil {
 			mode := strings.ToLower(strings.TrimSpace(*req.ChatMode))
 			if mode != "ask" && mode != "plan" && mode != "dev" {
-				a.mu.Unlock()
-				return Agent{}, errors.New("chat_mode must be ask, plan, or dev")
+				validationErr = errors.New("chat_mode must be ask, plan, or dev")
+				return false
 			}
-			agents[i].ChatMode = mode
+			candidate.ChatMode = mode
 		}
 		modelConfigChanged := req.Provider != nil || req.Model != nil || req.ThinkingEffort != nil
 		if modelConfigChanged {
 			key := projectAgentKey(project.ID, agentID)
-			if run, ok := a.agentRuns[key]; ok && run.State.Active() {
-				a.mu.Unlock()
-				return Agent{}, &agentBusyModelConfigError{}
+			if run, ok := a.agentRuntimeLocked().runs[key]; ok && run.State.Active() {
+				validationErr = &agentBusyModelConfigError{}
+				return false
 			}
-			if req.ExpectedModelConfigVersion != nil && *req.ExpectedModelConfigVersion != agents[i].ModelConfigVersion {
-				a.mu.Unlock()
-				return Agent{}, errors.New("model configuration changed; reload before updating")
+			if req.ExpectedModelConfigVersion != nil && *req.ExpectedModelConfigVersion != candidate.ModelConfigVersion {
+				validationErr = errors.New("model configuration changed; reload before updating")
+				return false
 			}
-			provider, model, effort := agents[i].Provider, agents[i].Model, agents[i].ThinkingEffort
+			provider, model, effort := candidate.Provider, candidate.Model, candidate.ThinkingEffort
 			if req.Provider != nil {
 				provider = normalizeResidentProvider(*req.Provider)
 			}
@@ -356,23 +348,27 @@ func (a *app) updateProjectAgent(project Project, agentID string, req AgentUpdat
 				effort = strings.ToLower(strings.TrimSpace(*req.ThinkingEffort))
 			}
 			if err := validateResidentModelConfig(provider, model, effort); err != nil {
-				a.mu.Unlock()
-				return Agent{}, err
+				validationErr = err
+				return false
 			}
-			agents[i].Provider, agents[i].Model, agents[i].ThinkingEffort = provider, model, effort
-			agents[i].ModelConfigVersion++
+			candidate.Provider, candidate.Model, candidate.ThinkingEffort = provider, model, effort
+			candidate.ModelConfigVersion++
 		}
-		agents[i].UpdatedAt = time.Now().UTC()
-		a.agents[project.ID] = agents
-		updated := agents[i]
-		a.mu.Unlock()
-		if err := a.saveAgents(); err != nil {
-			return Agent{}, err
-		}
-		return a.agentWithRuntimeState(project, updated), nil
+		candidate.UpdatedAt = time.Now().UTC()
+		*current = candidate
+		updated = candidate
+		return true
+	})
+	if validationErr != nil {
+		return Agent{}, validationErr
 	}
-	a.mu.Unlock()
-	return Agent{}, fmt.Errorf("agent %s not found", agentID)
+	if !ok {
+		return Agent{}, fmt.Errorf("agent %s not found", agentID)
+	}
+	if err := a.saveAgents(); err != nil {
+		return Agent{}, err
+	}
+	return a.agentWithRuntimeState(project, updated), nil
 }
 
 type agentBusyModelConfigError struct{}
@@ -382,6 +378,9 @@ func (*agentBusyModelConfigError) Error() string {
 }
 
 func (a *app) deleteProjectAgent(project Project, agentID string) error {
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
+
 	agentID = strings.TrimSpace(agentID)
 	if agentID == "" {
 		return fmt.Errorf("agent id is required")
@@ -394,9 +393,58 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	}
 	key := projectAgentKey(project.ID, agentID)
 	a.mu.Lock()
-	agents := a.agents[project.ID]
-	next := make([]Agent, 0, len(agents))
+	agents := a.agentDirectoryLocked().agents[project.ID]
 	found := false
+	for _, agent := range agents {
+		if agent.ID == agentID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		a.mu.Unlock()
+		return fmt.Errorf("agent %s not found", agentID)
+	}
+	runtime := a.agentRuntimeLocked()
+	if runtime.backgroundOwnerDeleting == nil {
+		runtime.backgroundOwnerDeleting = map[string]bool{}
+	}
+	if runtime.backgroundOwnerDeleting[key] {
+		a.mu.Unlock()
+		return fmt.Errorf("agent %s deletion is already in progress", agentID)
+	}
+	runtime.backgroundOwnerDeleting[key] = true
+	a.revokeResidentBashApprovalsForOwnerLocked(project.ID, agentID)
+	cancel := a.agentRuntimeLocked().cancels[key]
+	queue := a.agentRuntimeLocked().schedulerQueue
+	a.mu.Unlock()
+
+	ownerRemoved := false
+	defer func() {
+		if ownerRemoved {
+			return
+		}
+		a.mu.Lock()
+		delete(a.agentRuntimeLocked().backgroundOwnerDeleting, key)
+		a.mu.Unlock()
+	}()
+	if cancel != nil {
+		cancel()
+	}
+	if queue != nil {
+		queue.CancelAgent(project.ID, agentID, "agent deleted", time.Now().UTC())
+	}
+	if err := a.saveScheduledRuns(); err != nil {
+		return err
+	}
+	if err := a.stopOwnedProcesses(project.ID, agentID); err != nil {
+		return fmt.Errorf("stop background processes owned by %s: %w", agentID, err)
+	}
+
+	a.mu.Lock()
+	agents = a.agentDirectoryLocked().agents[project.ID]
+	next := make([]Agent, 0, len(agents))
+	found = false
 	for _, agent := range agents {
 		if agent.ID == agentID {
 			found = true
@@ -408,27 +456,61 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 		a.mu.Unlock()
 		return fmt.Errorf("agent %s not found", agentID)
 	}
-	a.agents[project.ID] = next
+	a.agentDirectoryLocked().agents[project.ID] = next
+	// A deleted owner must not leave a latent monitor able to wake a recreated
+	// same-ID agent.  Pending work is discarded under the same deletion fence.
+	probeMonitorIDs := make([]string, 0)
+	for i := range a.monitors[project.ID] {
+		item := &a.monitors[project.ID][i]
+		if item.AgentID == agentID || (item.Action.Kind == "notify_agent" && item.Action.AgentID == agentID) {
+			if item.Trigger.Kind == "script_probe" {
+				probeMonitorIDs = append(probeMonitorIDs, item.ID)
+			}
+			item.State = "disabled"
+			item.ErrorCode = "owner_deleted"
+			item.LastError = "monitor owner or target agent was deleted"
+			item.PendingFires = nil
+			item.UpdatedAt = time.Now().UTC()
+		}
+	}
+	now := time.Now().UTC()
+	for id, reservation := range a.monitorProbeReservations {
+		if reservation.ProjectID == project.ID &&
+			reservation.AgentID == agentID {
+			delete(a.monitorProbeReservations, id)
+		}
+	}
+	for id, challenge := range a.monitorProbeChallenges {
+		if challenge.ProjectID == project.ID &&
+			challenge.AgentID == agentID &&
+			challenge.ConsumedReceiptID == "" {
+			delete(a.monitorProbeChallenges, id)
+		}
+	}
+	for id, receipt := range a.monitorProbeReceipts {
+		if receipt.ProjectID == project.ID &&
+			receipt.AgentID == agentID &&
+			receipt.RevokedAt == nil {
+			receipt.RevokedAt = timePointer(now)
+			a.monitorProbeReceipts[id] = receipt
+		}
+	}
 	var routes []AgentRoute
-	for _, route := range a.agentRoutes[project.ID] {
+	for _, route := range a.collaborationServiceLocked().RoutesFor(project.ID) {
 		if route.FromAgentID == agentID || route.ToAgentID == agentID {
 			continue
 		}
 		routes = append(routes, route)
 	}
-	a.agentRoutes[project.ID] = routes
-	delete(a.agentRuns, key)
-	cancel := a.agentRunCancels[key]
-	delete(a.agentRunCancels, key)
-	queue := a.schedulerQueue
+	a.collaborationServiceLocked().ReplaceRoutes(project.ID, routes)
+	delete(runtime.runs, key)
+	delete(runtime.cancels, key)
 	a.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	for _, monitorID := range probeMonitorIDs {
+		a.cancelMonitorProbe(project.ID, monitorID)
 	}
-	if queue != nil {
-		queue.CancelAgent(project.ID, agentID, "agent deleted", time.Now().UTC())
-	}
-	if err := a.saveScheduledRuns(); err != nil {
+	ownerRemoved = true
+	if err := a.saveMonitors(); err != nil {
 		return err
 	}
 	if err := a.saveAgents(); err != nil {
@@ -437,13 +519,17 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	if err := a.saveAgentRoutes(); err != nil {
 		return err
 	}
-	return a.reconcileAgentGroups()
+	if err := a.reconcileAgentGroups(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	delete(a.agentRuntimeLocked().backgroundOwnerDeleting, key)
+	a.mu.Unlock()
+	return nil
 }
 
 func (a *app) routesForProject(projectID string) []AgentRoute {
-	a.mu.Lock()
-	out := append([]AgentRoute{}, a.agentRoutes[projectID]...)
-	a.mu.Unlock()
+	out := a.collaborationServiceLocked().RoutesFor(projectID)
 	if out == nil {
 		return []AgentRoute{}
 	}
@@ -501,12 +587,7 @@ func (a *app) updateAgentRoutes(project Project, routes []AgentRoute) ([]AgentRo
 			UpdatedAt:   now,
 		})
 	}
-	a.mu.Lock()
-	if a.agentRoutes == nil {
-		a.agentRoutes = map[string][]AgentRoute{}
-	}
-	a.agentRoutes[project.ID] = normalized
-	a.mu.Unlock()
+	a.collaborationServiceLocked().ReplaceRoutes(project.ID, normalized)
 	if err := a.saveAgentRoutes(); err != nil {
 		return nil, err
 	}

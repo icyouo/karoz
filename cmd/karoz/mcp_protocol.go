@@ -206,11 +206,11 @@ func (c *mcpClient) close() error {
 	if c.processCancel != nil {
 		c.processCancel()
 	}
-	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
+	if c.process.Cmd != nil && c.process.Cmd.Process != nil {
+		_ = c.process.Cmd.Process.Kill()
 	}
-	if c.cmd != nil {
-		return c.cmd.Wait()
+	if c.process.Cmd != nil {
+		return c.process.Cmd.Wait()
 	}
 	return nil
 }

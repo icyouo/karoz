@@ -15,27 +15,14 @@ func (repository appHandoffRepository) Get(projectID, agentID, messageID string)
 
 func (repository appHandoffRepository) Save(message AgentInboxMessage) error {
 	key := projectAgentKey(message.ProjectID, message.TargetAgentID)
-	repository.app.mu.Lock()
-	items := repository.app.inbox[key]
-	found := false
-	for i := range items {
-		if items[i].ID == message.ID {
-			items[i] = message
-			found = true
-			break
-		}
-	}
-	if !found {
-		items = append(items, message)
-	}
-	repository.app.inbox[key] = items
-	repository.app.mu.Unlock()
+	repository.app.collaborationServiceLocked().UpsertInbox(key, message)
 	return repository.app.saveInbox()
 }
 
 type appHandoffEvents struct{ app *app }
 
 func (events appHandoffEvents) HandoffChanged(change collaborationdomain.HandoffChange) {
+	events.app.appendAgentHandoffStateEvent(change.Handoff, change.From, change.Reason)
 	events.app.emitRuntimeStateChanged(RuntimeEvent{
 		ID: randomID(), ProjectID: change.Handoff.ProjectID, Kind: "handoff_changed", EntityID: change.Handoff.ID,
 		From: change.From, To: change.To, Reason: change.Reason, CreatedAt: change.At,

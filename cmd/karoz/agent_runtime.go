@@ -3,11 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 )
 
 func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent Agent, userText, turnType string, callbacks *AgentStreamCallbacks) (string, error) {
+	return a.runResidentAgentTurnWithCurrentInput(ctx, project, agent, userText, turnType, AgentTranscriptItem{}, callbacks)
+}
+
+func (a *app) runResidentAgentTurnWithCurrentInput(ctx context.Context, project Project, agent Agent, userText, turnType string, currentInput AgentTranscriptItem, callbacks *AgentStreamCallbacks) (string, error) {
 	var out strings.Builder
 	runID := ""
 	effectiveAgent := normalizeAgentModelConfig(agent)
@@ -42,7 +47,7 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 			if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateExecutingTool); !ok {
 				return
 			}
-			if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, runID, "tool_call", call.Name, call.Arguments); !ok {
+			if _, ok := a.appendAgentToolCallForRun(project.ID, agent.ID, runID, call); !ok {
 				return
 			}
 		}
@@ -53,7 +58,7 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 	outerToolResult := cb.OnToolResult
 	cb.OnToolResult = func(call codexToolCall, result string, success bool) {
 		if runID != "" {
-			if _, ok := a.appendAgentMessageForRun(project.ID, agent.ID, runID, "tool_result", call.Name, result); !ok {
+			if _, ok := a.appendAgentToolResultForRun(project.ID, agent.ID, runID, call, result, success); !ok {
 				return
 			}
 			if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateWaitingModel); !ok {
@@ -72,11 +77,6 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 	}
 	memoryQuery := a.memoryRetrievalQueryFor(ctx, effectiveAgent, userText)
 	prompt := a.buildResidentAgentPromptWithMemoryQuery(project, effectiveAgent, userText, turnType, memoryQuery)
-	if runID != "" {
-		if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateInvokingModel); !ok {
-			return "", fmt.Errorf("resident run %s is no longer active", runID)
-		}
-	}
 	request := CLI2APIRequest{
 		Provider:       effectiveAgent.Provider,
 		Model:          effectiveAgent.Model,
@@ -89,8 +89,62 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 	if capabilities := provider.Capabilities(request); !capabilities.SupportsResidentRuntime() {
 		return "", fmt.Errorf("resident provider %q does not support the required streaming, tool, and interrupt capabilities", a.resolveResidentProvider(request.Provider))
 	}
-	err := provider.Stream(ctx, request, toolCtx, cb)
+	if strings.TrimSpace(currentInput.ID) == "" || currentInput.Seq <= 0 {
+		var err error
+		currentInput, err = a.currentResidentInputIdentity(project.ID, agent.ID, runID)
+		if err != nil {
+			return "", err
+		}
+	}
+	history, err := boundedProviderTranscript(a.agentTranscriptDeltaForModel(project.ID, agent.ID), runID, currentInput.ID, currentInput.Seq)
+	if err != nil {
+		return "", fmt.Errorf("build resident model context: %w", err)
+	}
+	stablePrefixChars := strings.Index(prompt, "## Current chat turn type:")
+	totalTokens, stableTokens, transcriptTokens, dynamicTokens := residentPromptTokenAccounting(prompt, stablePrefixChars, history)
+	log.Printf("resident model context project=%s agent=%s turn=%s total_estimated_tokens=%d stable_prefix_tokens=%d transcript_tokens=%d dynamic_tokens=%d", project.ID, agent.ID, turnType, totalTokens, stableTokens, transcriptTokens, dynamicTokens)
+	if runID != "" {
+		if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateInvokingModel); !ok {
+			return "", fmt.Errorf("resident run %s is no longer active", runID)
+		}
+	}
+	request.Transcript = history
+	err = provider.Stream(ctx, request, toolCtx, cb)
 	return strings.TrimSpace(out.String()), err
+}
+
+func (a *app) currentResidentInputIdentity(projectID, agentID, runID string) (AgentTranscriptItem, error) {
+	if strings.TrimSpace(runID) == "" {
+		return AgentTranscriptItem{}, fmt.Errorf("resident current Run identity is required")
+	}
+	run, active := a.activeAgentRun(projectID, agentID)
+	if !active || run.ID != runID {
+		return AgentTranscriptItem{}, fmt.Errorf("resident current Run %s is not active", runID)
+	}
+	items := a.agentTranscriptDeltaForModel(projectID, agentID)
+	if strings.TrimSpace(run.MessageID) != "" {
+		for _, item := range items {
+			if item.ID == run.MessageID || item.MessageID == run.MessageID {
+				return item, nil
+			}
+		}
+	}
+	var found *AgentTranscriptItem
+	for i := range items {
+		item := items[i]
+		if item.RunID != runID || item.Role != "user" || item.Intent == "interrupt" {
+			continue
+		}
+		if found != nil {
+			return AgentTranscriptItem{}, fmt.Errorf("resident current input identity is ambiguous for Run %s", runID)
+		}
+		copy := item
+		found = &copy
+	}
+	if found == nil {
+		return AgentTranscriptItem{}, fmt.Errorf("resident current input identity was not found for Run %s", runID)
+	}
+	return *found, nil
 }
 
 func (a *app) agentRouteAllowed(projectID, fromAgentID, toAgentID, intent string) bool {
@@ -123,11 +177,10 @@ func (a *app) agentRouteAllowed(projectID, fromAgentID, toAgentID, intent string
 func (a *app) activeMemoriesFor(projectID, agentID, layer string, limit int) []AgentMemoryEntry {
 	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
-	items := append([]AgentMemoryEntry{}, a.memories[key]...)
+	items := append([]AgentMemoryEntry{}, a.memoryStoreLocked().entries[key]...)
 	a.mu.Unlock()
 	var out []AgentMemoryEntry
-	for i := len(items) - 1; i >= 0; i-- {
-		item := items[i]
+	for _, item := range items {
 		if item.State != "active" || item.ArchivedAt != nil {
 			continue
 		}
@@ -135,9 +188,67 @@ func (a *app) activeMemoriesFor(projectID, agentID, layer string, limit int) []A
 			continue
 		}
 		out = append(out, item)
-		if limit > 0 && len(out) >= limit {
-			break
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if layer == "pending" && out[i].Priority != out[j].Priority {
+			return out[i].Priority > out[j].Priority
 		}
+		left := out[i].UpdatedAt
+		if left.IsZero() {
+			left = out[i].CreatedAt
+		}
+		right := out[j].UpdatedAt
+		if right.IsZero() {
+			right = out[j].CreatedAt
+		}
+		if !left.Equal(right) {
+			return left.After(right)
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	if out == nil {
+		return []AgentMemoryEntry{}
+	}
+	return out
+}
+
+// visibleActiveMemoriesFor is the API/UI projection for one agent. It keeps
+// the agent's own active memory private while adding active project-scoped
+// facts authored by peers in the same project.
+func (a *app) visibleActiveMemoriesFor(projectID, agentID string, limit int) []AgentMemoryEntry {
+	a.mu.Lock()
+	var out []AgentMemoryEntry
+	for _, entries := range a.memoryStoreLocked().entries {
+		for _, entry := range entries {
+			if entry.ProjectID != projectID || entry.State != "active" || entry.ArchivedAt != nil {
+				continue
+			}
+			if entry.AgentID == agentID ||
+				(entry.Layer == "fact" && memoryEntryScope(entry) == "project") {
+				out = append(out, entry)
+			}
+		}
+	}
+	a.mu.Unlock()
+	sort.SliceStable(out, func(i, j int) bool {
+		left := out[i].UpdatedAt
+		if left.IsZero() {
+			left = out[i].CreatedAt
+		}
+		right := out[j].UpdatedAt
+		if right.IsZero() {
+			right = out[j].CreatedAt
+		}
+		if !left.Equal(right) {
+			return left.After(right)
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	if out == nil {
 		return []AgentMemoryEntry{}
@@ -146,9 +257,7 @@ func (a *app) activeMemoriesFor(projectID, agentID, layer string, limit int) []A
 }
 
 func (a *app) blackboardFor(projectID string, limit int) []AgentBlackboardEntry {
-	a.mu.Lock()
-	items := append([]AgentBlackboardEntry{}, a.blackboard[projectID]...)
-	a.mu.Unlock()
+	items := a.collaborationServiceLocked().BlackboardFor(projectID)
 	sort.SliceStable(items, func(i, j int) bool {
 		left := items[i].UpdatedAt
 		if left.IsZero() {
@@ -195,9 +304,7 @@ func (a *app) pendingInboxFor(projectID, agentID string, limit int) []AgentInbox
 
 func (a *app) inboxFor(projectID, agentID string, limit int) []AgentInboxMessage {
 	key := projectAgentKey(projectID, agentID)
-	a.mu.Lock()
-	items := append([]AgentInboxMessage{}, a.inbox[key]...)
-	a.mu.Unlock()
+	items := a.collaborationServiceLocked().InboxFor(key)
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
 	if limit > 0 && len(items) > limit {
 		items = items[:limit]
