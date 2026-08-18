@@ -65,7 +65,7 @@ func TestBackgroundProcessOutlivesRunCreatorAndSSERequest(t *testing.T) {
 		ID: "other-agent", ProjectID: project.ID,
 		Name: "other-agent", Nickname: "Other",
 	}
-	a.agents[project.ID] = []Agent{owner, otherAgent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{owner, otherAgent}
 	if err := a.bootstrapProcessRuntime(); err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestDeletingAgentStopsItsOwnedBackgroundProcesses(t *testing.T) {
 		Name:      "deletable",
 		Nickname:  "Deletable",
 	}
-	a.agents[project.ID] = []Agent{
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{
 		{ID: "karoz", ProjectID: project.ID, Name: "karoz"},
 		agent,
 	}
@@ -434,7 +434,7 @@ func TestDeletingAgentFencesApprovalsAndCancelsBeforeProcessStop(
 	runCancelled := make(chan struct{})
 	key := projectAgentKey(fixture.project.ID, fixture.agent.ID)
 	fixture.app.mu.Lock()
-	fixture.app.agentRunCancels[key] = func() { close(runCancelled) }
+	fixture.app.agentRuntimeLocked().cancels[key] = func() { close(runCancelled) }
 	fixture.app.mu.Unlock()
 
 	deleteResult := make(chan error, 1)
@@ -465,7 +465,7 @@ func TestDeletingAgentFencesApprovalsAndCancelsBeforeProcessStop(
 		t.Fatalf("deleting owner created an approval: %s", request)
 	}
 	fixture.app.mu.Lock()
-	approvalCount := len(fixture.app.residentBashApprovals)
+	approvalCount := len(fixture.app.agentRuntimeLocked().residentBashApprovals)
 	fixture.app.mu.Unlock()
 	if approvalCount != 0 {
 		t.Fatalf("deleting owner retained %d approvals", approvalCount)
@@ -503,7 +503,7 @@ func TestRunBackgroundApprovalSeparationAndInstantExit(t *testing.T) {
 		Name:      "owner",
 		Nickname:  "Owner",
 	}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 	if err := a.bootstrapProcessRuntime(); err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +700,7 @@ func newBackgroundProcessTestFixture(t *testing.T) backgroundProcessTestFixture 
 	agent := Agent{
 		ID: "owner", ProjectID: project.ID, Name: "owner", Nickname: "Owner",
 	}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 	if err := a.bootstrapProcessRuntime(); err != nil {
 		t.Fatal(err)
 	}
@@ -827,7 +827,7 @@ func TestRunBackgroundWorkdirContainmentPrecedesApprovalAndEffects(t *testing.T)
 		}
 	}
 	fixture.app.mu.Lock()
-	fixture.app.residentBashApprovals = map[string]ResidentBashApproval{}
+	fixture.app.agentRuntimeLocked().residentBashApprovals = map[string]ResidentBashApproval{}
 	fixture.app.mu.Unlock()
 
 	invalid := []struct {
@@ -853,7 +853,7 @@ func TestRunBackgroundWorkdirContainmentPrecedesApprovalAndEffects(t *testing.T)
 				t.Fatalf("invalid ask workdir %q = %s err=%v", test.workdir, askResult, askErr)
 			}
 			fixture.app.mu.Lock()
-			approvalCount := len(fixture.app.residentBashApprovals)
+			approvalCount := len(fixture.app.agentRuntimeLocked().residentBashApprovals)
 			fixture.app.mu.Unlock()
 			if approvalCount != 0 {
 				t.Fatalf("invalid workdir created %d approvals", approvalCount)
@@ -901,7 +901,7 @@ func TestBackgroundEffectsMarkerSaveFailureRetriesBeforeEffect(t *testing.T) {
 				t, fixture.app, fixture.project, fixture.agent, runID,
 			)
 			saveErr := errors.New("injected scheduled-run save failure")
-			fixture.app.scheduledRunsSaveOverride = func(
+			fixture.app.agentRuntimeLocked().scheduledRunsSaveOverride = func(
 				scheduledRunSnapshot,
 			) error {
 				return saveErr
@@ -953,7 +953,7 @@ func TestBackgroundEffectsMarkerSaveFailureRetriesBeforeEffect(t *testing.T) {
 				}
 			}
 
-			fixture.app.scheduledRunsSaveOverride = nil
+			fixture.app.agentRuntimeLocked().scheduledRunsSaveOverride = nil
 			result, err = invoke()
 			if err != nil {
 				t.Fatalf("retry %s = %s err=%v", operation, result, err)
@@ -999,7 +999,7 @@ func TestBackgroundEffectsMarkerUncertainSaveCrashSuppressesReplay(t *testing.T)
 				t, fixture.app, fixture.project, fixture.agent, runID,
 			)
 			uncertainErr := errors.New("injected uncertain scheduled-run save")
-			fixture.app.scheduledRunsSaveOverride = func(
+			fixture.app.agentRuntimeLocked().scheduledRunsSaveOverride = func(
 				snapshot scheduledRunSnapshot,
 			) error {
 				if err := writeJSONFileAtomic(

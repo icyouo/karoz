@@ -33,7 +33,7 @@ func (fakeDynamicTools) Call(context.Context, string, string, string) (string, e
 
 func TestNewAppInitializesRuntimeStateAndHTTPComposition(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
-	if a.schedulerQueue == nil || a.tasks == nil || a.agents == nil || a.artifacts == nil || a.inbox == nil || a.agentRuns == nil || a.runtimeWatchers == nil {
+	if a.agentRuntime == nil || a.agentRuntime.schedulerQueue == nil || a.projectTasks == nil || a.agentDirectoryLocked().agents == nil || a.artifactCatalog == nil || a.collaboration == nil || a.agentRuntime.runtimeWatchers == nil {
 		t.Fatalf("application state was not fully initialized: %+v", a)
 	}
 	response := httptest.NewRecorder()
@@ -49,7 +49,7 @@ func TestResidentRuntimeUsesProviderAndDynamicToolPorts(t *testing.T) {
 	a.dynamicTools = fakeDynamicTools{}
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
 	agent := Agent{ID: "designer", ProjectID: project.ID, Name: "Designer", Role: "design"}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 	run, started := a.beginAgentRun(AgentRunInput{RunID: "runtime-port-test", ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: "ask"})
 	if !started {
 		t.Fatal("could not begin run")
@@ -78,7 +78,7 @@ func TestAgentMessagePostAlwaysUsesResidentSSEStream(t *testing.T) {
 	a.modelProvider = fakeModelProvider{}
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
 	agent := Agent{ID: "designer", ProjectID: project.ID, Name: "Designer", Role: "design"}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 
 	request := httptest.NewRequest(http.MethodPost, "/agents/designer/messages", strings.NewReader(`{"message":"hello","type":"ask"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -105,7 +105,7 @@ func TestResidentAgentChatModePersistsAndDefaultsMessageMode(t *testing.T) {
 	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: t.TempDir()})
 	a.modelProvider = fakeModelProvider{}
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
-	a.agents[project.ID] = []Agent{{ID: "designer", ProjectID: project.ID, Name: "Designer", Role: "design"}}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{ID: "designer", ProjectID: project.ID, Name: "Designer", Role: "design"}}
 
 	patch := httptest.NewRequest(http.MethodPatch, "/agents/designer", strings.NewReader(`{"chat_mode":"plan"}`))
 	patch.Header.Set("Content-Type", "application/json")
@@ -163,7 +163,7 @@ func TestResidentAgentModelConfigPersistsAndRunSnapshotsIt(t *testing.T) {
 	t.Setenv("KAROZ_CODEX_AUTH_PATH", authPath)
 	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: t.TempDir()})
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
-	a.agents[project.ID] = []Agent{{ID: "architect", ProjectID: project.ID, Name: "Architect"}}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{ID: "architect", ProjectID: project.ID, Name: "Architect"}}
 	updated, err := a.updateProjectAgent(project, "architect", AgentUpdateRequest{Provider: ptrString("codex"), Model: ptrString("gpt-5.3-codex"), ThinkingEffort: ptrString("high")})
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +190,7 @@ func TestResidentAgentCanSwitchToClaudeAndActiveRunReturnsConflict(t *testing.T)
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
-	a.agents[project.ID] = []Agent{{ID: "reviewer", ProjectID: project.ID, Name: "Reviewer"}}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{ID: "reviewer", ProjectID: project.ID, Name: "Reviewer"}}
 	patch := httptest.NewRequest(http.MethodPatch, "/agents/reviewer", strings.NewReader(`{"provider":"claude","model":"claude-sonnet-4-6","thinking_effort":"high","expected_model_config_version":1}`))
 	patch.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()

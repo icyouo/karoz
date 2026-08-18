@@ -37,20 +37,14 @@ func TestDesignerBuilderReviewerArtifactWorkflow(t *testing.T) {
 	reviewer := Agent{ID: "reviewer", ProjectID: project.ID, Name: "design-critic", Nickname: "Review"}
 	a := &app{
 		settings:        Settings{DataDir: t.TempDir(), ProjectsRoot: root},
-		tasks:           map[string][]Task{},
-		agents:          map[string][]Agent{project.ID: {designer, builder, reviewer}},
-		artifacts:       map[string][]Artifact{},
-		blackboard:      map[string][]AgentBlackboardEntry{},
-		inbox:           map[string][]AgentInboxMessage{},
-		taskHooks:       map[string][]TaskRuntimeHook{},
-		agentRoutes:     map[string][]AgentRoute{},
-		agentMessages:   map[string][]AgentMessage{},
-		agentSessions:   map[string]AgentSessionState{},
-		memories:        map[string][]AgentMemoryEntry{},
-		archives:        map[string][]AgentArchiveMessage{},
-		runtimeHooks:    map[string]bool{},
-		runtimeWatchers: map[string]map[chan RuntimeEvent]bool{},
+		projectTasks:    newProjectTaskCoordinator(),
+		agentDirectory:  agentDirectoryForTest(map[string][]Agent{project.ID: {designer, builder, reviewer}}),
+		artifactCatalog: newArtifactCatalog(),
+		conversation:    newConversationService(),
+		memoryStore:     newMemoryStore(),
+		agentRuntime:    newAgentRuntimeCoordinator(),
 	}
+	initializeResidentToolsForTest(t, a)
 	designerCtx := ResidentToolContext{Project: project, Agent: designer, Workdir: project.Path, RunID: "run-design-1"}
 	writeResult, err := a.executeResidentTool(context.Background(), designerCtx, codexToolCall{Name: "write_workspace_file", Arguments: `{"path":"checkout.html","content":"<!doctype html><html><body>Checkout</body></html>","artifact_kind":"mockup_html","title":"Checkout mockup","description":"Desktop and mobile checkout"}`})
 	if err != nil {
@@ -130,9 +124,9 @@ func TestArtifactHTTPReviewAndPreview(t *testing.T) {
 	dataDir := t.TempDir()
 	root, project := artifactTestProject(t)
 	a := &app{
-		settings: Settings{DataDir: dataDir, ProjectsRoot: root}, artifacts: map[string][]Artifact{},
-		agents:     map[string][]Agent{project.ID: {{ID: "designer", ProjectID: project.ID}}},
-		blackboard: map[string][]AgentBlackboardEntry{}, runtimeHooks: map[string]bool{}, runtimeWatchers: map[string]map[chan RuntimeEvent]bool{},
+		settings: Settings{DataDir: dataDir, ProjectsRoot: root}, artifactCatalog: newArtifactCatalog(),
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{project.ID: {{ID: "designer", ProjectID: project.ID}}}),
+		agentRuntime:   newAgentRuntimeCoordinator(),
 	}
 	content := []byte("<!doctype html><html><body>Preview</body></html>")
 	full, err := a.safeWorkspacePath(project.ID, "designer", "preview.html")
@@ -178,9 +172,9 @@ func TestArtifactsPersistAndLegacyWorkspaceFilesAreRegistered(t *testing.T) {
 	projectID := project.ID
 	agentID := "designer"
 	a := &app{
-		settings:  Settings{DataDir: dataDir, ProjectsRoot: root},
-		agents:    map[string][]Agent{projectID: {{ID: agentID, ProjectID: projectID}}},
-		artifacts: map[string][]Artifact{},
+		settings:        Settings{DataDir: dataDir, ProjectsRoot: root},
+		agentDirectory:  agentDirectoryForTest(map[string][]Agent{projectID: {{ID: agentID, ProjectID: projectID}}}),
+		artifactCatalog: newArtifactCatalog(),
 	}
 	full, err := a.safeWorkspacePath(projectID, agentID, "legacy.svg")
 	if err != nil {
@@ -200,7 +194,7 @@ func TestArtifactsPersistAndLegacyWorkspaceFilesAreRegistered(t *testing.T) {
 		t.Fatalf("reconciled artifacts = %+v", items)
 	}
 
-	reloaded := &app{settings: Settings{DataDir: dataDir, ProjectsRoot: root}, artifacts: map[string][]Artifact{}}
+	reloaded := &app{settings: Settings{DataDir: dataDir, ProjectsRoot: root}, artifactCatalog: newArtifactCatalog()}
 	if err := reloaded.loadArtifacts(); err != nil {
 		t.Fatal(err)
 	}
@@ -214,8 +208,8 @@ func TestConcurrentArtifactWritesPreserveEveryRevision(t *testing.T) {
 	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
 	root, project := artifactTestProject(t)
 	a := &app{
-		settings: Settings{DataDir: t.TempDir(), ProjectsRoot: root}, artifacts: map[string][]Artifact{},
-		blackboard: map[string][]AgentBlackboardEntry{}, runtimeHooks: map[string]bool{}, runtimeWatchers: map[string]map[chan RuntimeEvent]bool{},
+		settings: Settings{DataDir: t.TempDir(), ProjectsRoot: root}, artifactCatalog: newArtifactCatalog(),
+		agentRuntime: newAgentRuntimeCoordinator(),
 	}
 	const writes = 10
 	var wait sync.WaitGroup

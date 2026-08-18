@@ -44,7 +44,7 @@ func TestWindowsBackgroundReleaseLifecycle(t *testing.T) {
 		ID: "owner", ProjectID: project.ID, Name: "owner",
 		CreatedAt: time.Now().UTC(),
 	}
-	a.agents[project.ID] = []Agent{
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{
 		{ID: "karoz", ProjectID: project.ID, Name: "karoz"},
 		agent,
 	}

@@ -20,7 +20,7 @@ func TestScheduledRunTimeoutCancelsBlockingExecutor(t *testing.T) {
 	job.MaxAttempts = 1
 	started := make(chan struct{})
 	stopped := make(chan error, 1)
-	a.schedulerExecutors[kind] = func(ctx context.Context, _ ScheduledRun) error {
+	a.agentRuntimeLocked().schedulerExecutors[kind] = func(ctx context.Context, _ ScheduledRun) error {
 		close(started)
 		<-ctx.Done()
 		stopped <- ctx.Err()
@@ -121,13 +121,13 @@ func TestScheduledCancelBeforeBindDoesNotExecuteOrRetry(t *testing.T) {
 	}
 	enteredBind := make(chan struct{})
 	releaseBind := make(chan struct{})
-	a.scheduledRunBeforeBindHook = func() {
+	a.agentRuntimeLocked().scheduledRunBeforeBindHook = func() {
 		close(enteredBind)
 		<-releaseBind
 	}
-	defer func() { a.scheduledRunBeforeBindHook = nil }()
+	defer func() { a.agentRuntimeLocked().scheduledRunBeforeBindHook = nil }()
 	var executions atomic.Int32
-	a.schedulerExecutors[kind] = func(context.Context, ScheduledRun) error {
+	a.agentRuntimeLocked().schedulerExecutors[kind] = func(context.Context, ScheduledRun) error {
 		executions.Add(1)
 		return nil
 	}
@@ -184,7 +184,7 @@ func TestScheduledHandoffTaskPlanCancelAfterProviderBeforeResultCommit(t *testin
 			a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 			project := Project{ID: "project", Name: "project", Path: t.TempDir(), DefaultBranch: "main"}
 			agent := Agent{ID: "agent", ProjectID: project.ID, Name: "Agent", Role: "implementation"}
-			a.agents[project.ID] = []Agent{agent}
+			a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 			run, started := a.beginAgentRun(AgentRunInput{
 				RunID: "scheduled-" + test.name, ProjectID: project.ID, AgentID: agent.ID,
 				Trigger: RunTriggerSystem, TurnType: "ask",
@@ -199,7 +199,7 @@ func TestScheduledHandoffTaskPlanCancelAfterProviderBeforeResultCommit(t *testin
 			ledger.publish("meta", map[string]any{"run_id": run.ID})
 			atCommit := make(chan struct{})
 			releaseCommit := make(chan struct{})
-			a.scheduledRunBeforeResultCommitHook = func() {
+			a.agentRuntimeLocked().scheduledRunBeforeResultCommitHook = func() {
 				close(atCommit)
 				<-releaseCommit
 			}
@@ -219,7 +219,7 @@ func TestScheduledHandoffTaskPlanCancelAfterProviderBeforeResultCommit(t *testin
 			if err := <-result; err != context.Canceled {
 				t.Fatalf("scheduled result commit error=%v, want context.Canceled", err)
 			}
-			a.scheduledRunBeforeResultCommitHook = nil
+			a.agentRuntimeLocked().scheduledRunBeforeResultCommitHook = nil
 			a.finishAgentRunWithLedger(project, agent, run.ID, RunStateCancelled, context.Canceled, "Agent run cancelled.")
 			waitForLedgerTerminal(t, ledger)
 			for _, message := range a.agentMessagesForDisplay(project.ID, agent.ID) {

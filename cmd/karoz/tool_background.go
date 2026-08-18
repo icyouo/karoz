@@ -55,7 +55,7 @@ func (a *app) executeResidentRunBackgroundTool(
 			"error": "validation_error", "message": err.Error(),
 		}), nil
 	}
-	lifetime, err := backgroundLifetimeArg(
+	lifetime, unlimited, err := backgroundLifetimeArg(
 		args,
 		a.processSupervisor.config.MaxLifetime,
 	)
@@ -73,8 +73,8 @@ func (a *app) executeResidentRunBackgroundTool(
 		), nil
 	}
 
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	if err := a.requireProcessProject(toolCtx.Project.ID); err != nil {
 		return toolJSON(map[string]any{
 			"error":   "runtime_unavailable",
@@ -97,6 +97,7 @@ func (a *app) executeResidentRunBackgroundTool(
 		RunID: toolCtx.RunID, Command: command, Workdir: workdir,
 		Description: toolStringArg(args, "description", 500),
 		Lifetime:    lifetime,
+		Unlimited:   unlimited,
 	})
 	if err != nil {
 		return toolJSON(map[string]any{
@@ -245,8 +246,8 @@ func (a *app) executeResidentStopProcessTool(
 		), nil
 	}
 
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	current, err := a.processRecord(toolCtx.Project.ID, processID)
 	if errors.Is(err, errProcessRuntimeUnavailable) {
 		return toolJSON(map[string]any{
@@ -282,16 +283,16 @@ func (a *app) executeResidentStopProcessTool(
 func backgroundLifetimeArg(
 	args map[string]any,
 	maximum time.Duration,
-) (time.Duration, error) {
+) (time.Duration, bool, error) {
 	raw, exists := args["lifetime_ms"]
 	if !exists {
-		return 0, nil
+		return 0, false, nil
 	}
 	var milliseconds int64
 	switch value := raw.(type) {
 	case float64:
 		if math.Trunc(value) != value || value > math.MaxInt64 {
-			return 0, errors.New("lifetime_ms must be an integer")
+			return 0, false, errors.New("lifetime_ms must be an integer")
 		}
 		milliseconds = int64(value)
 	case int:
@@ -301,21 +302,30 @@ func backgroundLifetimeArg(
 	case json.Number:
 		parsed, err := value.Int64()
 		if err != nil {
-			return 0, errors.New("lifetime_ms must be an integer")
+			return 0, false, errors.New("lifetime_ms must be an integer")
 		}
 		milliseconds = parsed
 	default:
-		return 0, errors.New("lifetime_ms must be an integer")
+		return 0, false, errors.New("lifetime_ms must be an integer")
 	}
-	if milliseconds <= 0 {
-		return 0, errors.New("lifetime_ms must be positive")
+	if milliseconds < 0 {
+		return 0, false, errors.New("lifetime_ms must be zero (unlimited) or positive")
 	}
-	if maximum <= 0 || milliseconds > maximum.Milliseconds() {
-		return 0, errors.New("lifetime_ms exceeds the configured maximum")
+	if milliseconds == 0 {
+		if maximum > 0 {
+			return 0, false, errors.New("unlimited lifetime exceeds the configured maximum")
+		}
+		return 0, true, nil
+	}
+	if milliseconds > math.MaxInt64/int64(time.Millisecond) {
+		return 0, false, errors.New("lifetime_ms exceeds the supported duration range")
+	}
+	if maximum > 0 && milliseconds > maximum.Milliseconds() {
+		return 0, false, errors.New("lifetime_ms exceeds the configured maximum")
 	}
 	lifetime := time.Duration(milliseconds) * time.Millisecond
 	if lifetime <= 0 {
-		return 0, errors.New("lifetime_ms exceeds the configured maximum")
+		return 0, false, errors.New("lifetime_ms exceeds the supported duration range")
 	}
-	return lifetime, nil
+	return lifetime, false, nil
 }

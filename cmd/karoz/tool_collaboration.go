@@ -119,8 +119,8 @@ func (a *app) sendToAgentWithRoute(projectID, sourceAgentID, parentRunID string,
 }
 
 func (a *app) replyToInboxMessage(projectID, sourceAgentID, parentRunID string, args map[string]any) string {
-	a.handoffReplyMu.Lock()
-	defer a.handoffReplyMu.Unlock()
+	a.collaborationServiceLocked().handoffReplyMu.Lock()
+	defer a.collaborationServiceLocked().handoffReplyMu.Unlock()
 	inboxMessageID := toolStringArg(args, "inbox_message_id", 128)
 	body := toolStringArg(args, "body", 20000)
 	if inboxMessageID == "" || body == "" {
@@ -378,7 +378,7 @@ func (a *app) markBlackboardActivity(projectID string, agent Agent, args map[str
 	found := false
 	derived := false
 	a.mu.Lock()
-	items := a.blackboard[projectID]
+	items := a.collaborationServiceLocked().BlackboardFor(projectID)
 	for i := range items {
 		if items[i].ID != activityID {
 			continue
@@ -406,7 +406,7 @@ func (a *app) markBlackboardActivity(projectID string, agent Agent, args map[str
 		found = true
 		break
 	}
-	a.blackboard[projectID] = items
+	a.collaborationServiceLocked().ReplaceProjectBlackboard(projectID, items)
 	a.mu.Unlock()
 	if derived {
 		return toolJSON(map[string]any{"error": "derived_projection", "message": "derived blackboard entries are read-only; act on the source Run, Handoff, or Task"})

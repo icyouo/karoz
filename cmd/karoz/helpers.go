@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
@@ -372,30 +373,13 @@ func (a *app) safeWorkspacePath(projectID, agentID, relPath string) (string, err
 	return full, nil
 }
 
-func toolStatus(name string) ToolStatus {
+func (a *app) toolStatus(name string) ToolStatus {
 	path, err := exec.LookPath(name)
 	if err != nil {
 		return ToolStatus{Available: false, Error: err.Error()}
 	}
-	version, _ := run("", name, "--version")
-	return ToolStatus{Available: true, Path: path, Version: strings.TrimSpace(version)}
-}
-
-func gitOutput(dir string, args ...string) string {
-	out, err := run(dir, "git", args...)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(out)
-}
-
-func run(dir, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	result, _ := a.runCapturedCommand(context.Background(), "", name, "--version")
+	return ToolStatus{Available: true, Path: path, Version: strings.TrimSpace(result.Output())}
 }
 
 func writeJSONFileAtomic(path string, value any, perm os.FileMode) error {
@@ -464,17 +448,36 @@ func indentPrompt(value, prefix string) string {
 }
 
 func memorySummary(entry AgentMemoryEntry) map[string]any {
-	return map[string]any{
-		"id":         entry.ID,
-		"layer":      entry.Layer,
-		"state":      entry.State,
-		"priority":   entry.Priority,
-		"summary":    entry.Summary,
-		"detail":     entry.Detail,
-		"metadata":   entry.Metadata,
-		"created_at": entry.CreatedAt,
-		"updated_at": entry.UpdatedAt,
+	result := map[string]any{
+		"id":              entry.ID,
+		"project_id":      entry.ProjectID,
+		"agent_id":        entry.AgentID,
+		"session_id":      entry.SessionID,
+		"layer":           entry.Layer,
+		"scope":           memoryEntryScope(entry),
+		"author_agent_id": entry.AgentID,
+		"state":           entry.State,
+		"priority":        entry.Priority,
+		"summary":         entry.Summary,
+		"detail":          entry.Detail,
+		"metadata":        entry.Metadata,
+		"created_at":      entry.CreatedAt,
+		"updated_at":      entry.UpdatedAt,
 	}
+	if entry.SupersedesID != "" {
+		result["supersedes_id"] = entry.SupersedesID
+	}
+	if entry.SupersededByID != "" {
+		result["superseded_by_id"] = entry.SupersededByID
+	}
+	return result
+}
+
+func memoryEntryScope(entry AgentMemoryEntry) string {
+	if strings.EqualFold(strings.TrimSpace(entry.Scope), "project") {
+		return "project"
+	}
+	return "agent"
 }
 
 func (a *app) memorySummaries(entries []AgentMemoryEntry) []map[string]any {

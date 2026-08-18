@@ -50,8 +50,8 @@ func (a *app) patchMonitorHTTP(
 	if patch.Revision <= 0 {
 		return Monitor{}, errors.New("monitor revision is required")
 	}
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	a.mu.Lock()
 	items := a.monitors[project.ID]
 	for index := range items {
@@ -161,7 +161,7 @@ func (a *app) patchMonitorHTTP(
 }
 
 func (a *app) projectAgentExistsLocked(projectID, agentID string) bool {
-	for _, agent := range a.agents[projectID] {
+	for _, agent := range a.agentDirectoryLocked().agents[projectID] {
 		if agent.ID == agentID {
 			return true
 		}

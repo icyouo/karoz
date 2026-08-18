@@ -40,6 +40,7 @@
       state.chatNextBeforeSeq = 0;
       state.preview = null;
       state.sidePanel = null;
+      state.updatesView = 'attention';
       state.backgroundProcesses = [];
       state.backgroundMonitors = [];
       state.backgroundEditor = null;
@@ -158,6 +159,7 @@
     }
     function renderTaskFields(task) {
       const fields = [
+		['Maximum runtime', task.max_runtime_ms === 0 ? 'Unlimited' : backgroundDuration(task.max_runtime_ms == null ? 3600000 : task.max_runtime_ms)],
         ['Base branch', task.base_branch || 'main'],
 		['Base commit', task.base_commit || '-'],
         ['Task branch', task.task_branch || '-'],

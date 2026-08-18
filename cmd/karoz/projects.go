@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	executiondomain "github.com/karoz/karoz/internal/execution"
 	"log"
 	"os"
 	"path/filepath"
@@ -57,7 +59,7 @@ func scanProjectsForSettings(settings Settings) ([]Project, error) {
 
 func (a *app) applyProjectAlias(project Project) Project {
 	a.mu.Lock()
-	alias := strings.TrimSpace(a.projectAliases[project.ID])
+	alias := strings.TrimSpace(a.projectRegistryLocked().aliases[project.ID])
 	a.mu.Unlock()
 	if alias != "" {
 		project.Name = alias
@@ -96,7 +98,7 @@ func scanWorkspaceProjects(root string, main bool) ([]Project, error) {
 
 func projectFromPath(path, workspaceRoot, workspaceType string) Project {
 	path = filepath.Clean(path)
-	branch := gitOutput(path, "rev-parse", "--abbrev-ref", "HEAD")
+	branch := projectGitOutput(path, "rev-parse", "--abbrev-ref", "HEAD")
 	if branch == "" {
 		branch = "main"
 	}
@@ -109,6 +111,14 @@ func projectFromPath(path, workspaceRoot, workspaceType string) Project {
 		DefaultBranch: branch,
 		AgentName:     "karoz",
 	}
+}
+
+func projectGitOutput(dir string, args ...string) string {
+	result, err := executiondomain.NewHostRunner().Run(context.Background(), commandRequest(dir, "git", args...))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(result.Output())
 }
 
 func (a *app) projectByID(id string) (Project, error) {
@@ -128,8 +138,8 @@ func (a *app) createProject(req ProjectCreateRequest) (Project, error) {
 	if strings.EqualFold(strings.TrimSpace(req.Mode), "import") || strings.TrimSpace(req.Path) != "" {
 		return a.importProject(req)
 	}
-	a.projectRegistrationMu.Lock()
-	defer a.projectRegistrationMu.Unlock()
+	a.projectRegistryLocked().registrationMu.Lock()
+	defer a.projectRegistryLocked().registrationMu.Unlock()
 
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
@@ -155,10 +165,10 @@ func (a *app) createProject(req ProjectCreateRequest) (Project, error) {
 	if err := os.MkdirAll(cleanPath, 0755); err != nil {
 		return Project{}, err
 	}
-	if out, err := run(cleanPath, "git", "init"); err != nil {
+	if out, err := a.runTaskCommand(context.Background(), cleanPath, "git", "init"); err != nil {
 		return Project{}, fmt.Errorf("git init failed: %w: %s", err, strings.TrimSpace(out))
 	}
-	branch := gitOutput(cleanPath, "rev-parse", "--abbrev-ref", "HEAD")
+	branch := a.gitOutput(cleanPath, "rev-parse", "--abbrev-ref", "HEAD")
 	if branch == "" {
 		branch = "main"
 	}
@@ -177,8 +187,8 @@ func (a *app) createProject(req ProjectCreateRequest) (Project, error) {
 	if err := a.registerProcessRuntimeProject(project); err != nil {
 		return Project{}, fmt.Errorf("register project runtime: %w", err)
 	}
-	if a.projectCreateAfterRegistrationHook != nil {
-		a.projectCreateAfterRegistrationHook()
+	if hook := a.projectRegistryLocked().createAfterRegistrationHook; hook != nil {
+		hook()
 	}
 	return project, nil
 }
@@ -204,14 +214,14 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 	}
 	project := projectFromPath(projectPath, projectPath, "extra")
 	project.Name = name
-	a.projectRegistrationMu.Lock()
-	defer a.projectRegistrationMu.Unlock()
+	a.projectRegistryLocked().registrationMu.Lock()
+	defer a.projectRegistryLocked().registrationMu.Unlock()
 	a.mu.Lock()
 	previousSettings := a.settings
 	previousSettings.ExtraProjectsRoots = append(
 		[]string(nil), a.settings.ExtraProjectsRoots...,
 	)
-	previousAliases := cloneProjectAliases(a.projectAliases)
+	previousAliases := cloneProjectAliases(a.projectRegistryLocked().aliases)
 	desiredSettings := previousSettings
 	desiredSettings.ExtraProjectsRoots = normalizeWorkspaceRoots(
 		append(append([]string(nil), previousSettings.ExtraProjectsRoots...), projectPath),
@@ -235,11 +245,11 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 		}
 		a.mu.Lock()
 		a.settings = desiredSettings
-		a.projectAliases = cloneProjectAliases(desiredAliases)
+		a.projectRegistryLocked().aliases = cloneProjectAliases(desiredAliases)
 		a.mu.Unlock()
 		var settingsErr error
-		if a.projectImportSettingsSave != nil {
-			settingsErr = a.projectImportSettingsSave()
+		if save := a.projectRegistryLocked().importSettingsSave; save != nil {
+			settingsErr = save()
 		} else {
 			settingsErr = a.saveSettings()
 		}
@@ -260,7 +270,7 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 			}
 			a.mu.Lock()
 			a.settings = previousSettings
-			a.projectAliases = cloneProjectAliases(previousAliases)
+			a.projectRegistryLocked().aliases = cloneProjectAliases(previousAliases)
 			a.mu.Unlock()
 			return false, settingsErr
 		}

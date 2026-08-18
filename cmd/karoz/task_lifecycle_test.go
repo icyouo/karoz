@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -84,11 +85,11 @@ func TestTaskCancelBeforeIntegrationLockPreventsPrimaryMutation(t *testing.T) {
 	before := capturePrimary(t, project.Path)
 	arrived := make(chan struct{})
 	release := make(chan struct{})
-	a.taskIntegrationPreLockHook = func() {
+	a.projectTasksLocked().integrationPreLockHook = func() {
 		close(arrived)
 		<-release
 	}
-	defer func() { a.taskIntegrationPreLockHook = nil }()
+	defer func() { a.projectTasksLocked().integrationPreLockHook = nil }()
 	result := make(chan Task, 1)
 	go func() { result <- a.integrateTaskWithContext(ctx, project, claimed, false) }()
 	<-arrived // paused after the legacy ctx check, before project-lock acquisition
@@ -198,7 +199,7 @@ func TestRecoverInterruptedTaskPreservesDirtyWorktree(t *testing.T) {
 	writeTestFile(t, filepath.Join(worktree, "recover-after-restart.txt"), "preserve")
 	task.Status = "running"
 	task.WorktreePath = worktree
-	a.tasks[project.ID] = []Task{task}
+	a.projectTasksLocked().tasks[project.ID] = []Task{task}
 	if err := a.recoverInterruptedTasks(); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +294,7 @@ func assertPIDStopped(t *testing.T, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := run("", "kill", "-0", fmt.Sprintf("%d", pid)); err != nil {
+		if err := exec.Command("kill", "-0", fmt.Sprintf("%d", pid)).Run(); err != nil {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

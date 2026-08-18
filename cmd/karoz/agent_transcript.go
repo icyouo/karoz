@@ -40,15 +40,12 @@ func transcriptKindForMessage(role, intent string) string {
 	}
 }
 
-func (a *app) appendTranscriptForAgentMessageLocked(message AgentMessage, metadata agentTranscriptAppendMetadata) {
-	if a.agentTranscripts == nil {
-		a.agentTranscripts = map[string][]AgentTranscriptItem{}
-	}
+func transcriptItemForAgentMessage(message AgentMessage, metadata agentTranscriptAppendMetadata) AgentTranscriptItem {
 	visible := true
 	if metadata.Visible != nil {
 		visible = *metadata.Visible
 	}
-	item := AgentTranscriptItem{
+	return AgentTranscriptItem{
 		ID:            message.ID,
 		MessageID:     message.ID,
 		ProjectID:     message.ProjectID,
@@ -69,8 +66,6 @@ func (a *app) appendTranscriptForAgentMessageLocked(message AgentMessage, metada
 		ModelOnly:     metadata.ModelOnly,
 		CreatedAt:     message.CreatedAt,
 	}
-	key := projectAgentKey(message.ProjectID, message.AgentID)
-	a.agentTranscripts[key] = append(a.agentTranscripts[key], item)
 }
 
 // appendAgentModelOnlyTranscriptForRun records the exact instruction handed to
@@ -91,18 +86,16 @@ func (a *app) appendAgentModelOnlyTranscriptForRun(projectID, agentID, runID, in
 	}
 	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
-	run, active := a.agentRuns[key]
-	if !active || !run.State.Active() || run.ID != runID || a.agentRunCancelling[key] == runID {
+	runtime := a.agentRuntimeLocked()
+	run, active := runtime.runs[key]
+	if !active || !run.State.Active() || run.ID != runID || runtime.cancelling[key] == runID {
 		a.mu.Unlock()
 		return AgentTranscriptItem{}, false, fmt.Errorf("scheduled transcript Run %s is no longer active: %w", runID, context.Canceled)
 	}
-	if a.agentTranscripts == nil {
-		a.agentTranscripts = map[string][]AgentTranscriptItem{}
-	}
-	for _, item := range a.agentTranscripts[key] {
+	for _, item := range a.conversationServiceLocked().TranscriptsFor(key) {
 		if item.ModelOnly && item.RunID == runID && item.Role == "user" && item.Intent == intent && item.Body == body {
 			a.mu.Unlock()
-			if err := a.saveAgentTranscripts(); err != nil {
+			if err := a.saveAgentSessionEvents(); err != nil {
 				return item, true, err
 			}
 			return item, true, nil
@@ -124,9 +117,9 @@ func (a *app) appendAgentModelOnlyTranscriptForRun(projectID, agentID, runID, in
 		ModelOnly: true,
 		CreatedAt: time.Now().UTC(),
 	}
-	a.agentTranscripts[key] = append(a.agentTranscripts[key], item)
+	a.appendAgentSessionEventLocked(newAgentModelInputSessionEvent(item))
 	a.mu.Unlock()
-	if err := a.saveAgentTranscripts(); err != nil {
+	if err := a.saveAgentSessionEvents(); err != nil {
 		return item, true, err
 	}
 	return item, true, nil
@@ -139,7 +132,7 @@ func (a *app) appendAgentModelOnlyTranscriptForRun(projectID, agentID, runID, in
 func (a *app) nextAgentTranscriptSequenceLocked(projectID, agentID string) int64 {
 	key := projectAgentKey(projectID, agentID)
 	var maxSeq int64
-	for index, message := range a.agentMessages[key] {
+	for index, message := range a.conversationServiceLocked().MessagesFor(key) {
 		seq := message.Seq
 		if seq <= 0 {
 			seq = int64(index + 1)
@@ -148,7 +141,7 @@ func (a *app) nextAgentTranscriptSequenceLocked(projectID, agentID string) int64
 			maxSeq = seq
 		}
 	}
-	for _, item := range a.agentTranscripts[key] {
+	for _, item := range a.conversationServiceLocked().TranscriptsFor(key) {
 		if item.Seq > maxSeq {
 			maxSeq = item.Seq
 		}
@@ -173,27 +166,13 @@ func transcriptItemFromLegacyMessage(message AgentMessage) AgentTranscriptItem {
 	}
 }
 
-// agentTranscriptForModel joins new structured records with a lazy view of
-// legacy AgentMessage JSON. The merge happens in memory only: old Studios keep
-// their original agent-messages.json untouched until new events are appended.
+// agentTranscriptForModel returns the provider-neutral projection rebuilt from
+// the canonical session event stream.
 func (a *app) agentTranscriptForModel(projectID, agentID string) []AgentTranscriptItem {
 	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
-	stored := append([]AgentTranscriptItem{}, a.agentTranscripts[key]...)
-	messages := append([]AgentMessage{}, a.agentMessages[key]...)
+	stored := a.conversationServiceLocked().TranscriptsFor(key)
 	a.mu.Unlock()
-	byMessageID := make(map[string]bool, len(stored))
-	for _, item := range stored {
-		if item.MessageID != "" {
-			byMessageID[item.MessageID] = true
-		}
-	}
-	for _, message := range messages {
-		if message.ID != "" && byMessageID[message.ID] {
-			continue
-		}
-		stored = append(stored, transcriptItemFromLegacyMessage(message))
-	}
 	sort.SliceStable(stored, func(i, j int) bool {
 		if stored[i].Seq == stored[j].Seq {
 			return stored[i].CreatedAt.Before(stored[j].CreatedAt)

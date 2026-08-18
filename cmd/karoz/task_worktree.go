@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -47,7 +48,7 @@ func (a *app) inspectTaskWorktree(project Project, task Task) (Task, bool) {
 		task.WorktreeDetail = err.Error()
 		return task, false
 	}
-	status, err := run(path, "git", "status", "--porcelain=v1", "--untracked-files=all")
+	status, err := a.runTaskCommand(context.Background(), path, "git", "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
 		task.WorktreeState = "unavailable"
 		task.WorktreeDetail = err.Error()
@@ -88,18 +89,18 @@ func (a *app) cleanupTaskWorktreeLocked(project Project, task Task) (Task, error
 		return task, err
 	}
 	if task.Status == "waiting_merge" {
-		branchHead := gitOutput(project.Path, "rev-parse", "--verify", task.TaskBranch+"^{commit}")
+		branchHead := a.gitOutput(project.Path, "rev-parse", "--verify", task.TaskBranch+"^{commit}")
 		if task.CommitSHA == "" || branchHead == "" {
 			return task, errors.New("waiting merge task commit is not reachable from its task branch")
 		}
-		if reachable, reachErr := gitIsAncestor(project.Path, task.CommitSHA, branchHead); reachErr != nil || !reachable {
+		if reachable, reachErr := a.gitIsAncestor(project.Path, task.CommitSHA, branchHead); reachErr != nil || !reachable {
 			return task, errors.New("waiting merge task commit is not reachable from its task branch")
 		}
 	}
 	if task.WorktreeState == "removed" {
 		return task, nil
 	}
-	if out, err := run(project.Path, "git", "worktree", "remove", path); err != nil {
+	if out, err := a.runTaskCommand(context.Background(), project.Path, "git", "worktree", "remove", path); err != nil {
 		task.WorktreeState = "clean"
 		task.WorktreeDetail = strings.TrimSpace(out)
 		task.UpdatedAt = time.Now().UTC()

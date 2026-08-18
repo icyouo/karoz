@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -43,8 +44,8 @@ func (a *app) prepareMonitorProbeFromTool(
 			"error": "validation_error", "message": err.Error(),
 		})
 	}
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	now := time.Now().UTC()
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -139,6 +140,10 @@ func (a *app) prepareMonitorProbeFromTool(
 			"error": "save_failed", "message": err.Error(),
 		})
 	}
+	a.appendAgentMonitorProbeApprovalEventLocked(challenge, "requested")
+	if err := a.saveAgentSessionEventsLocked(); err != nil {
+		log.Printf("save monitor probe approval event: %v", err)
+	}
 	return monitorProbeChoiceRequest(toolCtx, challenge)
 }
 
@@ -205,8 +210,8 @@ func (a *app) resolveMonitorProbeChoice(
 	if !approved && !denied {
 		return false, nil
 	}
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	id := strings.TrimPrefix(choiceID, monitorProbeApprovePrefix)
 	if denied {
 		id = strings.TrimPrefix(choiceID, monitorProbeDenyPrefix)
@@ -248,7 +253,7 @@ func (a *app) resolveMonitorProbeChoice(
 	}
 	var owner Agent
 	ownerOK := false
-	for _, candidate := range a.agents[projectID] {
+	for _, candidate := range a.agentDirectoryLocked().agents[projectID] {
 		if candidate.ID == agentID {
 			owner = candidate
 			ownerOK = true
@@ -267,6 +272,12 @@ func (a *app) resolveMonitorProbeChoice(
 		delete(a.monitorProbeChallenges, id)
 		delete(a.monitorProbeReservations, reservation.ID)
 		err := a.saveMonitorsLocked()
+		if err == nil {
+			a.appendAgentMonitorProbeApprovalEventLocked(challenge, "denied")
+			if eventErr := a.saveAgentSessionEventsLocked(); eventErr != nil {
+				log.Printf("save monitor probe approval event: %v", eventErr)
+			}
+		}
 		a.mu.Unlock()
 		return true, err
 	}
@@ -357,6 +368,10 @@ func (a *app) resolveMonitorProbeChoice(
 		a.mu.Unlock()
 		_ = store.remove(relative)
 		return true, err
+	}
+	a.appendAgentMonitorProbeApprovalEventLocked(current, "approved")
+	if err := a.saveAgentSessionEventsLocked(); err != nil {
+		log.Printf("save monitor probe approval event: %v", err)
 	}
 	a.mu.Unlock()
 	return true, nil

@@ -1,12 +1,67 @@
 package main
 
 import (
+	"errors"
+	executiondomain "github.com/karoz/karoz/internal/execution"
+	"math"
 	"os"
 	"strings"
 	"time"
+
+	taskdomain "github.com/karoz/karoz/internal/task"
 )
 
-func (a *app) createTask(project Project, req TaskCreateRequest) Task {
+const defaultTaskMaxRuntime = time.Hour
+
+func normalizeTaskMaxRuntimeMS(value *int64) (*int64, error) {
+	if value == nil {
+		milliseconds := defaultTaskMaxRuntime.Milliseconds()
+		return &milliseconds, nil
+	}
+	if *value < 0 {
+		return nil, errors.New("max_runtime_ms must be zero (unlimited) or a positive integer")
+	}
+	if *value > math.MaxInt64/int64(time.Millisecond) {
+		return nil, errors.New("max_runtime_ms is too large")
+	}
+	milliseconds := *value
+	return &milliseconds, nil
+}
+
+func normalizeTaskSandboxMode(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "host":
+		return "host", nil
+	case "required":
+		return "required", nil
+	default:
+		return "", errors.New("sandbox_mode must be host or required")
+	}
+}
+
+func taskSandboxPolicy(mode string) executiondomain.SandboxPolicy {
+	if mode == "required" {
+		return executiondomain.SandboxPolicy{Filesystem: true, Network: true, Processes: true}
+	}
+	return executiondomain.SandboxPolicy{}
+}
+
+func (a *app) taskSandboxEnforcer() executiondomain.SandboxEnforcer {
+	if a != nil && a.sandboxEnforcer != nil {
+		return a.sandboxEnforcer
+	}
+	return executiondomain.UnsupportedSandboxEnforcer{}
+}
+
+func (a *app) createTask(project Project, req TaskCreateRequest) (Task, error) {
+	maxRuntimeMS, err := normalizeTaskMaxRuntimeMS(req.MaxRuntimeMS)
+	if err != nil {
+		return Task{}, err
+	}
+	sandboxMode, err := normalizeTaskSandboxMode(req.SandboxMode)
+	if err != nil {
+		return Task{}, err
+	}
 	now := time.Now().UTC()
 	typ := normalizeTaskType(req.Type)
 	task := Task{
@@ -17,6 +72,8 @@ func (a *app) createTask(project Project, req TaskCreateRequest) Task {
 		Title:        firstNonEmpty(strings.TrimSpace(req.Title), defaultTaskTitle(typ)),
 		Description:  strings.TrimSpace(req.Description),
 		Goal:         strings.TrimSpace(req.Goal),
+		MaxRuntimeMS: maxRuntimeMS,
+		SandboxMode:  sandboxMode,
 		ArtifactIDs:  append([]string{}, req.ArtifactIDs...),
 		OwnerAgentID: strings.TrimSpace(req.OwnerAgentID),
 		PlanID:       strings.TrimSpace(req.PlanID),
@@ -27,9 +84,7 @@ func (a *app) createTask(project Project, req TaskCreateRequest) Task {
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	a.mu.Lock()
-	a.tasks[project.ID] = append([]Task{task}, a.tasks[project.ID]...)
-	a.mu.Unlock()
+	a.insertTask(task)
 	a.saveOrLog("tasks", a.saveTasks())
 	a.appendTaskLog(project.ID, task.ID, "task created: "+task.Title)
 	a.emitRuntimeStateChanged(RuntimeEvent{
@@ -41,7 +96,7 @@ func (a *app) createTask(project Project, req TaskCreateRequest) Task {
 		Reason:    "task_created",
 		CreatedAt: time.Now().UTC(),
 	})
-	return task
+	return task, nil
 }
 
 func (a *app) runTask(project Project, task Task) Task {
@@ -57,6 +112,16 @@ func (a *app) runTask(project Project, task Task) Task {
 	defer finishRun()
 	a.saveOrLog("tasks", a.saveTasks())
 	a.appendTaskLog(project.ID, task.ID, "task started")
+	if err := a.taskSandboxEnforcer().Enforce(taskSandboxPolicy(task.SandboxMode)); err != nil {
+		task.Status = "failed"
+		task.FailureSummary = "task sandbox unavailable: " + err.Error()
+		task.UpdatedAt = time.Now().UTC()
+		a.appendTaskLog(project.ID, task.ID, task.FailureSummary)
+		a.updateTask(project.ID, task)
+		a.saveOrLog("tasks", a.saveTasks())
+		a.notifyTaskRuntimeHooks(project, task)
+		return task
+	}
 
 	switch task.Type {
 	case "deploy", "deployment":
@@ -84,12 +149,7 @@ func (a *app) runTask(project Project, task Task) Task {
 }
 
 func taskRunnable(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "pending", "failed", "deploy_failed":
-		return true
-	default:
-		return false
-	}
+	return taskdomain.IsRunnable(status)
 }
 
 func (a *app) startTaskAsync(project Project, task Task, source string) {

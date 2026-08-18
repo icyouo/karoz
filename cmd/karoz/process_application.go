@@ -21,7 +21,7 @@ func (a *app) bootstrapProcessRuntime() error {
 	runtime, err := newProcessRuntimePersistenceWithRetention(
 		a.settings.DataDir,
 		projects,
-		a.processPersistenceFail,
+		a.processRuntimeCoordinator.processPersistenceFail,
 		releaseConfig.Retention,
 	)
 	if err != nil {
@@ -45,8 +45,8 @@ func (a *app) bootstrapProcessRuntime() error {
 	if err != nil {
 		return err
 	}
-	a.processRuntime = runtime
-	a.processSupervisor = supervisor
+	a.processRuntimeCoordinator.processRuntime = runtime
+	a.processRuntimeCoordinator.processSupervisor = supervisor
 	a.armProcessOutputMonitor()
 	a.startProcessTerminalOutbox()
 	return nil
@@ -54,8 +54,8 @@ func (a *app) bootstrapProcessRuntime() error {
 
 func (a *app) shutdownProcessRuntime(ctx context.Context) error {
 	a.shutdownMonitorProbes()
-	if a.processSupervisor == nil {
-		if a.processRuntime != nil {
+	if a.processRuntimeCoordinator.processSupervisor == nil {
+		if a.processRuntimeCoordinator.processRuntime != nil {
 			if err := a.drainProcessOutputGaps(); err != nil {
 				return err
 			}
@@ -63,7 +63,7 @@ func (a *app) shutdownProcessRuntime(ctx context.Context) error {
 		a.supervisorCancel()
 		return nil
 	}
-	if err := a.processSupervisor.Shutdown(ctx); err != nil {
+	if err := a.processRuntimeCoordinator.processSupervisor.Shutdown(ctx); err != nil {
 		return err
 	}
 	if err := a.drainProcessOutputGaps(); err != nil {
@@ -75,8 +75,8 @@ func (a *app) shutdownProcessRuntime(ctx context.Context) error {
 }
 
 func (a *app) processRuntimeReady() bool {
-	return a.processRuntime != nil &&
-		a.processSupervisor != nil
+	return a.processRuntimeCoordinator.processRuntime != nil &&
+		a.processRuntimeCoordinator.processSupervisor != nil
 }
 
 func (a *app) processRecord(projectID, processID string) (processdomain.Process, error) {
@@ -163,7 +163,7 @@ func (a *app) reconcileProjectImportIntents() error {
 		case intent.AliasesAfterSHA256:
 		case intent.AliasesBeforeSHA256:
 			a.mu.Lock()
-			a.projectAliases[projectID] = intent.DesiredAlias
+			a.projectRegistryLocked().aliases[projectID] = intent.DesiredAlias
 			a.mu.Unlock()
 			if err := a.saveProjectAliases(); err != nil {
 				return err

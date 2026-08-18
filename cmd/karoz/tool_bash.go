@@ -8,11 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	executiondomain "github.com/karoz/karoz/internal/execution"
 )
 
 const (
@@ -168,7 +169,7 @@ func (a *app) executeResidentBashTool(ctx context.Context, toolCtx ResidentToolC
 	// The provider loop gives tools only the remaining tool-phase context. Do
 	// not advertise or attempt a Bash timeout that outlives that context.
 	requestedTimeout = clampResidentBashTimeout(ctx, requestedTimeout)
-	result := runResidentBashTool(
+	result := a.runResidentBashTool(
 		ctx,
 		subject.CanonicalWorkdir,
 		command,
@@ -202,30 +203,36 @@ func clampResidentBashTimeout(ctx context.Context, requestedMS int) int {
 	return requestedMS
 }
 
+func (a *app) runResidentBashTool(parent context.Context, workdir, command string, timeoutMS, maxOutput int) BashToolResult {
+	return runResidentBashToolWithRunner(a.commandRunnerOrDefault(), parent, workdir, command, timeoutMS, maxOutput)
+}
+
 func runResidentBashTool(parent context.Context, workdir, command string, timeoutMS, maxOutput int) BashToolResult {
-	startedAt := time.Now()
+	return runResidentBashToolWithRunner(executiondomain.NewHostRunner(), parent, workdir, command, timeoutMS, maxOutput)
+}
+
+func runResidentBashToolWithRunner(runner executiondomain.Runner, parent context.Context, workdir, command string, timeoutMS, maxOutput int) BashToolResult {
 	ctx, cancel := context.WithTimeout(parent, time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
-	cmd.Dir = workdir
-	prepareResidentBashProcess(cmd)
-	cmd.WaitDelay = 2 * time.Second
-	output := newBoundedCommandOutput(maxOutput)
-	cmd.Stdout = output
-	cmd.Stderr = output
-	err := cmd.Run()
-	_ = stopResidentBashProcessTree(cmd)
-	text, truncated := output.Result()
+	commandResult, err := runner.Run(ctx, executiondomain.CommandRequest{
+		Name:           "bash",
+		Args:           []string{"-lc", command},
+		Dir:            workdir,
+		CombinedOutput: true,
+		MaxOutputBytes: maxOutput,
+		WaitDelay:      applicationCommandWaitDelay,
+		Configure:      prepareResidentBashProcess,
+		Finalize:       stopResidentBashProcessTree,
+	})
+	text := commandResult.Output()
 	result := BashToolResult{
 		OK:         err == nil,
 		Workspace:  workdir,
 		Command:    command,
-		DurationMS: time.Since(startedAt).Milliseconds(),
-		Truncated:  truncated,
-	}
-	if cmd.ProcessState != nil {
-		result.Code = cmd.ProcessState.ExitCode()
+		DurationMS: commandResult.Duration.Milliseconds(),
+		Truncated:  commandResult.Truncated,
+		Code:       commandResult.ExitCode,
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		result.OK = false
@@ -301,10 +308,9 @@ func (a *app) requestResidentBashApprovalSubject(
 ) string {
 	now := time.Now().UTC()
 	approval := ResidentBashApproval{}
+	created := false
 	a.mu.Lock()
-	if a.residentBashApprovals == nil {
-		a.residentBashApprovals = map[string]ResidentBashApproval{}
-	}
+	approvals := a.agentRuntimeLocked().residentBashApprovals
 	ownerCreatedAt, ownerAvailable := a.residentApprovalOwnerLocked(
 		toolCtx.Project.ID,
 		toolCtx.Agent,
@@ -316,9 +322,9 @@ func (a *app) requestResidentBashApprovalSubject(
 			"message": "resident command owner is no longer registered",
 		})
 	}
-	for id, candidate := range a.residentBashApprovals {
+	for id, candidate := range approvals {
 		if !candidate.ExpiresAt.After(now) {
-			delete(a.residentBashApprovals, id)
+			delete(approvals, id)
 			continue
 		}
 		if candidate.Subject == subject &&
@@ -330,14 +336,18 @@ func (a *app) requestResidentBashApprovalSubject(
 	}
 	if approval.ID == "" {
 		approval = ResidentBashApproval{
-			ID: randomID(), Subject: subject, State: residentBashApprovalPending,
+			ID: randomID(), RequestRunID: toolCtx.RunID, Subject: subject, State: residentBashApprovalPending,
 			OwnerCreatedAt: ownerCreatedAt,
 			CreatedAt:      now,
 			ExpiresAt:      now.Add(residentBashApprovalTTL),
 		}
-		a.residentBashApprovals[approval.ID] = approval
+		approvals[approval.ID] = approval
+		created = true
 	}
 	a.mu.Unlock()
+	if created {
+		a.appendAgentBashApprovalEvent(approval, "requested")
+	}
 
 	agentName := firstNonEmpty(toolCtx.Agent.Nickname, toolCtx.Agent.DisplayName, toolCtx.Agent.Name, toolCtx.Agent.ID, "resident agent")
 	action, choiceLabel := "run this command", "Run command"
@@ -381,33 +391,48 @@ func (a *app) resolveResidentBashChoice(projectID, agentID, runID, choiceID stri
 
 	now := time.Now().UTC()
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	approval, ok := a.residentBashApprovals[id]
+	approvals := a.agentRuntimeLocked().residentBashApprovals
+	approval, ok := approvals[id]
 	if !ok || !approval.ExpiresAt.After(now) {
-		delete(a.residentBashApprovals, id)
+		if ok {
+			delete(approvals, id)
+		}
+		a.mu.Unlock()
+		if ok {
+			a.appendAgentBashApprovalEvent(approval, "expired")
+		}
 		return true, errors.New("bash approval is missing or expired")
 	}
 	if approval.Subject.ProjectID != projectID ||
 		approval.Subject.AgentID != agentID {
+		a.mu.Unlock()
 		return true, errors.New("bash approval belongs to a different project or agent")
 	}
 	if !a.residentApprovalStillOwnedLocked(approval) {
-		delete(a.residentBashApprovals, id)
+		delete(approvals, id)
+		a.mu.Unlock()
+		a.appendAgentBashApprovalEvent(approval, "revoked")
 		return true, errors.New("bash approval owner is no longer registered")
 	}
 	if approval.State != residentBashApprovalPending {
+		a.mu.Unlock()
 		return true, errors.New("bash approval has already been resolved")
 	}
 	if denied {
-		delete(a.residentBashApprovals, id)
+		delete(approvals, id)
+		a.mu.Unlock()
+		a.appendAgentBashApprovalEvent(approval, "denied")
 		return true, nil
 	}
 	if strings.TrimSpace(runID) == "" {
+		a.mu.Unlock()
 		return true, errors.New("bash approval requires an active run")
 	}
 	approval.State = residentBashApprovalGranted
 	approval.RunID = runID
-	a.residentBashApprovals[id] = approval
+	approvals[id] = approval
+	a.mu.Unlock()
+	a.appendAgentBashApprovalEvent(approval, "approved")
 	return true, nil
 }
 
@@ -420,20 +445,32 @@ func (a *app) consumeResidentBashApprovalSubject(
 	}
 	now := time.Now().UTC()
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	for id, approval := range a.residentBashApprovals {
+	var expired []ResidentBashApproval
+	var consumed ResidentBashApproval
+	approvals := a.agentRuntimeLocked().residentBashApprovals
+	for id, approval := range approvals {
 		if !approval.ExpiresAt.After(now) {
-			delete(a.residentBashApprovals, id)
+			delete(approvals, id)
+			expired = append(expired, approval)
 			continue
 		}
 		if approval.RunID == runID && approval.Subject == subject &&
 			approval.State == residentBashApprovalGranted &&
 			a.residentApprovalStillOwnedLocked(approval) {
-			delete(a.residentBashApprovals, id)
-			return true
+			delete(approvals, id)
+			consumed = approval
+			break
 		}
 	}
-	return false
+	a.mu.Unlock()
+	for _, approval := range expired {
+		a.appendAgentBashApprovalEvent(approval, "expired")
+	}
+	if consumed.ID == "" {
+		return false
+	}
+	a.appendAgentBashApprovalEvent(consumed, "consumed")
+	return true
 }
 
 // consumeResidentBashApproval keeps the historical foreground test/helper
@@ -445,7 +482,7 @@ func (a *app) consumeResidentBashApproval(
 	digest := hex.EncodeToString(sum[:])
 	a.mu.Lock()
 	workdir := ""
-	for _, approval := range a.residentBashApprovals {
+	for _, approval := range a.agentRuntimeLocked().residentBashApprovals {
 		if approval.Subject.Operation == residentBashOperationForeground &&
 			approval.Subject.ProjectID == projectID &&
 			approval.Subject.AgentID == agentID &&
@@ -474,21 +511,28 @@ func (a *app) revokeResidentBashApprovalsForRun(runID string) {
 		return
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	for id, approval := range a.residentBashApprovals {
+	revoked := []ResidentBashApproval{}
+	approvals := a.agentRuntimeLocked().residentBashApprovals
+	for id, approval := range approvals {
 		if approval.RunID == runID {
-			delete(a.residentBashApprovals, id)
+			delete(approvals, id)
+			revoked = append(revoked, approval)
 		}
+	}
+	a.mu.Unlock()
+	for _, approval := range revoked {
+		a.appendAgentBashApprovalEvent(approval, "revoked")
 	}
 }
 
 func (a *app) revokeResidentBashApprovalsForOwnerLocked(
 	projectID, agentID string,
 ) {
-	for id, approval := range a.residentBashApprovals {
+	approvals := a.agentRuntimeLocked().residentBashApprovals
+	for id, approval := range approvals {
 		if approval.Subject.ProjectID == projectID &&
 			approval.Subject.AgentID == agentID {
-			delete(a.residentBashApprovals, id)
+			delete(approvals, id)
 		}
 	}
 }
@@ -498,10 +542,10 @@ func (a *app) residentApprovalOwnerLocked(
 	requested Agent,
 ) (time.Time, bool) {
 	key := projectAgentKey(projectID, requested.ID)
-	if a.backgroundOwnerDeleting[key] {
+	if a.agentRuntimeLocked().backgroundOwnerDeleting[key] {
 		return time.Time{}, false
 	}
-	agents, tracked := a.agents[projectID]
+	agents, tracked := a.agentDirectoryLocked().agents[projectID]
 	if !tracked {
 		return requested.CreatedAt, true
 	}
@@ -526,10 +570,10 @@ func (a *app) residentApprovalStillOwnedLocked(
 		approval.Subject.ProjectID,
 		approval.Subject.AgentID,
 	)
-	if a.backgroundOwnerDeleting[key] {
+	if a.agentRuntimeLocked().backgroundOwnerDeleting[key] {
 		return false
 	}
-	agents, tracked := a.agents[approval.Subject.ProjectID]
+	agents, tracked := a.agentDirectoryLocked().agents[approval.Subject.ProjectID]
 	if !tracked {
 		return true
 	}

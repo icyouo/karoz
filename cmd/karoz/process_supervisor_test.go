@@ -590,9 +590,9 @@ func TestProcessSupervisorLifetimeDefaultsAndCeiling(t *testing.T) {
 	if _, err := newProcessSupervisor(
 		context.Background(), newMemoryProcessStore(), newMemoryReservationBoundary(),
 		func(processdomain.Process) (io.WriteCloser, error) { return &synchronizedBuffer{}, nil },
-		processSupervisorConfig{MaxLifetime: maxProcessLifetime + time.Second},
-	); err == nil {
-		t.Fatal("configured maximum bypassed the product lifetime ceiling")
+		processSupervisorConfig{DefaultLifetime: 25 * time.Hour},
+	); err != nil {
+		t.Fatalf("unbounded server rejected a duration beyond the former product ceiling: %v", err)
 	}
 	if _, err := newProcessSupervisor(
 		context.Background(), newMemoryProcessStore(), newMemoryReservationBoundary(),
@@ -600,6 +600,32 @@ func TestProcessSupervisorLifetimeDefaultsAndCeiling(t *testing.T) {
 		processSupervisorConfig{DefaultLifetime: 15 * time.Minute, MaxLifetime: 30 * time.Minute},
 	); err != nil {
 		t.Fatalf("valid lifetime overrides rejected: %v", err)
+	}
+}
+
+func TestProcessSupervisorUnlimitedLifetime(t *testing.T) {
+	store := newMemoryProcessStore()
+	supervisor := testSupervisor(t, store, newMemoryReservationBoundary(), &synchronizedBuffer{}, processSupervisorConfig{
+		DefaultLifetime: 10 * time.Millisecond,
+	})
+	request := startRequest("unlimited-lifetime", "sleep 30", t.TempDir())
+	request.Unlimited = true
+	record, err := supervisor.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.LifetimeMS != 0 {
+		t.Fatalf("unlimited lifetime persisted as %dms", record.LifetimeMS)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if current := store.get(record.ID); current.State.Terminal() {
+		t.Fatalf("unlimited process was stopped by the default timer: %+v", current)
+	}
+	if err := supervisor.Stop(record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitTerminal(t, store, record.ID); got.State != processdomain.StateKilled {
+		t.Fatalf("unlimited process manual stop = %+v", got)
 	}
 }
 

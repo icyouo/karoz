@@ -27,7 +27,7 @@ func TestBootstrapQuarantinesCorruptStateFile(t *testing.T) {
 	if err != nil || string(quarantined) != string(garbage) {
 		t.Fatalf("quarantined content = %q err=%v", quarantined, err)
 	}
-	if len(a.tasks) != 0 {
-		t.Fatalf("state did not fall back to defaults: %+v", a.tasks)
+	if len(a.projectTasksLocked().tasks) != 0 {
+		t.Fatalf("state did not fall back to defaults: %+v", a.projectTasksLocked().tasks)
 	}
 }

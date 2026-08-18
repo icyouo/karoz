@@ -58,7 +58,7 @@ func beginScheduledTranscriptTestRun(t *testing.T, a *app, job ScheduledRun) {
 
 func scheduledModelInputOnDisk(dataDir, projectID, agentID, runID, intent, body string) error {
 	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: os.TempDir()})
-	if err := a.loadAgentTranscripts(); err != nil {
+	if err := a.loadAgentSessionEvents(); err != nil {
 		return err
 	}
 	items := a.agentTranscriptForModel(projectID, agentID)
@@ -168,7 +168,7 @@ func TestScheduledPlanTranscriptPersistsInputBeforeToolsAndSurvivesReload(t *tes
 		ID: "plan-transcript", ProjectID: project.ID, Title: "Preserve scheduled context", Goal: "Keep the initiating plan event across reload", Status: PlanActive,
 		OwnerAgentID: agent.ID, Version: 7, Steps: []PlanStep{{ID: "verify", Title: "Verify transcript", Status: PlanStepRunning, Version: 1}}, CreatedAt: now, UpdatedAt: now,
 	}
-	a.plans[project.ID] = []WorkPlan{plan}
+	replacePlansForTest(a, project.ID, []WorkPlan{plan})
 	payload, err := json.Marshal(PlanEventRunPayload{PlanID: plan.ID, PlanVersion: plan.Version, StepID: "verify", Event: "task_terminal", TaskID: "task-42"})
 	if err != nil {
 		t.Fatal(err)
@@ -205,10 +205,7 @@ func TestScheduledPlanTranscriptPersistsInputBeforeToolsAndSurvivesReload(t *tes
 	}
 
 	reloaded := newApp(Settings{DataDir: a.settings.DataDir, ProjectsRoot: project.WorkspaceRoot})
-	if err := reloaded.loadAgentMessages(); err != nil {
-		t.Fatal(err)
-	}
-	if err := reloaded.loadAgentTranscripts(); err != nil {
+	if err := reloaded.loadAgentSessionEvents(); err != nil {
 		t.Fatal(err)
 	}
 	visibleMessages := reloaded.agentMessagesForDisplay(project.ID, agent.ID)
@@ -274,7 +271,7 @@ func TestScheduledTaskEventPersistsModelOnlyInput(t *testing.T) {
 		t.Fatal("worker-a missing")
 	}
 	task := Task{ID: "task-transcript", ProjectID: project.ID, Status: "done", Result: "Implementation is ready."}
-	a.tasks[project.ID] = []Task{task}
+	a.projectTasksLocked().tasks[project.ID] = []Task{task}
 	payload, err := json.Marshal(TaskEventRunPayload{TaskID: task.ID, HookID: "hook-transcript"})
 	if err != nil {
 		t.Fatal(err)
@@ -306,6 +303,7 @@ func TestAgentMessagesPageProjectsOnlyCheckpointedModelContext(t *testing.T) {
 		a.appendAgentMessage(project.ID, agent.ID, "assistant", "result", fmt.Sprintf("checkpointed message %d %s", i, strings.Repeat("x", 430)))
 	}
 	a.maybeCheckpointAgentSession(project.ID, agent.ID, false)
+	waitForCheckpointCoverage(t, a, project.ID, agent.ID, 30)
 
 	page := a.agentMessagesPageForDisplay(project.ID, agent.ID, 0, 80)
 	state := a.agentSessionState(project.ID, agent.ID)
@@ -419,10 +417,7 @@ func TestStructuredTranscriptPreservesInterruptOrderingAfterReload(t *testing.T)
 	a.appendAgentMessage(projectID, agentID, "assistant", "result", "updated response")
 
 	reloaded := newApp(Settings{DataDir: dataDir, ProjectsRoot: t.TempDir()})
-	if err := reloaded.loadAgentMessages(); err != nil {
-		t.Fatal(err)
-	}
-	if err := reloaded.loadAgentTranscripts(); err != nil {
+	if err := reloaded.loadAgentSessionEvents(); err != nil {
 		t.Fatal(err)
 	}
 	items := reloaded.agentTranscriptForModel(projectID, agentID)
@@ -439,7 +434,7 @@ func TestStructuredTranscriptPreservesInterruptOrderingAfterReload(t *testing.T)
 	}
 }
 
-func TestLegacyAgentMessagesConvertLazilyAndLosslessly(t *testing.T) {
+func TestSupersededMessageFilesFailLoudlyWithoutEventLog(t *testing.T) {
 	dataDir := t.TempDir()
 	key := projectAgentKey("legacy-project", "legacy-agent")
 	created := time.Date(2026, 7, 28, 9, 0, 0, 0, time.UTC)
@@ -456,22 +451,25 @@ func TestLegacyAgentMessagesConvertLazilyAndLosslessly(t *testing.T) {
 	}
 
 	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: t.TempDir()})
-	if err := a.loadAgentMessages(); err != nil {
+	err = a.loadAgentSessionEvents()
+	if err == nil || !strings.Contains(err.Error(), "unsupported conversation storage agent-messages.json") {
+		t.Fatalf("superseded message file error = %v", err)
+	}
+}
+
+func TestSupersededArchiveFileFailsLoudlyEvenWithEventLog(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "agent-session-events.json"), []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.loadAgentTranscripts(); err != nil {
+	if err := os.WriteFile(filepath.Join(dataDir, "agent-archive-messages.json"), []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	items := a.agentTranscriptForModel("legacy-project", "legacy-agent")
-	if len(items) != 1 {
-		t.Fatalf("legacy transcript = %+v", items)
-	}
-	item := items[0]
-	if item.ID != "legacy-message" || item.MessageID != "legacy-message" || item.Seq != 7 || item.Role != "tool_result" || item.Intent != "repo_read" || item.Body != `{"path":"README.md"}` || item.Kind != "tool_result" || !item.CreatedAt.Equal(created) {
-		t.Fatalf("legacy conversion lost data: %+v", item)
-	}
-	if _, err := os.Stat(filepath.Join(dataDir, "agent-transcripts.json")); !os.IsNotExist(err) {
-		t.Fatalf("lazy legacy conversion unexpectedly rewrote transcript storage: %v", err)
+
+	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: t.TempDir()})
+	err := a.loadAgentSessionEvents()
+	if err == nil || !strings.Contains(err.Error(), "unsupported conversation storage agent-archive-messages.json") {
+		t.Fatalf("superseded archive file error = %v", err)
 	}
 }
 
@@ -486,11 +484,11 @@ func TestPromptBoundsStructuredHistoryAndReadsOnlyCurrentGroupInbox(t *testing.T
 	for i := 0; i < 30; i++ {
 		agents = append(agents, Agent{ID: "peer-" + strconv.Itoa(i), ProjectID: project.ID, Nickname: "Peer " + strconv.Itoa(i), GroupID: "build", GroupName: "Build", GroupRole: "member"})
 	}
-	a.agents[project.ID] = agents
+	a.agentDirectoryLocked().agents[project.ID] = agents
 
 	key := projectAgentKey(project.ID, agent.ID)
 	for i := 1; i <= 80; i++ {
-		a.agentTranscripts[key] = append(a.agentTranscripts[key], AgentTranscriptItem{
+		a.conversation.AppendTranscript(key, AgentTranscriptItem{
 			ID: "history-" + strconv.Itoa(i), MessageID: "history-" + strconv.Itoa(i), ProjectID: project.ID, AgentID: agent.ID,
 			Seq: int64(i), Role: "assistant", Kind: "message", Intent: "result", Body: strings.Repeat("history ", 220), Visible: true, CreatedAt: time.Now().UTC(),
 		})
@@ -501,16 +499,16 @@ func TestPromptBoundsStructuredHistoryAndReadsOnlyCurrentGroupInbox(t *testing.T
 
 	for i := 0; i < 24; i++ {
 		entry := AgentMemoryEntry{ID: "memory-" + strconv.Itoa(i), ProjectID: project.ID, AgentID: agent.ID, Layer: "fact", State: "active", Summary: "needle " + strings.Repeat("summary ", 160), Detail: strings.Repeat("detail ", 160), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-		a.memories[key] = append(a.memories[key], entry)
+		a.memoryStoreLocked().entries[key] = append(a.memoryStoreLocked().entries[key], entry)
 	}
 	for i := 0; i < 30; i++ {
-		a.inbox[key] = append(a.inbox[key], AgentInboxMessage{ID: "pending-" + strconv.Itoa(i), ProjectID: project.ID, SourceAgentID: "peer-0", TargetAgentID: agent.ID, Subject: strings.Repeat("subject ", 100), Objective: strings.Repeat("objective ", 100), ExpectedOutput: strings.Repeat("expected ", 100), Body: strings.Repeat("body ", 100), Status: HandoffDelivered, CreatedAt: time.Now().UTC()})
+		appendInboxForTest(a, key, AgentInboxMessage{ID: "pending-" + strconv.Itoa(i), ProjectID: project.ID, SourceAgentID: "peer-0", TargetAgentID: agent.ID, Subject: strings.Repeat("subject ", 100), Objective: strings.Repeat("objective ", 100), ExpectedOutput: strings.Repeat("expected ", 100), Body: strings.Repeat("body ", 100), Status: HandoffDelivered, CreatedAt: time.Now().UTC()})
 	}
 	// This deliberately inconsistent foreign storage key still describes a
 	// group-to-group message. A whole-map scan would render it; keyed group
 	// lookup must never read it.
-	a.inbox[projectAgentKey(project.ID, "outsider")] = []AgentInboxMessage{{ID: "foreign", ProjectID: project.ID, SourceAgentID: "peer-0", TargetAgentID: "peer-1", Subject: "FOREIGN_GLOBAL_INBOX_MARKER", Body: "must not be scanned", Status: HandoffDelivered, CreatedAt: time.Now().UTC()}}
-	a.inbox[projectAgentKey(project.ID, "peer-1")] = []AgentInboxMessage{{ID: "local", ProjectID: project.ID, SourceAgentID: agent.ID, TargetAgentID: "peer-1", Subject: "CURRENT_GROUP_MARKER", Body: "current group event", Status: HandoffDelivered, CreatedAt: time.Now().UTC()}}
+	appendInboxForTest(a, projectAgentKey(project.ID, "outsider"), AgentInboxMessage{ID: "foreign", ProjectID: project.ID, SourceAgentID: "peer-0", TargetAgentID: "peer-1", Subject: "FOREIGN_GLOBAL_INBOX_MARKER", Body: "must not be scanned", Status: HandoffDelivered, CreatedAt: time.Now().UTC()})
+	appendInboxForTest(a, projectAgentKey(project.ID, "peer-1"), AgentInboxMessage{ID: "local", ProjectID: project.ID, SourceAgentID: agent.ID, TargetAgentID: "peer-1", Subject: "CURRENT_GROUP_MARKER", Body: "current group event", Status: HandoffDelivered, CreatedAt: time.Now().UTC()})
 
 	prompt := a.buildResidentAgentPromptWithMemoryQuery(project, agent, "needle details please", "dev", "needle details please")
 	if estimated := estimateModelBoundTranscriptTokens(a.agentTranscriptForModel(project.ID, agent.ID)); estimated > residentTranscriptPromptMaxChars/4+100 {

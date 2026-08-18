@@ -82,11 +82,11 @@ func TestM3BrowserFixture(t *testing.T) {
 	project.Name = "M3 Browser Fixture"
 	agent := Agent{ID: "karoz", ProjectID: project.ID, Name: "Karoz", Nickname: "Karoz", DisplayName: "Karoz", ShortName: "PMO", Role: "fixture replay verifier", Runtime: "resident", State: "idle", StatusMessage: "ready"}
 	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: root})
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 	a.modelProvider = m3BrowserFixtureProvider{}
 
 	const kind = ScheduledRunKind("m3-browser-fixture")
-	a.schedulerExecutors[kind] = func(ctx context.Context, job ScheduledRun) error {
+	a.agentRuntimeLocked().schedulerExecutors[kind] = func(ctx context.Context, job ScheduledRun) error {
 		out, err := a.runScheduledResidentAgentTurn(ctx, job, project, agent, "M3 browser fixture scheduled Run", "ask")
 		if err != nil {
 			return err

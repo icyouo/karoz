@@ -35,14 +35,14 @@ func (a *app) startAgentRunWorker(project Project, agent Agent, run AgentRun, us
 		if message == "" {
 			message = emptyAgentOutputMessage(agent)
 		}
-		if hook := a.agentRunAfterProviderHook; hook != nil {
+		if hook := a.agentRuntimeLocked().agentRunAfterProviderHook; hook != nil {
 			hook()
 		}
 		if ctx.Err() != nil || !a.commitAgentRunSuccessWithLedger(project, agent, run.ID, message) {
 			a.finishAgentRunWithLedger(project, agent, run.ID, RunStateCancelled, context.Canceled, "Agent run cancelled.")
 			return
 		}
-		if hook := a.agentRunAfterSuccessHook; hook != nil {
+		if hook := a.agentRuntimeLocked().agentRunAfterSuccessHook; hook != nil {
 			hook()
 		}
 	}()

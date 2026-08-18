@@ -2,18 +2,19 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	executiondomain "github.com/karoz/karoz/internal/execution"
 )
 
 type claudeBridgeEvent struct {
@@ -24,34 +25,35 @@ type claudeBridgeEvent struct {
 }
 
 func claudeCLIAuthenticated(ctx context.Context) bool {
+	return claudeCLIAuthenticatedWithRunner(ctx, executiondomain.NewHostRunner())
+}
+
+func claudeCLIAuthenticatedWithRunner(ctx context.Context, runner executiondomain.Runner) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("KAROZ_CLAUDE_CLI_AUTH"))) {
 	case "1", "true", "available":
 		return true
 	case "0", "false", "disabled", "unavailable":
 		return false
 	}
-	if _, err := exec.LookPath("claude"); err != nil {
-		return false
+	if runner == nil {
+		runner = executiondomain.NewHostRunner()
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(probeCtx, "claude", "auth", "status", "--json").Output()
+	result, err := runner.Run(probeCtx, commandRequest("", "claude", "auth", "status", "--json"))
 	if err != nil {
 		return false
 	}
 	var status struct {
 		LoggedIn bool `json:"loggedIn"`
 	}
-	return json.Unmarshal(output, &status) == nil && status.LoggedIn
+	return json.Unmarshal([]byte(result.Output()), &status) == nil && status.LoggedIn
 }
 
-func invokeClaudeCLIStream(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool func(codexToolCall) (string, error)) error {
-	return invokeClaudeCLIStreamWithBudget(ctx, workdir, prompt, model, effort, tools, callbacks, residentTurnBudgetFor("ask"), func(_ context.Context, call codexToolCall) (string, error) {
-		return executeTool(call)
-	})
-}
-
-func invokeClaudeCLIStreamWithBudget(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, executeTool residentToolExecutor) error {
+func invokeClaudeCLIStreamWithBudgetAndRunner(ctx context.Context, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, runner executiondomain.StreamRunner, executeTool residentToolExecutor) error {
+	if runner == nil {
+		runner = executiondomain.NewHostStreamRunner()
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -66,7 +68,7 @@ func invokeClaudeCLIStreamWithBudget(ctx context.Context, workdir, prompt, model
 	defer cancelTools()
 	currentPrompt := prompt
 	for round := 0; round < budget.MaxModelRounds; round++ {
-		partial, interrupts, err := streamClaudeCLIOnce(turnCtx, toolCtx, started, budget, workdir, currentPrompt, model, effort, tools, callbacks, executeTool)
+		partial, interrupts, err := streamClaudeCLIOnceWithRunner(turnCtx, toolCtx, started, budget, workdir, currentPrompt, model, effort, tools, callbacks, runner, executeTool)
 		if err != nil {
 			return err
 		}
@@ -78,7 +80,29 @@ func invokeClaudeCLIStreamWithBudget(ctx context.Context, workdir, prompt, model
 	return errors.New("Claude interrupt restart limit reached")
 }
 
-func streamClaudeCLIOnce(ctx, toolCtx context.Context, started time.Time, budget ResidentTurnBudget, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, executeTool residentToolExecutor) (string, []AgentInterrupt, error) {
+func invokeClaudeCLINoToolsOnceWithRunner(ctx context.Context, workdir, prompt, model, effort string, callbacks AgentStreamCallbacks, budget ResidentTurnBudget, runner executiondomain.StreamRunner) error {
+	if runner == nil {
+		runner = executiondomain.NewHostStreamRunner()
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, interrupts, err := streamClaudeCLIOnceWithRunner(ctx, ctx, time.Now(), budget, workdir, prompt, model, effort, nil, callbacks, runner, func(context.Context, codexToolCall) (string, error) {
+		return "", errors.New("tools are disabled for this request")
+	})
+	if err != nil {
+		return err
+	}
+	if len(interrupts) > 0 {
+		return errors.New("interrupts are disabled for no-tools model requests")
+	}
+	return nil
+}
+
+func streamClaudeCLIOnceWithRunner(ctx, toolCtx context.Context, started time.Time, budget ResidentTurnBudget, workdir, prompt, model, effort string, tools []map[string]any, callbacks AgentStreamCallbacks, runner executiondomain.StreamRunner, executeTool residentToolExecutor) (string, []AgentInterrupt, error) {
+	if runner == nil {
+		runner = executiondomain.NewHostStreamRunner()
+	}
 	bridge, err := startClaudeToolBridge(tools, callbacks, budget, started, ctx, toolCtx, executeTool)
 	if err != nil {
 		return "", nil, err
@@ -92,21 +116,16 @@ func streamClaudeCLIOnce(ctx, toolCtx context.Context, started time.Time, budget
 	if len(bridge.AllowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(bridge.AllowedTools, ","))
 	}
-	command := exec.CommandContext(stepCtx, "claude", args...)
-	command.Dir = workdir
-	stdout, err := command.StdoutPipe()
+	stream, err := runner.Start(stepCtx, executiondomain.StreamCommandRequest{
+		Name: "claude", Args: args, Dir: workdir, Configure: configureResidentCommand,
+	})
 	if err != nil {
-		return "", nil, err
-	}
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	if err := command.Start(); err != nil {
 		return "", nil, err
 	}
 	lines := make(chan string, 32)
 	scanErr := make(chan error, 1)
 	go func() {
-		scanner := bufio.NewScanner(stdout)
+		scanner := bufio.NewScanner(stream.Stdout)
 		scanner.Buffer(make([]byte, 64*1024), 8<<20)
 		for scanner.Scan() {
 			lines <- scanner.Text()
@@ -114,8 +133,14 @@ func streamClaudeCLIOnce(ctx, toolCtx context.Context, started time.Time, budget
 		close(lines)
 		scanErr <- scanner.Err()
 	}()
+	stderrDone := make(chan string, 1)
+	go func() {
+		data, _ := io.ReadAll(stream.Stderr)
+		_ = stream.Stderr.Close()
+		stderrDone <- string(data)
+	}()
 	waitErr := make(chan error, 1)
-	go func() { waitErr <- command.Wait() }()
+	go func() { waitErr <- stream.Cmd.Wait() }()
 	ticker := time.NewTicker(40 * time.Millisecond)
 	defer ticker.Stop()
 	var output strings.Builder
@@ -164,6 +189,7 @@ func streamClaudeCLIOnce(ctx, toolCtx context.Context, started time.Time, budget
 		return output.String(), nil, err
 	}
 	commandErr := <-waitErr
+	stderrText := <-stderrDone
 	for {
 		select {
 		case event := <-bridge.Events:
@@ -188,7 +214,7 @@ drained:
 		return output.String(), nil, errors.New(resultError)
 	}
 	if commandErr != nil {
-		return output.String(), nil, fmt.Errorf("claude CLI failed: %w: %s", commandErr, strings.TrimSpace(stderr.String()))
+		return output.String(), nil, fmt.Errorf("claude CLI failed: %w: %s", commandErr, strings.TrimSpace(stderrText))
 	}
 	return output.String(), nil, nil
 }

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	executiondomain "github.com/karoz/karoz/internal/execution"
 	monitordomain "github.com/karoz/karoz/internal/monitor"
 )
 
@@ -65,31 +66,47 @@ func executeMonitorProbe(
 	source []byte,
 	timeout time.Duration,
 ) (monitordomain.ProbeExecution, string, error) {
+	return executeMonitorProbeWithRunner(
+		executiondomain.NewHostRunner(),
+		parent,
+		language,
+		workdir,
+		source,
+		timeout,
+	)
+}
+
+func executeMonitorProbeWithRunner(
+	runner executiondomain.Runner,
+	parent context.Context,
+	language, workdir string,
+	source []byte,
+	timeout time.Duration,
+) (monitordomain.ProbeExecution, string, error) {
+	if runner == nil {
+		runner = executiondomain.NewHostRunner()
+	}
 	interpreter := "bash"
 	args := []string{"-s", "--"}
 	if language == "javascript" {
 		interpreter = "node"
 		args = []string{"-"}
 	}
-	path, err := exec.LookPath(interpreter)
-	if err != nil {
-		return monitordomain.ProbeExecution{}, "", err
-	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Dir = workdir
-	cmd.Stdin = bytes.NewReader(source)
-	prepareResidentBashProcess(cmd)
-	cmd.WaitDelay = 2 * time.Second
-	stdout := &probeBoundedBuffer{limit: 16 << 10}
-	stderr := &probeBoundedBuffer{limit: 16 << 10}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	err = cmd.Run()
-	_ = stopResidentBashProcessTree(cmd)
+	result, err := runner.Run(ctx, executiondomain.CommandRequest{
+		Name:           interpreter,
+		Args:           args,
+		Dir:            workdir,
+		Stdin:          bytes.NewReader(source),
+		MaxOutputBytes: 16 << 10,
+		WaitDelay:      2 * time.Second,
+		Configure:      prepareResidentBashProcess,
+		Finalize:       stopResidentBashProcessTree,
+	})
 	execution := monitordomain.ProbeExecution{
-		Stdout:   append([]byte(nil), stdout.data...),
+		Stdout:   []byte(result.Stdout),
+		ExitCode: result.ExitCode,
 		TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded),
 	}
 	if exitErr := new(exec.ExitError); errors.As(err, &exitErr) {
@@ -99,10 +116,10 @@ func executeMonitorProbe(
 			execution.Signaled = ok && status.Signaled()
 		}
 	} else if err != nil && !execution.TimedOut {
-		return execution, string(stderr.data), err
+		return execution, result.Stderr, err
 	}
-	if stdout.overflow || stderr.overflow {
-		return execution, string(stderr.data), errors.New("probe output exceeded 16 KiB")
+	if result.Truncated {
+		return execution, result.Stderr, errors.New("probe output exceeded 16 KiB")
 	}
-	return execution, string(stderr.data), nil
+	return execution, result.Stderr, nil
 }

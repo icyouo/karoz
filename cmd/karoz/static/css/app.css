@@ -125,6 +125,7 @@
     @keyframes agentPulse { 0%, 80%, 100% { opacity: .28; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
     .agent-chat-tools { display: flex; min-width: 0; align-items: center; gap: 8px; overflow-x: auto; }
     .agent-runtime-tools { display: flex; align-items: center; gap: 3px; }
+    .agent-runtime-tools:empty + .agent-tool-separator { display: none; }
     .agent-chat-tools button { width: auto; min-width: 54px; padding: 6px 9px; font-family: var(--font-mono); font-size: 11px; }
     .agent-chat-tools button.active { border-color: var(--accent-muted); color: var(--accent); }
     .workspace-file { width: 100%; border: 0; border-left: 2px solid transparent; background: transparent; color: var(--text-primary); padding: 8px 10px; text-align: left; }
@@ -668,6 +669,15 @@
       background: rgba(255, 255, 255, .035);
       color: var(--text-primary);
     }
+    .agent-chat-tools button.preview-toggle {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+    }
+    .agent-chat-tools button.preview-toggle svg {
+      width: 17px;
+      height: 14px;
+    }
     .agent-chat-tools .runtime-tool {
       display: inline-flex;
       align-items: center;
@@ -710,6 +720,8 @@
     }
     .artifact-view-tabs button:hover,
     .artifact-view-tabs button.active { border-bottom-color: var(--accent-muted); color: var(--text-primary); }
+    .updates-view { display: flex; width: 100%; min-height: 100%; flex-direction: column; background: var(--bg-root); }
+    .updates-content { display: flex; min-height: 0; flex: 1; flex-direction: column; }
     .agent-working-pulse i { width: 4px; height: 4px; background: var(--accent); }
 
     .chat-viewport {

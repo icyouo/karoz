@@ -12,12 +12,12 @@ import (
 	"syscall"
 	"time"
 
+	executiondomain "github.com/karoz/karoz/internal/execution"
 	processdomain "github.com/karoz/karoz/internal/process"
 )
 
 const (
 	defaultProcessLifetime = time.Hour
-	maxProcessLifetime     = 24 * time.Hour
 	defaultTerminalRetries = 3
 	maxTerminalRetries     = 5
 	maxTerminalRetryDelay  = 250 * time.Millisecond
@@ -70,6 +70,7 @@ type processSupervisorConfig struct {
 	GuardExecutable   string
 	GuardArgsPrefix   []string
 	BoundaryFactory   func(*exec.Cmd) (processBoundary, error)
+	StreamRunner      executiondomain.StreamRunner
 	ProcessKill       func(*os.Process) error
 	ProcessWait       func(*exec.Cmd) error
 	BeforeFinalize    func()
@@ -82,6 +83,7 @@ type processStartRequest struct {
 	ID, ProjectID, AgentID, RunID string
 	Command, Workdir, Description string
 	Lifetime                      time.Duration
+	Unlimited                     bool
 }
 
 type processRecoveryFault struct {
@@ -206,13 +208,7 @@ func newProcessSupervisor(
 	if config.DefaultLifetime <= 0 {
 		config.DefaultLifetime = defaultProcessLifetime
 	}
-	if config.MaxLifetime <= 0 {
-		config.MaxLifetime = maxProcessLifetime
-	}
-	if config.MaxLifetime > maxProcessLifetime {
-		return nil, errors.New("maximum process lifetime exceeds product ceiling")
-	}
-	if config.DefaultLifetime > config.MaxLifetime {
+	if config.MaxLifetime > 0 && config.DefaultLifetime > config.MaxLifetime {
 		return nil, errors.New("default process lifetime exceeds maximum")
 	}
 	if config.TerminalRetry <= 0 {
@@ -229,6 +225,9 @@ func newProcessSupervisor(
 	}
 	if config.BoundaryFactory == nil {
 		config.BoundaryFactory = newBackgroundProcessBoundary
+	}
+	if config.StreamRunner == nil {
+		config.StreamRunner = executiondomain.NewHostStreamRunner()
 	}
 	if config.ProcessKill == nil {
 		config.ProcessKill = func(process *os.Process) error { return process.Kill() }
@@ -375,7 +374,9 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 	handle.collectMu.Unlock()
 	close(handle.gate)
 
-	go supervisor.enforceLifetime(handle, lifetime)
+	if !request.Unlimited {
+		go supervisor.enforceLifetime(handle, lifetime)
+	}
 	select {
 	case <-handle.exitObserved:
 		ctx, cancel := context.WithTimeout(context.Background(), 2*supervisor.config.StopGrace)
@@ -408,11 +409,20 @@ func (supervisor *processSupervisor) validateStartRequest(request processStartRe
 	if request.Lifetime < 0 {
 		return 0, errors.New("process lifetime must not be negative")
 	}
+	if request.Unlimited {
+		if request.Lifetime != 0 {
+			return 0, errors.New("unlimited process must not specify a finite lifetime")
+		}
+		if supervisor.config.MaxLifetime > 0 {
+			return 0, errors.New("unlimited process exceeds configured maximum")
+		}
+		return 0, nil
+	}
 	lifetime := request.Lifetime
 	if lifetime == 0 {
 		lifetime = supervisor.config.DefaultLifetime
 	}
-	if lifetime > supervisor.config.MaxLifetime {
+	if supervisor.config.MaxLifetime > 0 && lifetime > supervisor.config.MaxLifetime {
 		return 0, errors.New("process lifetime exceeds maximum")
 	}
 	return lifetime, nil
@@ -457,29 +467,22 @@ func (supervisor *processSupervisor) launch(record processdomain.Process, logWri
 	args := append([]string(nil), supervisor.config.GuardArgsPrefix...)
 	args = append(args, "process-guard", "--")
 	args = append(args, backgroundShellCommand(record.Command)...)
-	cmd := exec.CommandContext(supervisor.ctx, executable, args...)
-	cmd.Dir = record.Workdir
-	boundary, err := supervisor.config.BoundaryFactory(cmd)
+	var boundary processBoundary
+	stream, err := supervisor.config.StreamRunner.Start(supervisor.ctx, executiondomain.StreamCommandRequest{
+		Name: executable, Args: args, Dir: record.Workdir,
+		Configure: func(cmd *exec.Cmd) error {
+			var configureErr error
+			boundary, configureErr = supervisor.config.BoundaryFactory(cmd)
+			return configureErr
+		},
+	})
 	if err != nil {
+		if boundary != nil {
+			_ = boundary.Close()
+		}
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = boundary.Close()
-		return nil, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = boundary.Close()
-		_ = stdout.Close()
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		_ = boundary.Close()
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return nil, err
-	}
+	cmd, stdout, stderr := stream.Cmd, stream.Stdout, stream.Stderr
 	handle := &supervisedProcess{
 		supervisor: supervisor, record: record, cmd: cmd, boundary: boundary,
 		stdout: stdout, stderr: stderr, log: logWriter,

@@ -25,19 +25,27 @@
     function renderRuntimeStrip() {
       const pending = (state.memory || []).filter(item => item.layer === 'pending').length;
       const boardCount = (state.blackboard || []).length;
+      const inboxCount = (state.inbox || []).length;
+      const updatesCount = inboxCount + boardCount;
       const role = titleCaseCompact(shortAgentRole());
       const workText = currentAgentWorking() ? ' · Working' : '';
-      const chip = (panel, label, count, title, attention = 0) => '<button class="runtime-tool secondary ' + (state.sidePanel === panel ? 'active' : '') + '" data-side-panel="' + panel + '" aria-label="' + escapeHTML(label + ' ' + count) + '" title="' + escapeHTML(title || ('Open ' + label)) + '"><span>' + label + '</span><strong>' + count + '</strong>' + (attention > 0 ? '<i title="' + attention + ' pending" aria-label="' + attention + ' pending"></i>' : '') + '</button>';
+      const chip = (panel, label, count, title, attention = 0) => {
+        const total = Number(count) || 0;
+        if (total <= 0) return '';
+        const countMarkup = total > 0 ? '<strong>' + total + '</strong>' : '';
+        const accessibleLabel = total > 0 ? label + ' ' + total : label;
+        const attentionMarkup = Number(attention) > 0 ? '<i title="' + attention + ' pending" aria-label="' + attention + ' pending"></i>' : '';
+        return '<button class="runtime-tool secondary ' + (state.sidePanel === panel ? 'active' : '') + '" data-side-panel="' + panel + '" aria-label="' + escapeHTML(accessibleLabel) + '" title="' + escapeHTML(title || ('Open ' + label)) + '"><span>' + label + '</span>' + countMarkup + attentionMarkup + '</button>';
+      };
       $('agentHeaderMeta').textContent = role + workText;
-      $('agentRuntimeTools').innerHTML = chip('inbox', 'Inbox', (state.inbox || []).length)
+      $('agentRuntimeTools').innerHTML = chip('updates', 'Updates', updatesCount, inboxCount + ' attention · ' + boardCount + ' activity')
         + chip('plans', 'Plans', (state.plans || []).filter(item => !['completed', 'cancelled'].includes(item.status)).length, 'Open WorkPlans')
 		+ chip('artifacts', 'Artifacts', (state.artifacts || []).filter(item => item.status !== 'superseded').length)
         + chip('memory', 'Memory', (state.memory || []).length, pending > 0 ? ('Open Memory · ' + pending + ' pending') : 'Open Memory', pending)
-        + chip('blackboard', 'Activity', boardCount, 'Open agent activity')
         + chip('background', 'Background', (state.backgroundProcesses || []).length + (state.backgroundMonitors || []).length, (state.backgroundProcesses || []).length + ' processes · ' + (state.backgroundMonitors || []).length + ' monitors');
-      $('agentHeaderMeta').title = 'inbox ' + (state.inbox || []).length + ' · memory ' + (state.memory || []).length + ' · pending ' + pending + ' · blackboard ' + boardCount + ' · archived ' + (state.archive || []).length;
+      $('agentHeaderMeta').title = 'updates ' + updatesCount + ' · memory ' + (state.memory || []).length + ' · pending ' + pending + ' · archived ' + (state.archive || []).length;
       renderAgentWorkingState();
-      if (['blackboard', 'artifacts', 'plans', 'inbox', 'memory', 'pending', 'background'].includes(state.sidePanel) &&
+      if (['updates', 'artifacts', 'plans', 'memory', 'pending', 'background'].includes(state.sidePanel) &&
           !(state.sidePanel === 'background' && state.backgroundEditor)) renderSidePane();
     }
     async function loadWorkspaceFiles() {
@@ -75,7 +83,11 @@
       const body = $('sidePaneBody');
       const open = !!state.sidePanel && (state.sidePanel !== 'preview' || !!state.preview);
       shell.classList.toggle('side-open', open);
-      $('togglePreviewPane').classList.toggle('active', state.sidePanel === 'preview' && !!state.preview);
+      const previewToggle = $('togglePreviewPane');
+      previewToggle.classList.toggle('active', open);
+      previewToggle.setAttribute('aria-pressed', open ? 'true' : 'false');
+      previewToggle.title = open ? 'Close side panel' : 'Preview';
+      previewToggle.setAttribute('aria-label', open ? 'Close side panel' : 'Preview');
       document.querySelectorAll('#agentRuntimeTools button[data-side-panel]').forEach(button => {
         button.classList.toggle('active', state.sidePanel === button.dataset.sidePanel);
       });
@@ -85,20 +97,16 @@
         return;
       }
       try {
-        if (state.sidePanel === 'blackboard') {
-          renderBlackboardPane(body);
-          return;
-        }
+		if (state.sidePanel === 'updates') {
+		  renderUpdatesPane(body);
+		  return;
+		}
 		if (state.sidePanel === 'artifacts') {
 		  renderArtifactsPane(body);
 		  return;
 		}
         if (state.sidePanel === 'plans') {
           renderPlansPane(body);
-          return;
-        }
-        if (state.sidePanel === 'inbox') {
-          renderRuntimeListPane(body, 'Inbox', state.inbox || [], renderInboxEntry);
           return;
         }
         if (state.sidePanel === 'memory') {
@@ -118,6 +126,26 @@
         $('sidePaneTitle').textContent = 'Panel';
         body.innerHTML = '<div class="blackboard-view"><div class="blackboard-section-title">Unable to render</div><div class="blackboard-entry"><div class="blackboard-entry-summary">' + escapeHTML(err.message || String(err)) + '</div></div></div>';
       }
+    }
+    function renderUpdatesPane(body) {
+      const view = state.updatesView === 'activity' ? 'activity' : 'attention';
+      const inboxCount = (state.inbox || []).length;
+      const boardCount = (state.blackboard || []).length;
+      body.innerHTML = '<div class="updates-view">'
+        + '<div class="artifact-view-tabs updates-tabs" role="tablist" aria-label="Updates view">'
+        + '<button type="button" role="tab" aria-selected="' + (view === 'attention') + '" data-updates-view="attention" class="' + (view === 'attention' ? 'active' : '') + '">Needs attention' + (inboxCount ? ' · ' + inboxCount : '') + '</button>'
+        + '<button type="button" role="tab" aria-selected="' + (view === 'activity') + '" data-updates-view="activity" class="' + (view === 'activity' ? 'active' : '') + '">Activity' + (boardCount ? ' · ' + boardCount : '') + '</button>'
+        + '</div><div id="updatesContent" class="updates-content"></div></div>';
+      body.querySelectorAll('[data-updates-view]').forEach(button => {
+        button.onclick = () => {
+          state.updatesView = button.dataset.updatesView === 'activity' ? 'activity' : 'attention';
+          renderUpdatesPane(body);
+        };
+      });
+      const content = $('updatesContent');
+      if (view === 'activity') renderBlackboardPane(content);
+      else renderRuntimeListPane(content, 'Needs attention', state.inbox || [], renderInboxEntry);
+      $('sidePaneTitle').textContent = 'Updates';
     }
     function renderPreviewPane(body) {
       $('sidePaneTitle').textContent = state.preview.filename || 'Preview';

@@ -56,7 +56,7 @@ func newAgentRunWorkerFixture(t *testing.T, provider *controlledRunProvider) (*a
 	a.modelProvider = provider
 	project := Project{ID: "project", Name: "project", Path: t.TempDir(), DefaultBranch: "main"}
 	agent := Agent{ID: "agent", ProjectID: project.ID, Name: "Agent", Role: "implementation"}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 	return a, project, agent
 }
 
@@ -189,11 +189,11 @@ func TestCancelAfterProviderReturnBeforeResultCommitPersistsNoResult(t *testing.
 	a, project, agent := newAgentRunWorkerFixture(t, provider)
 	arrived := make(chan struct{})
 	releaseCommit := make(chan struct{})
-	a.agentRunAfterProviderHook = func() {
+	a.agentRuntimeLocked().agentRunAfterProviderHook = func() {
 		close(arrived)
 		<-releaseCommit
 	}
-	defer func() { a.agentRunAfterProviderHook = nil }()
+	defer func() { a.agentRuntimeLocked().agentRunAfterProviderHook = nil }()
 	run, started := a.beginAgentRun(AgentRunInput{RunID: "cancel-before-commit", ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: "ask"})
 	if !started {
 		t.Fatal("could not begin run")
@@ -261,11 +261,11 @@ func TestSuccessClaimRejectsLaterCancelWithOneDoneResult(t *testing.T) {
 	a, project, agent := newAgentRunWorkerFixture(t, provider)
 	claimed := make(chan struct{})
 	releaseWorker := make(chan struct{})
-	a.agentRunAfterSuccessHook = func() {
+	a.agentRuntimeLocked().agentRunAfterSuccessHook = func() {
 		close(claimed)
 		<-releaseWorker
 	}
-	defer func() { a.agentRunAfterSuccessHook = nil }()
+	defer func() { a.agentRuntimeLocked().agentRunAfterSuccessHook = nil }()
 	run, started := a.beginAgentRun(AgentRunInput{RunID: "success-before-cancel", ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: "ask"})
 	if !started {
 		t.Fatal("could not begin run")
@@ -311,7 +311,7 @@ func TestSuccessClaimRejectsLaterCancelWithOneDoneResult(t *testing.T) {
 func (a *app) runLedgerFromActiveOrKnown(_, _ string) *agentRunLedger {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, ledger := range a.agentRunLedgers {
+	for _, ledger := range a.agentRuntimeLocked().ledgers {
 		return ledger
 	}
 	return nil

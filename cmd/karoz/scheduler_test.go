@@ -17,7 +17,7 @@ func TestScheduledRunWakesWhenTheActiveRunFinishes(t *testing.T) {
 	}
 	const kind ScheduledRunKind = "wake-test"
 	executed := make(chan struct{}, 1)
-	a.schedulerExecutors[kind] = func(context.Context, ScheduledRun) error {
+	a.agentRuntimeLocked().schedulerExecutors[kind] = func(context.Context, ScheduledRun) error {
 		executed <- struct{}{}
 		return nil
 	}
@@ -33,7 +33,7 @@ func TestScheduledRunWakesWhenTheActiveRunFinishes(t *testing.T) {
 	key := projectAgentKey(project.ID, "worker-a")
 	for {
 		a.mu.Lock()
-		waiting := len(a.agentRunFinishedWatchers[key]) > 0
+		waiting := len(a.agentRuntimeLocked().finishedWatchers[key]) > 0
 		a.mu.Unlock()
 		if waiting {
 			break
@@ -91,7 +91,7 @@ func TestScheduledPlanAndDevBusyWaitRetainExecutionBudgetAndFinalReserve(t *test
 				err                error
 			}
 			observed := make(chan observation, 1)
-			a.schedulerExecutors[kind] = func(ctx context.Context, _ ScheduledRun) error {
+			a.agentRuntimeLocked().schedulerExecutors[kind] = func(ctx context.Context, _ ScheduledRun) error {
 				deadline, ok := ctx.Deadline()
 				if !ok {
 					err := context.DeadlineExceeded
@@ -133,7 +133,7 @@ func TestScheduledPlanAndDevBusyWaitRetainExecutionBudgetAndFinalReserve(t *test
 			waitDeadline := time.Now().Add(2 * time.Second)
 			for {
 				a.mu.Lock()
-				waiting := len(a.agentRunFinishedWatchers[key]) > 0
+				waiting := len(a.agentRuntimeLocked().finishedWatchers[key]) > 0
 				a.mu.Unlock()
 				if waiting {
 					break
@@ -179,16 +179,9 @@ func TestScheduledPlanAndDevBusyWaitRetainExecutionBudgetAndFinalReserve(t *test
 
 func newSchedulerTestApp(dataDir string) *app {
 	return &app{
-		settings:           Settings{DataDir: dataDir},
-		agentRuns:          map[string]AgentRun{},
-		agentRunCancels:    map[string]context.CancelFunc{},
-		schedulerQueue:     runtimedomain.NewSchedulerQueue(),
-		schedulerExecutors: map[ScheduledRunKind]ScheduledRunExecutor{},
-		runtimeHooks:       map[string]bool{},
-		runtimeWatchers:    map[string]map[chan RuntimeEvent]bool{},
-		tasks:              map[string][]Task{},
-		inbox:              map[string][]AgentInboxMessage{},
-		blackboard:         map[string][]AgentBlackboardEntry{},
+		settings:     Settings{DataDir: dataDir},
+		agentRuntime: agentRuntimeForTestWithScheduler(runtimedomain.NewSchedulerQueue(), map[ScheduledRunKind]ScheduledRunExecutor{}),
+		projectTasks: newProjectTaskCoordinator(),
 	}
 }
 
@@ -227,21 +220,21 @@ func TestScheduledRunsRecoverQueueOrderAndInterruptedAttempt(t *testing.T) {
 	if err := after.loadScheduledRuns(); err != nil {
 		t.Fatal(err)
 	}
-	queue := after.schedulerQueue.QueueIDs(projectAgentKey("p1", "designer"))
+	queue := after.agentRuntimeLocked().schedulerQueue.QueueIDs(projectAgentKey("p1", "designer"))
 	if len(queue) != 2 || queue[0] != queued.ID || queue[1] != running.ID {
 		t.Fatalf("recovered queue = %#v", queue)
 	}
-	recoveredRunning, _ := after.schedulerQueue.Job(running.ID)
+	recoveredRunning, _ := after.agentRuntimeLocked().schedulerQueue.Job(running.ID)
 	if recoveredRunning.Status != ScheduledRunQueued || recoveredRunning.Attempt != 1 || recoveredRunning.StartedAt != nil {
 		t.Fatalf("recovered running job = %+v", recoveredRunning)
 	}
-	if _, ok := after.schedulerQueue.Job(cancelled.ID); ok {
+	if _, ok := after.agentRuntimeLocked().schedulerQueue.Job(cancelled.ID); ok {
 		t.Fatal("cancelled job was recovered")
 	}
-	if recoveredFailed, _ := after.schedulerQueue.Job(failed.ID); recoveredFailed.Status != ScheduledRunFailed {
+	if recoveredFailed, _ := after.agentRuntimeLocked().schedulerQueue.Job(failed.ID); recoveredFailed.Status != ScheduledRunFailed {
 		t.Fatalf("failed job = %+v", recoveredFailed)
 	}
-	if !after.schedulerQueue.HasDedup(queued.DedupKey) || !after.schedulerQueue.HasDedup(running.DedupKey) {
+	if !after.agentRuntimeLocked().schedulerQueue.HasDedup(queued.DedupKey) || !after.agentRuntimeLocked().schedulerQueue.HasDedup(running.DedupKey) {
 		t.Fatal("dedup index was not rebuilt")
 	}
 
@@ -265,7 +258,7 @@ func TestScheduledRunRecoveryStopsAtMaxAttempts(t *testing.T) {
 	if err := after.loadScheduledRuns(); err != nil {
 		t.Fatal(err)
 	}
-	recovered, _ := after.schedulerQueue.Job(job.ID)
+	recovered, _ := after.agentRuntimeLocked().schedulerQueue.Job(job.ID)
 	if recovered.Status != ScheduledRunFailed || recovered.Attempt != 3 {
 		t.Fatalf("recovered exhausted job = %+v", recovered)
 	}
@@ -294,7 +287,7 @@ func TestLoadScheduledRunsUpgradesLegacyDefaultToSelectedExecutionBudget(t *test
 		{id: "legacy-plan", turnType: "plan"},
 		{id: "legacy-dev", turnType: "dev"},
 	} {
-		stored, found := after.schedulerQueue.Job(test.id)
+		stored, found := after.agentRuntimeLocked().schedulerQueue.Job(test.id)
 		if !found {
 			t.Fatalf("missing normalized legacy job %s", test.id)
 		}
@@ -323,7 +316,7 @@ func TestResumeScheduledRunsExecutesRecoveredJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	executed := make(chan ScheduledRun, 1)
-	after.schedulerExecutors[kind] = func(_ context.Context, recovered ScheduledRun) error {
+	after.agentRuntimeLocked().schedulerExecutors[kind] = func(_ context.Context, recovered ScheduledRun) error {
 		executed <- recovered
 		return nil
 	}
@@ -367,7 +360,7 @@ func TestScheduledHandoffRecoveryReturnsWorkingInboxToDelivered(t *testing.T) {
 		CreatedAt: now, UpdatedAt: now, WorkingAt: &workingAt,
 	}
 	before := newSchedulerTestApp(dataDir)
-	before.inbox[projectAgentKey("p1", "designer")] = []AgentInboxMessage{inbox}
+	replaceInboxForTest(before, map[string][]AgentInboxMessage{projectAgentKey("p1", "designer"): {inbox}})
 	if err := before.saveInbox(); err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +377,7 @@ func TestScheduledHandoffRecoveryReturnsWorkingInboxToDelivered(t *testing.T) {
 	if !ok || recovered.Status != HandoffDelivered {
 		t.Fatalf("recovered handoff = %+v ok=%v", recovered, ok)
 	}
-	if recoveredJob, _ := after.schedulerQueue.Job(job.ID); recoveredJob.Status != ScheduledRunQueued || recoveredJob.Attempt != 1 {
+	if recoveredJob, _ := after.agentRuntimeLocked().schedulerQueue.Job(job.ID); recoveredJob.Status != ScheduledRunQueued || recoveredJob.Attempt != 1 {
 		t.Fatalf("recovered scheduled run = %+v", recoveredJob)
 	}
 }

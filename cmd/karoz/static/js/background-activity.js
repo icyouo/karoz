@@ -166,7 +166,7 @@
         card.innerHTML = '<div class="background-card-head"><span class="background-state">' + escapeHTML(process.state || 'unknown') + '</span><span>' + escapeHTML(backgroundDuration(process.runtime_ms)) + '</span></div>'
           + '<h3 title="' + escapeHTML(process.command_summary || '') + '">' + escapeHTML(process.description || process.command_summary || process.id) + '</h3>'
           + '<div class="background-command">' + escapeHTML(process.command_summary || '') + '</div>'
-          + '<dl class="background-facts"><div><dt>Owner</dt><dd>' + escapeHTML(backgroundOwnerLabel(process.agent_id)) + '</dd></div><div><dt>Exit</dt><dd>' + escapeHTML(exit) + '</dd></div><div><dt>Log</dt><dd>' + escapeHTML(backgroundBytes(process.log_bytes)) + ' · ' + escapeHTML(String(process.log_lines || 0)) + ' lines</dd></div></dl>'
+          + '<dl class="background-facts"><div><dt>Owner</dt><dd>' + escapeHTML(backgroundOwnerLabel(process.agent_id)) + '</dd></div><div><dt>Lifetime</dt><dd>' + escapeHTML(process.lifetime_ms === 0 ? 'Unlimited' : backgroundDuration(process.lifetime_ms)) + '</dd></div><div><dt>Exit</dt><dd>' + escapeHTML(exit) + '</dd></div><div><dt>Log</dt><dd>' + escapeHTML(backgroundBytes(process.log_bytes)) + ' · ' + escapeHTML(String(process.log_lines || 0)) + ' lines</dd></div></dl>'
           + (process.last_line ? '<div class="background-last-line"><span>Last line</span><code>' + escapeHTML(process.last_line) + '</code></div>' : '')
           + '<p class="background-note">' + escapeHTML(statusNote) + '</p>'
           + '<div class="background-actions"><button type="button" class="secondary" data-process-log="' + escapeHTML(process.id) + '">View log</button>'

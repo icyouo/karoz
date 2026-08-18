@@ -27,7 +27,7 @@ func TestWindowsMonitorProbeFailsClosedBeforeMutation(t *testing.T) {
 		ID: "owner", ProjectID: project.ID,
 		CreatedAt: time.Now().UTC(),
 	}
-	a.agents[project.ID] = []Agent{owner}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{owner}
 	if _, _, err := a.prepareMonitorProbeApproval(
 		project,
 		monitorProbeApprovalRequest{

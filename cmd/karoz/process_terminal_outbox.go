@@ -141,7 +141,8 @@ func (runtime *processRuntimePersistence) PendingTerminalEvents() (
 }
 
 func (a *app) startProcessTerminalOutbox() {
-	a.processTerminalWorkerOnce.Do(func() {
+	outbox := a.processTerminalOutbox
+	outbox.workerOnce.Do(func() {
 		go func() {
 			ticker := time.NewTicker(processTerminalOutboxRetryInterval)
 			defer ticker.Stop()
@@ -149,7 +150,7 @@ func (a *app) startProcessTerminalOutbox() {
 				select {
 				case <-a.supervisorCtx.Done():
 					return
-				case <-a.processTerminalWake:
+				case <-outbox.wake:
 					a.drainProcessTerminalOutbox()
 				case <-ticker.C:
 					a.drainProcessTerminalOutbox()
@@ -163,18 +164,20 @@ func (a *app) startProcessTerminalOutbox() {
 }
 
 func (a *app) wakeProcessTerminalOutbox() {
-	if a.processTerminalWake == nil {
+	outbox := a.processTerminalOutbox
+	if outbox == nil || outbox.wake == nil {
 		return
 	}
 	select {
-	case a.processTerminalWake <- struct{}{}:
+	case outbox.wake <- struct{}{}:
 	default:
 	}
 }
 
 func (a *app) drainProcessTerminalOutbox() {
-	a.processTerminalDrainMu.Lock()
-	defer a.processTerminalDrainMu.Unlock()
+	outbox := a.processTerminalOutbox
+	outbox.drainMu.Lock()
+	defer outbox.drainMu.Unlock()
 	runtime := a.processRuntime
 	if runtime == nil {
 		return

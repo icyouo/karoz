@@ -2,70 +2,49 @@ package main
 
 import (
 	"context"
+	agentdomain "github.com/karoz/karoz/internal/agent"
+	executiondomain "github.com/karoz/karoz/internal/execution"
 	httpapiadapter "github.com/karoz/karoz/internal/httpapi"
-	monitordomain "github.com/karoz/karoz/internal/monitor"
 	runtimedomain "github.com/karoz/karoz/internal/runtime"
+	taskdomain "github.com/karoz/karoz/internal/task"
 	"net/http"
-	"sync"
 )
 
 func newApp(settings Settings) *app {
 	supervisorCtx, supervisorCancel := context.WithCancel(context.Background())
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
 	a := &app{
-		supervisorCtx:            supervisorCtx,
-		supervisorCancel:         supervisorCancel,
-		monitorCtx:               monitorCtx,
-		monitorCancel:            monitorCancel,
-		settings:                 settings,
-		tasks:                    map[string][]Task{},
-		taskRunCancels:           map[string]taskRun{},
-		taskIntegrationLocks:     map[string]*sync.Mutex{},
-		agents:                   map[string][]Agent{},
-		archives:                 map[string][]AgentArchiveMessage{},
-		memories:                 map[string][]AgentMemoryEntry{},
-		blackboard:               map[string][]AgentBlackboardEntry{},
-		monitors:                 map[string][]Monitor{},
-		artifacts:                map[string][]Artifact{},
-		groups:                   map[string][]AgentGroup{},
-		groupInbox:               map[string][]GroupInboxMessage{},
-		plans:                    map[string][]WorkPlan{},
-		inbox:                    map[string][]AgentInboxMessage{},
-		taskHooks:                map[string][]TaskRuntimeHook{},
-		agentRoutes:              map[string][]AgentRoute{},
-		agentMessages:            map[string][]AgentMessage{},
-		agentTranscripts:         map[string][]AgentTranscriptItem{},
-		agentSessions:            map[string]AgentSessionState{},
-		projectAliases:           map[string]string{},
-		agentRuns:                map[string]AgentRun{},
-		agentRunCancels:          map[string]context.CancelFunc{},
-		agentRunContexts:         map[string]context.Context{},
-		agentRunWorkers:          map[string]string{},
-		agentRunCancelling:       map[string]string{},
-		agentRunResultCommitted:  map[string]string{},
-		agentRunLedgers:          map[string]*agentRunLedger{},
-		agentRunFinishedWatchers: map[string]map[chan struct{}]struct{}{},
-		residentBashApprovals:    map[string]ResidentBashApproval{},
-		backgroundOwnerDeleting:  map[string]bool{},
-		processTerminalWake:      make(chan struct{}, 1),
-		processOutputMonitorCh:   make(chan processOutputObservation, 256),
-		processOutputBaselines:   map[string]uint64{},
-		processOutputCursors:     map[string]uint64{},
-		processOutputPendingGaps: map[string]processOutputGapDelta{},
-		processOutputGapWake:     make(chan struct{}, 1),
-		monitorProbeCancels:      map[string]context.CancelFunc{},
-		monitorProbeProjectSlots: map[string]chan struct{}{},
-		monitorProbeReservations: map[string]monitorProbeReservation{},
-		monitorProbeChallenges:   map[string]monitorProbeChallenge{},
-		monitorProbeReceipts:     map[string]monitordomain.ProbeApprovalReceipt{},
-		monitorProbeSessions:     map[string]monitorProbeOperatorSession{},
-		schedulerQueue:           runtimedomain.NewSchedulerQueue(),
-		schedulerExecutors:       map[ScheduledRunKind]ScheduledRunExecutor{},
-		runtimeHooks:             map[string]bool{},
-		runtimeWatchers:          map[string]map[chan RuntimeEvent]bool{},
+		supervisorCtx:             supervisorCtx,
+		supervisorCancel:          supervisorCancel,
+		processRuntimeCoordinator: *newProcessRuntimeCoordinator(),
+		monitorRuntimeCoordinator: *newMonitorRuntimeCoordinator(monitorCtx, monitorCancel),
+		settings:                  settings,
+		projectTasks:              newProjectTaskCoordinator(),
+		agentDirectory:            newAgentDirectory(),
+		memoryStore:               newMemoryStore(),
+		artifactCatalog:           newArtifactCatalog(),
+		conversation:              newConversationService(),
+		collaboration:             newCollaborationService(),
+		projectRegistry:           newProjectRegistry(),
+		agentRuntime:              newAgentRuntimeCoordinator(),
+		processTerminalOutbox:     newProcessTerminalOutboxCoordinator(),
+		processOutputRuntime:      newProcessOutputCoordinator(),
 	}
 	a.modelProvider = cliModelProviderAdapter{app: a}
 	a.dynamicTools = mcpDynamicToolAdapter{app: a}
+	a.commandRunner = executiondomain.NewHostRunner()
+	a.streamRunner = executiondomain.NewHostStreamRunner()
+	a.sandboxEnforcer = executiondomain.UnsupportedSandboxEnforcer{}
+	a.agentRuntime.lifecycle = runtimedomain.NewRunLifecycle(appAgentRunRepository{app: a})
+	a.agentRuntime.control = runtimedomain.NewRunControl(appAgentRunRepository{app: a})
+	a.agentService = agentdomain.NewService(appAgentRepository{app: a})
+	a.taskService = taskdomain.NewService(appTaskRepository{app: a})
+	// Static resident tools are part of the process contract, so validate the
+	// definition/handler/policy bijection before the app can advertise or serve
+	// any of them. Dynamic MCP tools retain their separate runtime contract.
+	if err := a.initializeResidentToolRegistry(); err != nil {
+		panic("initialize static resident tools: " + err.Error())
+	}
 	return a
 }
 

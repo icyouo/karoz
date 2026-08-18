@@ -21,7 +21,7 @@ func TestStaleRunCannotMutateReplacementRun(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
 	agent := Agent{ID: "designer", ProjectID: project.ID}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 
 	first, started := a.beginAgentRun(AgentRunInput{RunID: "run-old", ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect})
 	if !started {
@@ -101,8 +101,12 @@ func TestResidentToolPolicyAndReadOnlyRepositoryTools(t *testing.T) {
 		t.Fatalf("ask policy = %+v", ask)
 	}
 	plan := askSpecs("plan")
-	if plan["write_workspace_file"] || !plan["bash"] || plan["create_task"] || !plan["save_plan_draft"] || !plan["advance_plan"] {
+	if plan["write_workspace_file"] || !plan["bash"] || plan["create_task"] || !plan["save_plan_draft"] || plan["advance_plan"] {
 		t.Fatalf("plan policy = %+v", plan)
+	}
+	replacePlansForTest(a, project.ID, []WorkPlan{{ID: "owned-active", ProjectID: project.ID, OwnerAgentID: agent.ID, Status: PlanActive}})
+	if !askSpecs("plan")["advance_plan"] {
+		t.Fatal("advance_plan should be advertised when the actor owns an active plan")
 	}
 	dev := askSpecs("dev")
 	if !dev["write_workspace_file"] || !dev["create_task"] || !dev["bash"] {
@@ -149,8 +153,8 @@ func TestResidentTaskStatusTransitionsAreMechanicallyEnforced(t *testing.T) {
 		t.Fatal("worker-a missing")
 	}
 	task := Task{ID: "resident-task-transition", ProjectID: project.ID, Status: "pending", Title: "Validate resident transition"}
-	a.tasks[project.ID] = []Task{task}
-	a.taskHooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{
+	a.projectTasksLocked().tasks[project.ID] = []Task{task}
+	a.projectTasksLocked().hooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{
 		ID: "hook-transition", ProjectID: project.ID, TaskID: task.ID, AgentID: "karoz",
 		HookType: "resident_task_completion", Status: "pending",
 	}}
@@ -171,7 +175,7 @@ func TestResidentTaskStatusTransitionsAreMechanicallyEnforced(t *testing.T) {
 	if current, found := a.findTask(project.ID, task.ID); !found || current.Status != "done" || current.Result != "completed by resident" {
 		t.Fatalf("valid terminal transition missing: %+v found=%v", current, found)
 	}
-	if got := a.taskHooks[project.ID+"/"+task.ID][0].Status; got != "delivered" {
+	if got := a.projectTasksLocked().hooks[project.ID+"/"+task.ID][0].Status; got != "delivered" {
 		t.Fatalf("terminal transition did not deliver task hook: %s", got)
 	}
 
@@ -293,7 +297,7 @@ func TestResidentBashApprovalIsRevokedWhenRunFinishes(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
 	agent := Agent{ID: "designer", ProjectID: project.ID}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 	command := "printf revoked"
 	request := a.requestResidentBashApproval(ResidentToolContext{Project: project, Agent: agent}, command)
 	choiceID := bashChoiceID(t, request, residentBashApprovePrefix)
@@ -319,7 +323,7 @@ func TestResidentBashApprovalsAreRevokedWhenOwnerIsDeletedAndRecreated(
 	agent := Agent{
 		ID: "designer", ProjectID: project.ID, CreatedAt: created,
 	}
-	a.agents[project.ID] = []Agent{
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{
 		{ID: "karoz", ProjectID: project.ID, CreatedAt: created},
 		agent,
 	}
@@ -364,7 +368,7 @@ func TestResidentBashApprovalsAreRevokedWhenOwnerIsDeletedAndRecreated(
 	recreated := agent
 	recreated.CreatedAt = time.Now().UTC()
 	a.mu.Lock()
-	a.agents[project.ID] = append(a.agents[project.ID], recreated)
+	a.agentDirectoryLocked().agents[project.ID] = append(a.agentDirectoryLocked().agents[project.ID], recreated)
 	a.mu.Unlock()
 
 	for index, choice := range choices {
@@ -387,7 +391,7 @@ func TestResidentBashApprovalsAreRevokedWhenOwnerIsDeletedAndRecreated(
 		}
 	}
 	a.mu.Lock()
-	remaining := len(a.residentBashApprovals)
+	remaining := len(a.agentRuntimeLocked().residentBashApprovals)
 	a.mu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("deleted owner retained %d resident approvals", remaining)
@@ -403,7 +407,7 @@ func TestAgentDeletionSaveFailureRevokesApprovalsAndClearsFence(
 	agent := Agent{
 		ID: "designer", ProjectID: project.ID, CreatedAt: created,
 	}
-	a.agents[project.ID] = []Agent{
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{
 		{ID: "karoz", ProjectID: project.ID, CreatedAt: created},
 		agent,
 	}
@@ -415,7 +419,7 @@ func TestAgentDeletionSaveFailureRevokesApprovalsAndClearsFence(
 		t.Fatalf("pending approval = %s", request)
 	}
 	saveErr := errors.New("injected agent deletion queue save failure")
-	a.scheduledRunsSaveOverride = func(scheduledRunSnapshot) error {
+	a.agentRuntimeLocked().scheduledRunsSaveOverride = func(scheduledRunSnapshot) error {
 		return saveErr
 	}
 	if err := a.deleteProjectAgent(project, agent.ID); !errors.Is(err, saveErr) {
@@ -425,8 +429,8 @@ func TestAgentDeletionSaveFailureRevokesApprovalsAndClearsFence(
 		t.Fatal("failed deletion removed the agent")
 	}
 	a.mu.Lock()
-	deleting := a.backgroundOwnerDeleting[projectAgentKey(project.ID, agent.ID)]
-	approvals := len(a.residentBashApprovals)
+	deleting := a.agentRuntimeLocked().backgroundOwnerDeleting[projectAgentKey(project.ID, agent.ID)]
+	approvals := len(a.agentRuntimeLocked().residentBashApprovals)
 	a.mu.Unlock()
 	if deleting {
 		t.Fatal("failed pre-removal deletion left the owner fence set")
@@ -460,7 +464,7 @@ func TestResidentProviderWithoutRuntimeCapabilitiesIsRejected(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir()}
 	agent := Agent{ID: "karoz", ProjectID: project.ID}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 	_, err := a.runResidentAgentTurn(context.Background(), project, agent, "hello", "ask", nil)
 	if err == nil || !strings.Contains(err.Error(), "required streaming, tool, and interrupt capabilities") {
 		t.Fatalf("capability error = %v", err)

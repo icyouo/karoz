@@ -29,18 +29,14 @@ func TestResidentToolsMemoryArchiveAndSendTo(t *testing.T) {
 	}
 	project := Project{ID: projectID(projectPath), Name: "demo", Path: projectPath, DefaultBranch: "main"}
 	a := &app{
-		settings:      Settings{DataDir: dataDir, ProjectsRoot: root},
-		tasks:         map[string][]Task{},
-		agents:        map[string][]Agent{},
-		archives:      map[string][]AgentArchiveMessage{},
-		memories:      map[string][]AgentMemoryEntry{},
-		blackboard:    map[string][]AgentBlackboardEntry{},
-		inbox:         map[string][]AgentInboxMessage{},
-		taskHooks:     map[string][]TaskRuntimeHook{},
-		agentRoutes:   map[string][]AgentRoute{},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
+		settings:       Settings{DataDir: dataDir, ProjectsRoot: root},
+		projectTasks:   newProjectTaskCoordinator(),
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{}),
+		memoryStore:    newMemoryStore(),
+		conversation:   newConversationService(),
+		modelProvider:  fakeModelProvider{},
 	}
+	initializeResidentToolsForTest(t, a)
 	agents := a.projectAgents(project)
 	if len(agents) != 1 || agents[0].ID != "karoz" {
 		t.Fatalf("default agents = %+v", agents)
@@ -175,7 +171,9 @@ func TestResidentToolsMemoryArchiveAndSendTo(t *testing.T) {
 	for i := 0; i < 55; i++ {
 		a.appendAgentMessage(project.ID, "karoz", "user", "question", "message")
 	}
-	if got := a.archives[projectAgentKey(project.ID, "karoz")]; len(got) == 0 {
+	messages = a.agentMessagesFor(project.ID, "karoz")
+	waitForCheckpointCoverage(t, a, project.ID, "karoz", messages[len(messages)-1].Seq-50)
+	if got := a.conversation.ArchivedMessagesFor(projectAgentKey(project.ID, "karoz")); len(got) == 0 {
 		t.Fatalf("expected archived messages after checkpoint")
 	}
 }
@@ -189,13 +187,10 @@ func TestCreateAgentTeamCreatesGroupedAgentsAndRoutes(t *testing.T) {
 	}
 	project := Project{ID: projectID(projectPath), Name: "demo", Path: projectPath, DefaultBranch: "main"}
 	a := &app{
-		settings:      Settings{DataDir: dataDir, ProjectsRoot: root},
-		tasks:         map[string][]Task{},
-		agents:        map[string][]Agent{},
-		agentRoutes:   map[string][]AgentRoute{},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
-		inbox:         map[string][]AgentInboxMessage{},
+		settings:       Settings{DataDir: dataDir, ProjectsRoot: root},
+		projectTasks:   newProjectTaskCoordinator(),
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{}),
+		conversation:   newConversationService(),
 	}
 	resp, err := a.createAgentTeam(project, AgentTeamCreateRequest{TemplateID: "build-lane", Instance: "ship"})
 	if err != nil {
@@ -224,11 +219,11 @@ func TestCreateAgentTeamCreatesGroupedAgentsAndRoutes(t *testing.T) {
 	if !a.agentRouteAllowed(project.ID, architect.ID, reviewer.ID, "handoff") {
 		t.Fatal("report_to/accept_from topology did not create architect -> reviewer route")
 	}
-	a.inbox[projectAgentKey(project.ID, architect.ID)] = []AgentInboxMessage{{
+	replaceInboxForTest(a, map[string][]AgentInboxMessage{projectAgentKey(project.ID, architect.ID): []AgentInboxMessage{{
 		ID: "review-findings", ProjectID: project.ID, SourceAgentID: reviewer.ID, TargetAgentID: architect.ID,
 		MessageType: "handoff", Intent: "handoff", Subject: "Review findings", Body: "P0 state transition gap",
 		Status: HandoffDelivered, CreatedAt: time.Now().UTC(),
-	}}
+	}}})
 	prompt := a.buildResidentAgentPrompt(project, reviewer, "复查技术方案", "ask")
 	if !strings.Contains(prompt, "### Collaboration topology") ||
 		!strings.Contains(prompt, "nickname: "+architect.Nickname+"; default_intent: request") ||
@@ -241,17 +236,13 @@ func TestCreateAgentTeamCreatesGroupedAgentsAndRoutes(t *testing.T) {
 func TestKarozPromptRequiresSendToForAgentCoordination(t *testing.T) {
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
 	a := &app{
-		settings:      Settings{DataDir: t.TempDir()},
-		agents:        map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Nickname: "Karoz"}, {ID: "product-a", ProjectID: "p1", Nickname: "Product A", Role: "product"}, {ID: "product-b", ProjectID: "p1", Nickname: "Product B", Role: "product"}}},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
-		memories:      map[string][]AgentMemoryEntry{},
-		archives:      map[string][]AgentArchiveMessage{},
-		blackboard:    map[string][]AgentBlackboardEntry{},
-		inbox:         map[string][]AgentInboxMessage{},
+		settings:       Settings{DataDir: t.TempDir()},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Nickname: "Karoz"}, {ID: "product-a", ProjectID: "p1", Nickname: "Product A", Role: "product"}, {ID: "product-b", ProjectID: "p1", Nickname: "Product B", Role: "product"}}}),
+		conversation:   newConversationService(),
+		memoryStore:    newMemoryStore(),
 	}
 
-	prompt := a.buildResidentAgentPrompt(project, a.agents["p1"][0], "让两个产品输出最后的 prd", "ask")
+	prompt := a.buildResidentAgentPrompt(project, a.agentDirectoryLocked().agents["p1"][0], "让两个产品输出最后的 prd", "ask")
 	if !strings.Contains(prompt, "must call send_to") {
 		t.Fatalf("karoz prompt does not require send_to coordination:\n%s", prompt)
 	}
@@ -270,12 +261,9 @@ func TestAutoHandoffFallbackClosesCollaborationLoop(t *testing.T) {
 	}
 	project := Project{ID: "p1", Name: "demo", Path: projectPath, DefaultBranch: "main"}
 	a := &app{
-		settings:      Settings{DataDir: dataDir, ProjectsRoot: root},
-		agents:        map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Nickname: "Karoz"}, {ID: "worker", ProjectID: "p1", Nickname: "Worker"}}},
-		blackboard:    map[string][]AgentBlackboardEntry{},
-		inbox:         map[string][]AgentInboxMessage{},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
+		settings:       Settings{DataDir: dataDir, ProjectsRoot: root},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Nickname: "Karoz"}, {ID: "worker", ProjectID: "p1", Nickname: "Worker"}}}),
+		conversation:   newConversationService(),
 	}
 	msg := AgentInboxMessage{
 		ID:            "inbox-1",
@@ -293,7 +281,7 @@ func TestAutoHandoffFallbackClosesCollaborationLoop(t *testing.T) {
 	if err := a.queueInboxMessage(project.ID, msg); err != nil {
 		t.Fatal(err)
 	}
-	a.completeUnhandledInboxAfterAutoResponse(project, a.agents["p1"][1], msg, "Here is the result")
+	a.completeUnhandledInboxAfterAutoResponse(project, a.agentDirectoryLocked().agents["p1"][1], msg, "Here is the result")
 	workerInbox, ok := a.inboxMessage(project.ID, "worker", msg.ID)
 	if !ok || workerInbox.Status != HandoffClosed || workerInbox.ReportedAt == nil || workerInbox.ClosedAt == nil || workerInbox.Result != "Here is the result" {
 		t.Fatalf("worker inbox = %+v ok=%v", workerInbox, ok)
@@ -319,7 +307,7 @@ func TestAutoHandoffFallbackClosesCollaborationLoop(t *testing.T) {
 		t.Fatalf("blackboard missing projection/report = %+v", entries)
 	}
 	peer := Agent{ID: "reviewer", ProjectID: "p1", Nickname: "Reviewer"}
-	a.agents["p1"] = append(a.agents["p1"], peer)
+	a.agentDirectoryLocked().agents["p1"] = append(a.agentDirectoryLocked().agents["p1"], peer)
 	peerMsg := AgentInboxMessage{
 		ID:            "inbox-2",
 		ProjectID:     "p1",
@@ -336,7 +324,7 @@ func TestAutoHandoffFallbackClosesCollaborationLoop(t *testing.T) {
 	if err := a.queueInboxMessage(project.ID, peerMsg); err != nil {
 		t.Fatal(err)
 	}
-	a.completeUnhandledInboxAfterAutoResponse(project, a.agents["p1"][1], peerMsg, "Peer answer")
+	a.completeUnhandledInboxAfterAutoResponse(project, a.agentDirectoryLocked().agents["p1"][1], peerMsg, "Peer answer")
 	if got := a.pendingInboxFor(project.ID, "reviewer", 10); len(got) != 1 || got[0].MessageType != "reply" {
 		t.Fatalf("reviewer did not receive substantive peer result = %+v", got)
 	}
@@ -363,8 +351,8 @@ func TestProjectWorkspacesScanMainAndExtraCreateInMain(t *testing.T) {
 			ProjectsRoot:       mainRoot,
 			ExtraProjectsRoots: []string{extraRoot},
 		},
-		tasks:          map[string][]Task{},
-		projectAliases: map[string]string{},
+		projectTasks:    newProjectTaskCoordinator(),
+		projectRegistry: newProjectRegistry(),
 	}
 	projects, err := a.scanProjects()
 	if err != nil {
@@ -446,15 +434,12 @@ func TestSkillsDiscoveryToolsAndPromptInjection(t *testing.T) {
 	}
 	project := Project{ID: projectID(projectPath), Name: "demo", Path: projectPath, DefaultBranch: "main"}
 	a := &app{
-		settings:      Settings{DataDir: t.TempDir(), ProjectsRoot: root},
-		agents:        map[string][]Agent{},
-		archives:      map[string][]AgentArchiveMessage{},
-		memories:      map[string][]AgentMemoryEntry{},
-		blackboard:    map[string][]AgentBlackboardEntry{},
-		inbox:         map[string][]AgentInboxMessage{},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
+		settings:       Settings{DataDir: t.TempDir(), ProjectsRoot: root},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{}),
+		memoryStore:    newMemoryStore(),
+		conversation:   newConversationService(),
 	}
+	initializeResidentToolsForTest(t, a)
 	skills := a.discoverSkills(project)
 	var sawDemo bool
 	for _, skill := range skills {
@@ -661,7 +646,7 @@ func TestAgentPromptDeltaCompactsLargeToolResults(t *testing.T) {
 func TestLimitToolResultForModelCapsCurrentLoopOutput(t *testing.T) {
 	limit := residentTurnBudgetFor("ask").MaxToolOutputChars
 	result := strings.Repeat("x", limit+1000)
-	got := limitToolResultForModel(result)
+	got := limitToolResultForBudget(result, limit)
 
 	if len(got) > limit {
 		t.Fatalf("tool result was not capped: %d", len(got))
@@ -680,11 +665,9 @@ func TestGetArchivedMessagesCompactsToolResults(t *testing.T) {
 	key := projectAgentKey(projectID, agentID)
 	largeStdout := strings.Repeat("line\n", 5000)
 	a := &app{
-		agentMessages: map[string][]AgentMessage{
-			key: {{Seq: 1, Role: "tool_result", Intent: "bash", Body: `{"ok":true,"stdout":"` + largeStdout + `"}`, CreatedAt: time.Now().UTC()}},
-		},
-		archives: map[string][]AgentArchiveMessage{},
+		conversation: newConversationService(),
 	}
+	replaceAgentMessagesForTest(a, key, []AgentMessage{{Seq: 1, Role: "tool_result", Intent: "bash", Body: `{"ok":true,"stdout":"` + largeStdout + `"}`, CreatedAt: time.Now().UTC()}})
 
 	got := a.getArchivedMessages(projectID, agentID, 1, 1, 40)
 	if strings.Contains(got, largeStdout[:100]) {
@@ -703,13 +686,11 @@ func TestGetArchivedMessagesCompactsToolResults(t *testing.T) {
 
 func TestSearchArchiveUsesKeywordRelevanceAndOmitsToolPayloads(t *testing.T) {
 	key := projectAgentKey("p1", "architect")
-	a := &app{
-		memories: map[string][]AgentMemoryEntry{},
-		archives: map[string][]AgentArchiveMessage{key: {
-			{Seq: 1, Role: "assistant", Body: "M0 数据探针完成，M1 Watchlist 已由 reviewer 验收通过。", CreatedAt: time.Now().UTC()},
-			{Seq: 2, Role: "tool_result", Intent: "get_messages", Body: strings.Repeat("M0 M1 completed JSON ", 2000), CreatedAt: time.Now().UTC()},
-		}},
-	}
+	a := &app{memoryStore: newMemoryStore(), conversation: newConversationService()}
+	replaceProjectArchivesForTest(a, key, []AgentArchiveMessage{
+		{Seq: 1, Role: "assistant", Body: "M0 数据探针完成，M1 Watchlist 已由 reviewer 验收通过。", CreatedAt: time.Now().UTC()},
+		{Seq: 2, Role: "tool_result", Intent: "get_messages", Body: strings.Repeat("M0 M1 completed JSON ", 2000), CreatedAt: time.Now().UTC()},
+	})
 	got := a.searchArchive("p1", "architect", "M0 M1 reviewer 完成", 20)
 	if !strings.Contains(got, "数据探针完成") {
 		t.Fatalf("keyword archive search missed relevant result: %s", got)
@@ -753,9 +734,8 @@ func TestCompactCodexInputForFinalKeepsInitialPromptAndRecentEvidence(t *testing
 
 func TestAgentMessagesPageForDisplayReturnsLatestThenEarlier(t *testing.T) {
 	a := &app{
-		settings:      Settings{DataDir: t.TempDir()},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
+		settings:     Settings{DataDir: t.TempDir()},
+		conversation: newConversationService(),
 	}
 	for i := 1; i <= 5; i++ {
 		a.appendAgentMessage("p1", "karoz", "assistant", "", fmt.Sprintf("message-%d", i))
@@ -834,10 +814,8 @@ func TestReadAgentMessageRequestSavesMultipartAttachments(t *testing.T) {
 
 func TestAgentInterruptQueueDrainsForModelInjection(t *testing.T) {
 	a := &app{
-		settings:      Settings{DataDir: t.TempDir()},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
-		agentRuns:     map[string]AgentRun{},
+		settings:     Settings{DataDir: t.TempDir()},
+		conversation: newConversationService(),
 	}
 	run, started := a.beginAgentRun(AgentRunInput{ProjectID: "p1", AgentID: "frontend", Trigger: RunTriggerUserDirect, TurnType: "dev"})
 	if !started {
@@ -876,13 +854,9 @@ func TestAgentInterruptQueueDrainsForModelInjection(t *testing.T) {
 func TestAgentRunControllerTracksTriggerTransitionsAndFailure(t *testing.T) {
 	events := make(chan RuntimeEvent, 8)
 	a := &app{
-		agentRuns:       map[string]AgentRun{},
-		runtimeHooks:    map[string]bool{},
-		runtimeWatchers: map[string]map[chan RuntimeEvent]bool{"p1": {events: true}},
-		tasks:           map[string][]Task{},
-		inbox:           map[string][]AgentInboxMessage{},
-		blackboard:      map[string][]AgentBlackboardEntry{},
-		memories:        map[string][]AgentMemoryEntry{},
+		agentRuntime: agentRuntimeForTestWithRuntimeState(nil, nil, map[string]map[chan RuntimeEvent]bool{"p1": {events: true}}),
+		projectTasks: newProjectTaskCoordinator(),
+		memoryStore:  newMemoryStore(),
 	}
 	run, started := a.beginAgentRun(AgentRunInput{
 		ProjectID: "p1",
@@ -930,15 +904,11 @@ func TestAgentRunControllerTracksTriggerTransitionsAndFailure(t *testing.T) {
 func TestAgentRunQueryAndCancelAPI(t *testing.T) {
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
 	a := &app{
-		settings:      Settings{DataDir: t.TempDir()},
-		agents:        map[string][]Agent{"p1": {{ID: "designer", ProjectID: "p1", Name: "product-designer", Nickname: "Designer"}}},
-		agentRuns:     map[string]AgentRun{},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
-		tasks:         map[string][]Task{},
-		inbox:         map[string][]AgentInboxMessage{},
-		blackboard:    map[string][]AgentBlackboardEntry{},
-		memories:      map[string][]AgentMemoryEntry{},
+		settings:       Settings{DataDir: t.TempDir()},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{"p1": {{ID: "designer", ProjectID: "p1", Name: "product-designer", Nickname: "Designer"}}}),
+		conversation:   newConversationService(),
+		projectTasks:   newProjectTaskCoordinator(),
+		memoryStore:    newMemoryStore(),
 	}
 	run, started := a.beginAgentRun(AgentRunInput{ProjectID: "p1", AgentID: "designer", Trigger: RunTriggerUserDirect, TurnType: "plan"})
 	if !started {
@@ -973,19 +943,14 @@ func TestAgentRunQueryAndCancelAPI(t *testing.T) {
 func TestAgentRunSchedulerSerializesAndDeduplicatesPerAgent(t *testing.T) {
 	testKind := ScheduledRunKind("test")
 	a := &app{
-		settings:           Settings{DataDir: t.TempDir()},
-		agentRuns:          map[string]AgentRun{},
-		agentRunCancels:    map[string]context.CancelFunc{},
-		schedulerExecutors: map[ScheduledRunKind]ScheduledRunExecutor{},
-		runtimeHooks:       map[string]bool{},
-		tasks:              map[string][]Task{},
-		inbox:              map[string][]AgentInboxMessage{},
-		blackboard:         map[string][]AgentBlackboardEntry{},
-		memories:           map[string][]AgentMemoryEntry{},
+		settings:     Settings{DataDir: t.TempDir()},
+		agentRuntime: newAgentRuntimeCoordinator(),
+		projectTasks: newProjectTaskCoordinator(),
+		memoryStore:  newMemoryStore(),
 	}
 	started := make(chan string, 2)
 	releaseFirst := make(chan struct{})
-	a.schedulerExecutors[testKind] = func(ctx context.Context, job ScheduledRun) error {
+	a.agentRuntimeLocked().schedulerExecutors[testKind] = func(ctx context.Context, job ScheduledRun) error {
 		switch job.SourceID {
 		case "product":
 			started <- "first"
@@ -1065,20 +1030,15 @@ func TestTaskCompletionSchedulesTaskEventRun(t *testing.T) {
 	hook := TaskRuntimeHook{ID: "hook-1", TaskID: "task-1", ProjectID: project.ID, AgentID: "designer", HookType: "resident_task_completion", Status: "pending"}
 	hookKey := project.ID + "/task-1"
 	a := &app{
-		settings:           Settings{DataDir: t.TempDir(), ProjectsRoot: root},
-		agents:             map[string][]Agent{project.ID: {{ID: "designer", ProjectID: project.ID, Name: "product-designer", Nickname: "Designer"}}},
-		agentMessages:      map[string][]AgentMessage{},
-		agentSessions:      map[string]AgentSessionState{},
-		agentRuns:          map[string]AgentRun{},
-		agentRunCancels:    map[string]context.CancelFunc{},
-		schedulerExecutors: map[ScheduledRunKind]ScheduledRunExecutor{},
-		taskHooks:          map[string][]TaskRuntimeHook{hookKey: {hook}},
-		tasks:              map[string][]Task{project.ID: {{ID: "task-1", ProjectID: project.ID, Status: "done", Result: "mockup implemented"}}},
-		inbox:              map[string][]AgentInboxMessage{},
-		blackboard:         map[string][]AgentBlackboardEntry{},
-		memories:           map[string][]AgentMemoryEntry{},
-		archives:           map[string][]AgentArchiveMessage{},
-		modelProvider:      fakeModelProvider{},
+		settings:       Settings{DataDir: t.TempDir(), ProjectsRoot: root},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{project.ID: {{ID: "designer", ProjectID: project.ID, Name: "product-designer", Nickname: "Designer"}}}),
+		conversation:   newConversationService(),
+		projectTasks: &projectTaskCoordinator{
+			tasks: map[string][]Task{project.ID: {{ID: "task-1", ProjectID: project.ID, Status: "done", Result: "mockup implemented"}}},
+			hooks: map[string][]TaskRuntimeHook{hookKey: {hook}},
+		},
+		memoryStore:   newMemoryStore(),
+		modelProvider: fakeModelProvider{},
 	}
 	task := Task{ID: "task-1", ProjectID: project.ID, Status: "done", Result: "mockup implemented"}
 	a.notifyTaskRuntimeHooks(project, task)
@@ -1102,38 +1062,37 @@ func TestTaskCompletionSchedulesTaskEventRun(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if hooks := a.taskHooks[hookKey]; len(hooks) != 1 || hooks[0].Status != "delivered" {
+	if hooks := a.projectTasksLocked().hooks[hookKey]; len(hooks) != 1 || hooks[0].Status != "delivered" {
 		t.Fatalf("task hooks = %+v", hooks)
 	}
 }
 
 func TestRuntimeIdleStateConsidersAgentsTasksAndHooks(t *testing.T) {
 	a := &app{
-		tasks:        map[string][]Task{"p1": {{ID: "t1", ProjectID: "p1", Status: "done"}}},
-		agentRuns:    map[string]AgentRun{},
-		runtimeHooks: map[string]bool{},
+		projectTasks: projectTasksForTest(map[string][]Task{"p1": {{ID: "t1", ProjectID: "p1", Status: "done"}}}),
+		agentRuntime: newAgentRuntimeCoordinator(),
 	}
 	if !a.projectRuntimeIdle("p1") {
 		t.Fatal("done task with no agents should be idle")
 	}
-	a.tasks["p1"] = []Task{{ID: "t1", ProjectID: "p1", Status: "pending"}}
+	a.projectTasksLocked().tasks["p1"] = []Task{{ID: "t1", ProjectID: "p1", Status: "pending"}}
 	if !a.projectRuntimeIdle("p1") {
 		t.Fatal("pending task should not block runtime quiescence")
 	}
 	if !a.projectBacklogNotEmpty("p1") {
 		t.Fatal("pending task should be backlog")
 	}
-	a.tasks["p1"] = []Task{{ID: "t1", ProjectID: "p1", Status: "running"}}
+	a.projectTasksLocked().tasks["p1"] = []Task{{ID: "t1", ProjectID: "p1", Status: "running"}}
 	if a.projectRuntimeIdle("p1") {
 		t.Fatal("running task should block runtime quiescence")
 	}
-	a.tasks["p1"] = nil
-	a.agentRuns[projectAgentKey("p1", "worker")] = AgentRun{ID: "r1", ProjectID: "p1", AgentID: "worker", State: RunStateInvokingModel}
+	a.projectTasksLocked().tasks["p1"] = nil
+	a.agentRuntimeLocked().runs[projectAgentKey("p1", "worker")] = AgentRun{ID: "r1", ProjectID: "p1", AgentID: "worker", State: RunStateInvokingModel}
 	if a.projectRuntimeIdle("p1") {
 		t.Fatal("active agent should block idle reconciliation")
 	}
-	a.agentRuns = map[string]AgentRun{}
-	a.runtimeHooks["p1/"+karozIdleReconcileHook] = true
+	a.agentRuntimeLocked().runs = map[string]AgentRun{}
+	a.agentRuntimeLocked().runtimeHooks["p1/"+karozIdleReconcileHook] = true
 	if a.projectRuntimeIdle("p1") {
 		t.Fatal("active runtime hook should block normal idle")
 	}
@@ -1164,8 +1123,7 @@ func TestBlackboardEntryActionableRules(t *testing.T) {
 func TestMarkBlackboardActivityConsumesSignal(t *testing.T) {
 	projectID := "p1"
 	a := &app{
-		settings:   Settings{DataDir: t.TempDir()},
-		blackboard: map[string][]AgentBlackboardEntry{},
+		settings: Settings{DataDir: t.TempDir()},
 	}
 	agent := Agent{ID: "karoz", ProjectID: projectID, Name: "Karoz"}
 	entry := a.appendBlackboardEntry(projectID, agent, "blocker", "需要协调", "details", "")
@@ -1188,24 +1146,25 @@ func TestMarkBlackboardActivityConsumesSignal(t *testing.T) {
 func TestDeleteProjectAgentRemovesAgentAndRoutes(t *testing.T) {
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
 	a := &app{
-		settings:    Settings{DataDir: t.TempDir()},
-		agents:      map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Name: "Karoz"}, {ID: "frontend", ProjectID: "p1", Name: "Frontend"}}},
-		agentRoutes: map[string][]AgentRoute{"p1": {{ID: "r1", ProjectID: "p1", FromAgentID: "karoz", ToAgentID: "frontend", Intent: "request"}}},
-		agentRuns:   map[string]AgentRun{projectAgentKey("p1", "frontend"): {ID: "r1", ProjectID: "p1", AgentID: "frontend", State: RunStateExecutingTool, Interrupts: []AgentInterrupt{{AgentID: "frontend", Body: "pending"}}}},
+		settings:       Settings{DataDir: t.TempDir()},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Name: "Karoz"}, {ID: "frontend", ProjectID: "p1", Name: "Frontend"}}}),
+		collaboration:  newCollaborationService(),
+		agentRuntime:   agentRuntimeForTest(map[string]AgentRun{projectAgentKey("p1", "frontend"): {ID: "r1", ProjectID: "p1", AgentID: "frontend", State: RunStateExecutingTool, Interrupts: []AgentInterrupt{{AgentID: "frontend", Body: "pending"}}}}),
 	}
+	replaceRoutesForTest(a, "p1", []AgentRoute{{ID: "r1", ProjectID: "p1", FromAgentID: "karoz", ToAgentID: "frontend", Intent: "request"}})
 	if err := a.deleteProjectAgent(project, "karoz"); err == nil {
 		t.Fatal("default agent delete should fail")
 	}
 	if err := a.deleteProjectAgent(project, "frontend"); err != nil {
 		t.Fatal(err)
 	}
-	if len(a.agents["p1"]) != 1 || a.agents["p1"][0].ID != "karoz" {
-		t.Fatalf("agents = %+v", a.agents["p1"])
+	if len(a.agentDirectoryLocked().agents["p1"]) != 1 || a.agentDirectoryLocked().agents["p1"][0].ID != "karoz" {
+		t.Fatalf("agents = %+v", a.agentDirectoryLocked().agents["p1"])
 	}
-	if len(a.agentRoutes["p1"]) != 0 {
-		t.Fatalf("routes = %+v", a.agentRoutes["p1"])
+	if routes := a.collaboration.RoutesFor("p1"); len(routes) != 0 {
+		t.Fatalf("routes = %+v", routes)
 	}
-	if _, ok := a.agentRuns[projectAgentKey("p1", "frontend")]; ok {
+	if _, ok := a.agentRuntimeLocked().runs[projectAgentKey("p1", "frontend")]; ok {
 		t.Fatal("agent run state was not cleared")
 	}
 }
@@ -1213,13 +1172,11 @@ func TestDeleteProjectAgentRemovesAgentAndRoutes(t *testing.T) {
 func TestKarozOnlyAgentManagementTools(t *testing.T) {
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
 	a := &app{
-		settings:      Settings{DataDir: t.TempDir()},
-		agents:        map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Name: "Karoz"}}},
-		agentRoutes:   map[string][]AgentRoute{},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
-		agentRuns:     map[string]AgentRun{},
+		settings:       Settings{DataDir: t.TempDir()},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Name: "Karoz"}}}),
+		conversation:   newConversationService(),
 	}
+	initializeResidentToolsForTest(t, a)
 	karozSpecs := toolSpecNames(a.residentToolSpecsForContext(context.Background(), ResidentToolContext{Project: project, Workdir: project.Path, Agent: Agent{ID: "karoz"}, TurnType: "ask"}))
 	if !karozSpecs["list_agent_templates"] || !karozSpecs["add_agent"] || !karozSpecs["create_agent_team"] || !karozSpecs["delete_agent"] {
 		t.Fatalf("karoz management tools missing: %+v", karozSpecs)
@@ -1237,20 +1194,20 @@ func TestKarozOnlyAgentManagementTools(t *testing.T) {
 		t.Fatalf("non-karoz add result = %s", result)
 	}
 	result = a.addAgentFromResidentTool(project, Agent{ID: "karoz"}, map[string]any{"template_id": "frontend-specialist", "nickname": "Frontend"})
-	if !strings.Contains(result, `"agent"`) || len(a.agents["p1"]) != 2 {
-		t.Fatalf("karoz add result = %s agents=%+v", result, a.agents["p1"])
+	if !strings.Contains(result, `"agent"`) || len(a.agentDirectoryLocked().agents["p1"]) != 2 {
+		t.Fatalf("karoz add result = %s agents=%+v", result, a.agentDirectoryLocked().agents["p1"])
 	}
 	result = a.deleteAgentFromResidentTool(project, Agent{ID: "frontend"}, map[string]any{"agent_id": "frontend"})
 	if !strings.Contains(result, "forbidden") {
 		t.Fatalf("non-karoz delete result = %s", result)
 	}
 	result = a.deleteAgentFromResidentTool(project, Agent{ID: "karoz"}, map[string]any{"agent_id": "frontend"})
-	if !strings.Contains(result, `"deleted":true`) || len(a.agents["p1"]) != 1 {
-		t.Fatalf("karoz delete result = %s agents=%+v", result, a.agents["p1"])
+	if !strings.Contains(result, `"deleted":true`) || len(a.agentDirectoryLocked().agents["p1"]) != 1 {
+		t.Fatalf("karoz delete result = %s agents=%+v", result, a.agentDirectoryLocked().agents["p1"])
 	}
 	result = a.createAgentTeamFromResidentTool(project, Agent{ID: "karoz"}, map[string]any{"template_id": "product-discovery", "instance": "discovery"})
-	if !strings.Contains(result, `"created":3`) || len(a.agents["p1"]) != 4 {
-		t.Fatalf("karoz create team result = %s agents=%+v", result, a.agents["p1"])
+	if !strings.Contains(result, `"created":3`) || len(a.agentDirectoryLocked().agents["p1"]) != 4 {
+		t.Fatalf("karoz create team result = %s agents=%+v", result, a.agentDirectoryLocked().agents["p1"])
 	}
 	routes := a.routesForProject("p1")
 	foundKarozRoute := false
@@ -1315,7 +1272,7 @@ func toolSpecNames(specs []map[string]any) map[string]bool {
 }
 
 func TestResidentToolRegistryCoversStaticDefinitions(t *testing.T) {
-	a := &app{}
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	expectedSpecs := append(residentToolSpecs(), residentPlanToolSpecs()...)
 	expected := toolSpecNames(append(expectedSpecs, residentAgentManagementToolSpecs()...))
 	definitions := a.residentToolRegistry().Definitions()

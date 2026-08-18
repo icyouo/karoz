@@ -19,7 +19,7 @@ func TestRuntimeMonitorFreezesAndDeliversBlackboardAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := Project{ID: projectID(path), Name: "p1", Path: path}
-	a.agents[project.ID] = []Agent{{ID: "owner", ProjectID: project.ID, Nickname: "Owner"}}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{ID: "owner", ProjectID: project.ID, Nickname: "Owner"}}
 	item, err := a.createMonitor(project, Monitor{ID: "m1", AgentID: "owner", Name: "task updates", Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerRuntimeEvent, EventKinds: []string{"task_changed"}}, Action: monitordomain.Action{Kind: monitordomain.ActionBlackboard, Topic: "task update", Template: "task changed"}})
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestProcessExitMonitorMatchesOnlyTerminalProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := Project{ID: projectID(path), Name: "p1", Path: path}
-	a.agents[project.ID] = []Agent{{ID: "owner", ProjectID: project.ID, Nickname: "Owner"}}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{ID: "owner", ProjectID: project.ID, Nickname: "Owner"}}
 	_, err := a.createMonitor(project, Monitor{ID: "m-exit", AgentID: "owner", Name: "exit", Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerProcessExit, ProcessID: "proc-1", FailureOnly: true}, Action: monitordomain.Action{Kind: monitordomain.ActionBlackboard, Topic: "process failed"}})
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestDeletingOwnerDisablesAndClearsMonitorWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := Project{ID: projectID(path), Name: "p1", Path: path}
-	a.agents[project.ID] = []Agent{{ID: "karoz", ProjectID: project.ID}, {ID: "owner", ProjectID: project.ID}}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{ID: "karoz", ProjectID: project.ID}, {ID: "owner", ProjectID: project.ID}}
 	if _, err := a.createMonitor(project, Monitor{ID: "m-delete", AgentID: "owner", Name: "owner", Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerRuntimeEvent, EventKinds: []string{"task_changed"}}, Action: monitordomain.Action{Kind: monitordomain.ActionBlackboard, Topic: "task"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestDeletingOwnerDisablesAndClearsMonitorWork(t *testing.T) {
 	}
 	// Recreating the ID must not reactivate a monitor created by the deleted
 	// owner identity.
-	a.agents[project.ID] = append(a.agents[project.ID], Agent{ID: "owner", ProjectID: project.ID})
+	a.agentDirectoryLocked().agents[project.ID] = append(a.agentDirectoryLocked().agents[project.ID], Agent{ID: "owner", ProjectID: project.ID})
 	if _, err := a.setMonitorState(project, "m-delete", monitordomain.StateActive); err == nil {
 		t.Fatal("recreated owner resumed owner-deleted monitor")
 	}
@@ -118,7 +118,7 @@ func TestDeletingOwnerDisablesAndClearsMonitorWork(t *testing.T) {
 func TestGate3CreateMonitorRejectsUnavailableTriggerAndMissingTarget(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	project := Project{ID: "p1", Name: "p1", Path: t.TempDir()}
-	a.agents[project.ID] = []Agent{{ID: "owner", ProjectID: project.ID}}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{ID: "owner", ProjectID: project.ID}}
 	if _, err := a.createMonitor(project, Monitor{AgentID: "owner", Name: "output", Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerProcessOutput, ProcessID: "p", Pattern: "x"}, Action: monitordomain.Action{Kind: monitordomain.ActionBlackboard, Topic: "x"}}); err == nil {
 		t.Fatal("process_output was accepted in Gate3")
 	}
@@ -135,7 +135,7 @@ func TestProcessOutputMonitorUsesRedactedCompleteSequence(t *testing.T) {
 	}
 	projectID := projectID(path)
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
-	a.agents[projectID] = []Agent{{ID: "owner", ProjectID: projectID}}
+	a.agentDirectoryLocked().agents[projectID] = []Agent{{ID: "owner", ProjectID: projectID}}
 	now := time.Now().UTC()
 	a.monitors[projectID] = []Monitor{{ID: "output", ProjectID: projectID, AgentID: "owner", Name: "output", Revision: 1, State: monitordomain.StateActive, Trigger: monitordomain.Trigger{Kind: monitordomain.TriggerProcessOutput, Revision: 1, ProcessID: "proc", Pattern: "Authorization"}, Action: monitordomain.Action{Revision: 1, Kind: monitordomain.ActionBlackboard, Topic: "output", Template: "matched output"}, CreatedAt: now, UpdatedAt: now}}
 	a.evaluateProcessOutput(processOutputObservation{ProjectID: projectID, ProcessID: "proc", Line: processdomain.OutputLine{Sequence: 1, Stream: "stderr", Text: "Authorization: Bearer secret-token"}})
@@ -208,8 +208,8 @@ func TestProcessOutputGapDiagnosticRespectsIndependentBaseline(t *testing.T) {
 			CreatedAt: now, UpdatedAt: now,
 		},
 	}
-	a.processOutputBaselines[projectAgentKey("project", "old")] = 5
-	a.processOutputBaselines[projectAgentKey("project", "new")] = 20
+	a.processOutputRuntime.baselines[projectAgentKey("project", "old")] = 5
+	a.processOutputRuntime.baselines[projectAgentKey("project", "new")] = 20
 	delta := processOutputGapDelta{
 		ProjectID: "project", ProcessID: "process",
 		Recent:    []processdomain.SeqRange{{Start: 8, End: 10}},
@@ -261,7 +261,7 @@ func TestProcessOutputGapSaveFailureReturnsDeltaForRetry(t *testing.T) {
 
 func TestProcessOutputCursorIsIsolatedByProcess(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
-	a.agents["project"] = []Agent{{ID: "owner", ProjectID: "project"}}
+	a.agentDirectoryLocked().agents["project"] = []Agent{{ID: "owner", ProjectID: "project"}}
 	now := time.Now().UTC()
 	for _, target := range []string{"process-a", "process-b"} {
 		a.monitors["project"] = append(a.monitors["project"], Monitor{
@@ -292,9 +292,9 @@ func TestProcessOutputCursorIsIsolatedByProcess(t *testing.T) {
 	}
 	keyA := projectAgentKey("project", "process-a")
 	keyB := projectAgentKey("project", "process-b")
-	if a.processOutputCursors[keyA] != 100 ||
-		a.processOutputCursors[keyB] != 1 {
-		t.Fatalf("isolated cursors = %v", a.processOutputCursors)
+	if a.processOutputRuntime.cursors[keyA] != 100 ||
+		a.processOutputRuntime.cursors[keyB] != 1 {
+		t.Fatalf("isolated cursors = %v", a.processOutputRuntime.cursors)
 	}
 }
 
@@ -315,18 +315,18 @@ func TestProcessOutputLaterSuccessDoesNotHideEarlierGap(t *testing.T) {
 		CreatedAt: now, UpdatedAt: now,
 	}}
 	key := projectAgentKey("project", "monitor")
-	a.processOutputBaselines[key] = 0
-	a.processOutputCursors[key] = 0
+	a.processOutputRuntime.baselines[key] = 0
+	a.processOutputRuntime.cursors[key] = 0
 	a.evaluateProcessOutput(processOutputObservation{
 		ProjectID: "project", ProcessID: "process",
 		Line: processdomain.OutputLine{Sequence: 2, Text: "success"},
 	})
-	if a.processOutputCursors[key] != 2 ||
-		a.processOutputBaselines[key] != 0 {
+	if a.processOutputRuntime.cursors[key] != 2 ||
+		a.processOutputRuntime.baselines[key] != 0 {
 		t.Fatalf(
 			"cursor/baseline = %d/%d",
-			a.processOutputCursors[key],
-			a.processOutputBaselines[key],
+			a.processOutputRuntime.cursors[key],
+			a.processOutputRuntime.baselines[key],
 		)
 	}
 	if err := a.saveProcessOutputGapDiagnostics(processOutputGapDelta{
@@ -363,8 +363,8 @@ func TestProcessOutputUnmatchedLineDoesNotSaveMonitorRegistry(t *testing.T) {
 		Line: processdomain.OutputLine{Sequence: 1, Text: "unmatched"},
 	})
 	key := projectAgentKey("project", "monitor")
-	if a.processOutputCursors[key] != 1 {
-		t.Fatalf("unmatched cursor = %d", a.processOutputCursors[key])
+	if a.processOutputRuntime.cursors[key] != 1 {
+		t.Fatalf("unmatched cursor = %d", a.processOutputRuntime.cursors[key])
 	}
 	if pending := a.takeProcessOutputGapDeltas(); len(pending) != 0 {
 		t.Fatalf("unmatched line attempted a monitor save: %+v", pending)

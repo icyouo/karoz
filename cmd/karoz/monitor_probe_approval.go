@@ -139,8 +139,8 @@ func (a *app) prepareMonitorProbeApproval(
 	if err != nil {
 		return nil, "", err
 	}
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	owner, ok := a.projectAgent(project, request.AgentID)
 	if !ok {
 		return nil, "", errors.New("probe owner agent not found")
@@ -240,8 +240,8 @@ func (a *app) confirmMonitorProbeApproval(
 	if !scriptProbeSupported {
 		return nil, errScriptProbeUnsupported
 	}
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	now := time.Now().UTC()
 	sessionID := monitorProbeSessionID(sessionToken)
 	a.mu.Lock()
@@ -273,7 +273,7 @@ func (a *app) confirmMonitorProbeApproval(
 	}
 	reservation, reservationOK := a.monitorProbeReservations[challenge.ReservationID]
 	ownerCurrent := false
-	for _, owner := range a.agents[project.ID] {
+	for _, owner := range a.agentDirectoryLocked().agents[project.ID] {
 		if owner.ID == challenge.AgentID &&
 			owner.CreatedAt.Equal(reservation.OwnerCreatedAt) {
 			ownerCurrent = true
@@ -438,7 +438,7 @@ func (a *app) pruneMonitorProbeApprovalsLocked(now time.Time) {
 	}
 	for id, reservation := range a.monitorProbeReservations {
 		ownerCurrent := false
-		for _, owner := range a.agents[reservation.ProjectID] {
+		for _, owner := range a.agentDirectoryLocked().agents[reservation.ProjectID] {
 			if owner.ID == reservation.AgentID &&
 				owner.CreatedAt.Equal(reservation.OwnerCreatedAt) {
 				ownerCurrent = true

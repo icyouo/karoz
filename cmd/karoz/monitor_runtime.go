@@ -201,8 +201,8 @@ func cloneMonitorList(items []Monitor) []Monitor {
 }
 
 func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	if item.Trigger.Kind == monitordomain.TriggerScriptProbe {
 		if !scriptProbeSupported {
 			return Monitor{}, errScriptProbeUnsupported
@@ -267,15 +267,16 @@ func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
 		return Monitor{}, err
 	}
 	if item.Trigger.Kind == monitordomain.TriggerProcessOutput {
-		if a.processOutputBaselines == nil {
-			a.processOutputBaselines = map[string]uint64{}
+		output := a.processOutputRuntime
+		if output.baselines == nil {
+			output.baselines = map[string]uint64{}
 		}
-		if a.processOutputCursors == nil {
-			a.processOutputCursors = map[string]uint64{}
+		if output.cursors == nil {
+			output.cursors = map[string]uint64{}
 		}
 		key := projectAgentKey(project.ID, item.ID)
-		a.processOutputBaselines[key] = outputBaseline
-		a.processOutputCursors[key] = outputBaseline
+		output.baselines[key] = outputBaseline
+		output.cursors[key] = outputBaseline
 	}
 	return item, nil
 }
@@ -288,7 +289,8 @@ type processOutputObservation struct {
 }
 
 func (a *app) armProcessOutputMonitor() {
-	a.processOutputMonitorOnce.Do(func() {
+	output := a.processOutputRuntime
+	output.monitorOnce.Do(func() {
 		// A new server deliberately begins at the current tail sequence:
 		// output before this process lifetime is coverage, not an event replay
 		// source. The arm baseline is immutable; live consumption advances a
@@ -309,7 +311,7 @@ func (a *app) armProcessOutputMonitor() {
 				select {
 				case <-a.supervisorCtx.Done():
 					return
-				case observation := <-a.processOutputMonitorCh:
+				case observation := <-output.monitorCh:
 					if observation.Drained != nil {
 						close(observation.Drained)
 						continue
@@ -323,11 +325,12 @@ func (a *app) armProcessOutputMonitor() {
 }
 
 func (a *app) waitForProcessOutputHandoff() error {
+	output := a.processOutputRuntime
 	drained := make(chan struct{})
 	select {
 	case <-a.supervisorCtx.Done():
 		return a.supervisorCtx.Err()
-	case a.processOutputMonitorCh <- processOutputObservation{Drained: drained}:
+	case output.monitorCh <- processOutputObservation{Drained: drained}:
 	}
 	select {
 	case <-a.supervisorCtx.Done():
@@ -348,12 +351,13 @@ func (a *app) monitorsForAllProjects() []Monitor {
 }
 
 func (a *app) enqueueProcessOutputObservation(record processdomain.Process, line processdomain.OutputLine) {
-	if line.Sequence == 0 || a.processOutputMonitorCh == nil {
+	output := a.processOutputRuntime
+	if line.Sequence == 0 || output.monitorCh == nil {
 		return
 	}
 	item := processOutputObservation{ProjectID: record.ProjectID, ProcessID: record.ID, Line: line}
 	select {
-	case a.processOutputMonitorCh <- item:
+	case output.monitorCh <- item:
 	default:
 		a.recordProcessOutputGap(record.ProjectID, record.ID, line.Sequence)
 	}
@@ -364,8 +368,9 @@ func (a *app) recordProcessOutputGap(projectID, processID string, sequence uint6
 		return
 	}
 	key := projectAgentKey(projectID, processID)
-	a.processOutputGapMu.Lock()
-	delta := a.processOutputPendingGaps[key]
+	output := a.processOutputRuntime
+	output.gapMu.Lock()
+	delta := output.pendingGaps[key]
 	delta.ProjectID = projectID
 	delta.ProcessID = processID
 	delta.LostLines++
@@ -384,10 +389,10 @@ func (a *app) recordProcessOutputGap(projectID, processID string, sequence uint6
 		}
 		delta.Recent = append(delta.Recent, processdomain.SeqRange{Start: sequence, End: sequence})
 	}
-	a.processOutputPendingGaps[key] = delta
-	a.processOutputGapMu.Unlock()
+	output.pendingGaps[key] = delta
+	output.gapMu.Unlock()
 	select {
-	case a.processOutputGapWake <- struct{}{}:
+	case output.gapWake <- struct{}{}:
 	default:
 	}
 }
@@ -395,19 +400,21 @@ func (a *app) recordProcessOutputGap(projectID, processID string, sequence uint6
 func (a *app) setOutputBaseline(projectID, monitorID string, sequence uint64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.processOutputBaselines == nil {
-		a.processOutputBaselines = map[string]uint64{}
+	output := a.processOutputRuntime
+	if output.baselines == nil {
+		output.baselines = map[string]uint64{}
 	}
-	if a.processOutputCursors == nil {
-		a.processOutputCursors = map[string]uint64{}
+	if output.cursors == nil {
+		output.cursors = map[string]uint64{}
 	}
 	key := projectAgentKey(projectID, monitorID)
-	a.processOutputBaselines[key] = sequence
-	a.processOutputCursors[key] = sequence
+	output.baselines[key] = sequence
+	output.cursors[key] = sequence
 }
 
 func (a *app) evaluateProcessOutput(observation processOutputObservation) {
 	a.mu.Lock()
+	output := a.processOutputRuntime
 	items := a.monitors[observation.ProjectID]
 	before := cloneMonitorList(items)
 	var fires []monitorFireRef
@@ -423,10 +430,10 @@ func (a *app) evaluateProcessOutput(observation processOutputObservation) {
 			continue
 		}
 		key := projectAgentKey(observation.ProjectID, item.ID)
-		if observation.Line.Sequence <= a.processOutputCursors[key] {
+		if observation.Line.Sequence <= output.cursors[key] {
 			continue
 		}
-		a.processOutputCursors[key] = observation.Line.Sequence
+		output.cursors[key] = observation.Line.Sequence
 		matched, detail := monitordomain.MatchProcessOutput(item, monitordomain.ProcessOutput{ProcessID: observation.ProcessID, Sequence: observation.Line.Sequence, Line: text, Origin: monitordomain.Origin{Kind: "runtime"}})
 		if !matched {
 			continue
@@ -488,8 +495,8 @@ func (a *app) setMonitorState(project Project, id string, state monitordomain.St
 	if state != monitordomain.StateActive && state != monitordomain.StateDisabled {
 		return Monitor{}, errors.New("invalid monitor state")
 	}
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	a.mu.Lock()
 	items := a.monitors[project.ID]
 	for i := range items {
@@ -578,8 +585,8 @@ func (a *app) setMonitorState(project Project, id string, state monitordomain.St
 }
 
 func (a *app) deleteMonitor(project Project, id string) error {
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	a.mu.Lock()
 	items := a.monitors[project.ID]
 	for i := range items {
@@ -796,8 +803,8 @@ func (a *app) admitMonitorPending(projectID, monitorID string, pending monitordo
 	// Agent deletion shares this short fence with terminal delivery. It prevents
 	// a frozen notification from being admitted after its owner/target has been
 	// removed and before deletion disables the monitor.
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	if !a.monitorAdmissionAvailable(projectID, monitorID, pending.Action.AgentID) {
 		return monitordomain.AdmissionFailed
 	}
@@ -838,10 +845,10 @@ func (a *app) monitorAdmissionAvailable(projectID, monitorID, targetID string) b
 		if item.ID != monitorID {
 			continue
 		}
-		if item.State != monitordomain.StateActive || a.backgroundOwnerDeleting[projectAgentKey(projectID, item.AgentID)] {
+		if item.State != monitordomain.StateActive || a.agentRuntimeLocked().backgroundOwnerDeleting[projectAgentKey(projectID, item.AgentID)] {
 			return false
 		}
-		return targetID == "" || !a.backgroundOwnerDeleting[projectAgentKey(projectID, targetID)]
+		return targetID == "" || !a.agentRuntimeLocked().backgroundOwnerDeleting[projectAgentKey(projectID, targetID)]
 	}
 	return false
 }
@@ -849,16 +856,17 @@ func (a *app) monitorAdmissionAvailable(projectID, monitorID, targetID string) b
 func (a *app) admitMonitorBlackboard(project Project, monitorID string, pending monitordomain.PendingFire) monitordomain.Admission {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, entry := range a.blackboard[project.ID] {
+	for _, entry := range a.collaborationServiceLocked().BlackboardFor(project.ID) {
 		if entry.SourceType == "monitor" && entry.SourceID == pending.ID {
 			return monitordomain.AdmissionAlreadyPresent
 		}
 	}
 	now := time.Now().UTC()
 	entry := AgentBlackboardEntry{ID: randomID(), ProjectID: project.ID, AgentName: "Monitor", ActivityKind: "monitor", Summary: pending.Action.Topic, Detail: pending.Action.RenderedBriefing, SourceType: "monitor", SourceID: pending.ID, CreatedAt: now, UpdatedAt: now, Status: "active", RequiresAction: false}
-	a.blackboard[project.ID] = append(a.blackboard[project.ID], entry)
-	if err := a.saveJSON("agent-blackboard.json", a.blackboard, 0644); err != nil {
-		a.blackboard[project.ID] = a.blackboard[project.ID][:len(a.blackboard[project.ID])-1]
+	previous := a.collaborationServiceLocked().BlackboardFor(project.ID)
+	a.collaborationServiceLocked().AppendBlackboard(project.ID, entry)
+	if err := a.saveJSON("agent-blackboard.json", a.collaborationServiceLocked().BlackboardSnapshot(), 0644); err != nil {
+		a.collaborationServiceLocked().ReplaceProjectBlackboard(project.ID, previous)
 		return monitordomain.AdmissionFailed
 	}
 	return monitordomain.AdmissionAdmitted

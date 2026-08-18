@@ -184,6 +184,10 @@ func (a *app) buildResidentAgentPromptWithMemoryQuery(project Project, agent Age
 			b.WriteString(entry.Layer)
 			b.WriteString("; id: ")
 			b.WriteString(entry.ID)
+			if memoryEntryScope(entry) == "project" {
+				b.WriteString("; scope: project; author_agent_id: ")
+				b.WriteString(entry.AgentID)
+			}
 			b.WriteString("] ")
 			b.WriteString(limitString(entry.Summary, 600))
 			b.WriteString(" — ")
@@ -485,7 +489,7 @@ func (a *app) renderRecentTeamActivity(b *strings.Builder, project Project, agen
 	// Inbox storage is keyed by target project/agent. Read only the current
 	// group's keys instead of scanning every project and every resident inbox.
 	for _, recipientID := range groupAgentIDs {
-		items := a.inbox[projectAgentKey(project.ID, recipientID)]
+		items := a.collaborationServiceLocked().InboxFor(projectAgentKey(project.ID, recipientID))
 		start := len(items) - perRecipient
 		if start < 0 {
 			start = 0

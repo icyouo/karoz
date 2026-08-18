@@ -36,7 +36,7 @@ func TestMonitorProbeApprovalClaimDryRunFireAndTamper(t *testing.T) {
 		ID: "owner", ProjectID: project.ID, Name: "Owner",
 		CreatedAt: time.Now().UTC(),
 	}
-	a.agents[project.ID] = []Agent{owner}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{owner}
 
 	challenge, session, err := a.prepareMonitorProbeApproval(
 		project,
@@ -171,7 +171,7 @@ func TestMonitorProbeReceiptCannotCrossMonitorRevisionOrMutation(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
 	t.Cleanup(a.shutdownMonitorProbes)
 	owner := Agent{ID: "owner", ProjectID: project.ID, CreatedAt: time.Now().UTC()}
-	a.agents[project.ID] = []Agent{owner}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{owner}
 	challenge, session, err := a.prepareMonitorProbeApproval(
 		project,
 		monitorProbeApprovalRequest{
@@ -569,7 +569,7 @@ func TestMonitorProbeRestartPreservesReceiptWithoutCatchup(t *testing.T) {
 		ID: "owner", ProjectID: project.ID,
 		CreatedAt: time.Now().UTC(),
 	}
-	first.agents[project.ID] = []Agent{owner}
+	first.agentDirectoryLocked().agents[project.ID] = []Agent{owner}
 	item := claimMonitorProbeForTest(
 		t,
 		first,
@@ -776,7 +776,7 @@ func TestMonitorProbeOwnerIdentityAndRegistryCorruptionFailClosed(t *testing.T) 
 	recreated := owner
 	recreated.CreatedAt = owner.CreatedAt.Add(time.Second)
 	a.mu.Lock()
-	a.agents[project.ID] = []Agent{recreated}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{recreated}
 	a.mu.Unlock()
 	if _, err := a.confirmMonitorProbeApproval(
 		project,
@@ -1006,7 +1006,7 @@ func newMonitorProbeTestApp(t *testing.T) (*app, Project, Agent) {
 		ID: "owner", ProjectID: project.ID,
 		CreatedAt: time.Now().UTC(),
 	}
-	a.agents[project.ID] = []Agent{owner}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{owner}
 	return a, project, owner
 }
 

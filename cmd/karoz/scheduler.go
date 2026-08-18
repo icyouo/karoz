@@ -169,7 +169,7 @@ func (a *app) newSchedulerWorker() *runtimedomain.SchedulerWorker {
 			return a.waitForAgentRunFinished(ctx, job.ProjectID, job.AgentID)
 		},
 		Bind: func(ctx context.Context, job ScheduledRun) (context.Context, bool) {
-			if hook := a.scheduledRunBeforeBindHook; hook != nil {
+			if hook := a.agentRuntimeLocked().scheduledRunBeforeBindHook; hook != nil {
 				hook()
 			}
 			return a.bindAgentRunContext(ctx, job.ProjectID, job.AgentID, job.ID)
@@ -226,7 +226,7 @@ func handoffMessageID(job ScheduledRun) string {
 
 func (a *app) executeScheduledRun(ctx context.Context, job ScheduledRun) error {
 	a.mu.Lock()
-	override := a.schedulerExecutors[job.Kind]
+	override := a.agentRuntimeLocked().schedulerExecutors[job.Kind]
 	a.mu.Unlock()
 	if override != nil {
 		return override(ctx, job)
@@ -252,7 +252,7 @@ func (a *app) executeScheduledRun(ctx context.Context, job ScheduledRun) error {
 // deadline child after Execute returns. This keeps a late explicit cancel from
 // persisting an assistant success and then reporting a cancelled Run.
 func (a *app) commitScheduledRunResult(project Project, agent Agent, runID, intent, body string) error {
-	if hook := a.scheduledRunBeforeResultCommitHook; hook != nil {
+	if hook := a.agentRuntimeLocked().scheduledRunBeforeResultCommitHook; hook != nil {
 		hook()
 	}
 	if !a.commitAgentRunResultWithLedger(project, agent, runID, intent, body, false) {
@@ -280,15 +280,16 @@ func (a *app) emitScheduledRunQueued(job ScheduledRun) {
 func (a *app) ensureSchedulerQueue() *runtimedomain.SchedulerQueue {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.schedulerQueue == nil {
-		a.schedulerQueue = runtimedomain.NewSchedulerQueue()
+	runtime := a.agentRuntimeLocked()
+	if runtime.schedulerQueue == nil {
+		runtime.schedulerQueue = runtimedomain.NewSchedulerQueue()
 	}
-	return a.schedulerQueue
+	return runtime.schedulerQueue
 }
 
 func (a *app) ensureSchedulerExecutorsLocked() {
-	if a.schedulerExecutors == nil {
-		a.schedulerExecutors = map[ScheduledRunKind]ScheduledRunExecutor{}
+	if a.agentRuntimeLocked().schedulerExecutors == nil {
+		a.agentRuntimeLocked().schedulerExecutors = map[ScheduledRunKind]ScheduledRunExecutor{}
 	}
 }
 
@@ -303,12 +304,13 @@ func (a *app) scheduledAgentWorkerActive(projectID, agentID string) bool {
 }
 
 func (a *app) saveScheduledRuns() error {
-	a.schedulerPersistMu.Lock()
-	defer a.schedulerPersistMu.Unlock()
+	runtime := a.agentRuntimeLocked()
+	runtime.schedulerPersistMu.Lock()
+	defer runtime.schedulerPersistMu.Unlock()
 	queue := a.ensureSchedulerQueue()
 	snapshot := scheduledRunSnapshot{Jobs: queue.Jobs(), CompletedMonitorFires: queue.CompletedMonitorFires(), MonitorFirePendingRemoved: queue.PendingRemovalProofs()}
-	if a.scheduledRunsSaveOverride != nil {
-		return a.scheduledRunsSaveOverride(snapshot)
+	if runtime.scheduledRunsSaveOverride != nil {
+		return runtime.scheduledRunsSaveOverride(snapshot)
 	}
 	return persistenceadapter.NewJSONStore(a.settings.DataDir).Save("agent-run-queue.json", snapshot, 0644)
 }

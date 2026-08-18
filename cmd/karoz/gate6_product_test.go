@@ -35,7 +35,7 @@ func gate6Project(t *testing.T) (*app, Project, Agent) {
 		DataDir:      t.TempDir(),
 		ProjectsRoot: root,
 	})
-	a.agents[project.ID] = []Agent{owner}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{owner}
 	return a, project, owner
 }
 
@@ -364,7 +364,7 @@ func TestGate6BrowserFixture(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	}
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
-	a.agents[project.ID] = []Agent{owner}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{owner}
 	if err := a.bootstrapProcessRuntime(); err != nil {
 		t.Fatal(err)
 	}

@@ -14,7 +14,7 @@ import (
 func (a *app) plansForProject(projectID string) []WorkPlan {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	items := append([]WorkPlan{}, a.plans[projectID]...)
+	items := a.collaborationServiceLocked().PlansFor(projectID)
 	sort.SliceStable(items, func(i, j int) bool { return items[i].UpdatedAt.After(items[j].UpdatedAt) })
 	return items
 }
@@ -106,10 +106,7 @@ func (a *app) createPlanDraft(project Project, author Agent, requestedVia string
 		MaxConcurrency: maxConcurrency, Version: 1, Steps: req.Steps, CreatedAt: now, UpdatedAt: now,
 	}
 	a.mu.Lock()
-	if a.plans == nil {
-		a.plans = map[string][]WorkPlan{}
-	}
-	a.plans[project.ID] = append([]WorkPlan{plan}, a.plans[project.ID]...)
+	a.collaborationServiceLocked().UpdatePlans(project.ID, func(items []WorkPlan) []WorkPlan { return append([]WorkPlan{plan}, items...) })
 	a.mu.Unlock()
 	if err := a.savePlansForProject(project.ID); err != nil {
 		return WorkPlan{}, err
@@ -121,7 +118,7 @@ func (a *app) createPlanDraft(project Project, author Agent, requestedVia string
 func (a *app) replacePlan(plan WorkPlan, expectedVersion int64) (WorkPlan, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	items := a.plans[plan.ProjectID]
+	items := a.collaborationServiceLocked().PlansFor(plan.ProjectID)
 	for i := range items {
 		if items[i].ID != plan.ID {
 			continue
@@ -132,7 +129,7 @@ func (a *app) replacePlan(plan WorkPlan, expectedVersion int64) (WorkPlan, error
 		plan.Version = items[i].Version + 1
 		plan.UpdatedAt = time.Now().UTC()
 		items[i] = plan
-		a.plans[plan.ProjectID] = items
+		a.collaborationServiceLocked().ReplacePlans(plan.ProjectID, items)
 		return plan, nil
 	}
 	return WorkPlan{}, errors.New("plan not found")
@@ -266,7 +263,7 @@ func (a *app) reconcilePlanHistory(project Project, actor Agent, req PlanHistory
 func (a *app) activatePlan(project Project, planID, approvedBy string, expectedVersion int64) (WorkPlan, error) {
 	now := time.Now().UTC()
 	a.mu.Lock()
-	items := a.plans[project.ID]
+	items := a.collaborationServiceLocked().PlansFor(project.ID)
 	planIndex := -1
 	for i := range items {
 		if items[i].ID == planID {
@@ -304,7 +301,7 @@ func (a *app) activatePlan(project Project, planID, approvedBy string, expectedV
 	plan.Version++
 	plan.UpdatedAt = now
 	items[planIndex] = plan
-	a.plans[project.ID] = items
+	a.collaborationServiceLocked().ReplacePlans(project.ID, items)
 	a.mu.Unlock()
 	if err := a.savePlansForProject(project.ID); err != nil {
 		return WorkPlan{}, err
@@ -399,11 +396,14 @@ func (a *app) advancePlan(project Project, actor Agent, planID string, req PlanA
 			return WorkPlan{}, errors.New("plan concurrency limit reached")
 		}
 		attempt := len(step.TaskAttempts) + 1
-		task := a.createTask(project, TaskCreateRequest{
+		task, err := a.createTask(project, TaskCreateRequest{
 			Type: firstNonEmpty(req.TaskType, "feature"), Title: firstNonEmpty(req.Title, step.Title),
 			Description: firstNonEmpty(req.Description, step.Description), Goal: firstNonEmpty(req.Goal, step.Description, plan.Goal),
 			OwnerAgentID: actor.ID, PlanID: plan.ID, PlanStepID: step.ID, Attempt: attempt,
 		})
+		if err != nil {
+			return WorkPlan{}, err
+		}
 		a.registerTaskRuntimeHook(project.ID, actor.ID, task.ID, map[string]any{"plan_id": plan.ID, "step_id": step.ID, "attempt": attempt})
 		step.AssignedAgentID = firstNonEmpty(req.AgentID, actor.ID)
 		step.Status = PlanStepRunning
@@ -550,7 +550,7 @@ func (a *app) resumeActionablePlans() {
 	}
 	a.mu.Lock()
 	var plans []WorkPlan
-	for _, projectPlans := range a.plans {
+	for _, projectPlans := range a.collaborationServiceLocked().PlanSnapshot() {
 		plans = append(plans, projectPlans...)
 	}
 	a.mu.Unlock()
@@ -640,21 +640,16 @@ func (a *app) recordPlanReviewDelivery(projectID, handoffID, reviewerAgentID, fi
 }
 
 func (a *app) recordPlanGroupDelivery(projectID, handoffID, body string) {
-	a.mu.Lock()
 	var linked GroupInboxMessage
-	found := false
-	for i := range a.groupInbox[projectID] {
-		item := &a.groupInbox[projectID][i]
+	found := a.collaborationServiceLocked().UpdateGroupInbox(projectID, func(item *GroupInboxMessage) bool {
 		if item.AgentInboxMessageID != handoffID || item.ParentPlanID == "" || item.ParentStepID == "" {
-			continue
+			return false
 		}
 		item.Status = "completed"
 		item.UpdatedAt = time.Now().UTC()
 		linked = *item
-		found = true
-		break
-	}
-	a.mu.Unlock()
+		return true
+	})
 	if !found {
 		return
 	}

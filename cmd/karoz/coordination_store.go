@@ -10,28 +10,28 @@ func (a *app) loadProjectCoordinationState() error {
 	if err != nil {
 		return err
 	}
-	a.groups = map[string][]AgentGroup{}
-	a.groupInbox = map[string][]GroupInboxMessage{}
-	a.plans = map[string][]WorkPlan{}
+	a.collaborationServiceLocked().ResetGroups()
+	a.collaborationServiceLocked().ResetGroupInbox()
+	a.collaborationServiceLocked().ResetPlans()
 	for _, project := range projects {
 		store := persistenceadapter.NewJSONStore(filepath.Join(project.Path, ".karoz"))
 		var groups []AgentGroup
 		if found, err := store.Load("groups.json", &groups); err != nil {
 			return err
 		} else if found {
-			a.groups[project.ID] = groups
+			a.collaborationServiceLocked().ReplaceGroups(project.ID, groups)
 		}
 		var inbox []GroupInboxMessage
 		if found, err := store.Load("group-inbox.json", &inbox); err != nil {
 			return err
 		} else if found {
-			a.groupInbox[project.ID] = inbox
+			a.collaborationServiceLocked().ReplaceGroupInbox(project.ID, inbox)
 		}
 		var plans []WorkPlan
 		if found, err := store.Load("plans.json", &plans); err != nil {
 			return err
 		} else if found {
-			a.plans[project.ID] = plans
+			a.collaborationServiceLocked().ReplacePlans(project.ID, plans)
 		}
 	}
 	return nil
@@ -42,9 +42,7 @@ func (a *app) saveGroupsForProject(projectID string) error {
 	if err != nil {
 		return err
 	}
-	a.mu.Lock()
-	items := append([]AgentGroup{}, a.groups[projectID]...)
-	a.mu.Unlock()
+	items := a.collaborationServiceLocked().GroupsFor(projectID)
 	return persistenceadapter.NewJSONStore(filepath.Join(project.Path, ".karoz")).Save("groups.json", items, 0644)
 }
 
@@ -53,9 +51,7 @@ func (a *app) saveGroupInboxForProject(projectID string) error {
 	if err != nil {
 		return err
 	}
-	a.mu.Lock()
-	items := append([]GroupInboxMessage{}, a.groupInbox[projectID]...)
-	a.mu.Unlock()
+	items := a.collaborationServiceLocked().GroupInboxFor(projectID)
 	return persistenceadapter.NewJSONStore(filepath.Join(project.Path, ".karoz")).Save("group-inbox.json", items, 0644)
 }
 
@@ -64,8 +60,6 @@ func (a *app) savePlansForProject(projectID string) error {
 	if err != nil {
 		return err
 	}
-	a.mu.Lock()
-	items := append([]WorkPlan{}, a.plans[projectID]...)
-	a.mu.Unlock()
+	items := a.collaborationServiceLocked().PlansFor(projectID)
 	return persistenceadapter.NewJSONStore(filepath.Join(project.Path, ".karoz")).Save("plans.json", items, 0644)
 }

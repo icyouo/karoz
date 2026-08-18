@@ -37,6 +37,25 @@ type residentStreamWire interface {
 
 type residentToolExecutor func(context.Context, codexToolCall) (string, error)
 
+// invokeResidentNoToolsOnce is the checkpoint path: one provider round, no
+// resident tool surface, no interrupt restart, and no tool execution loop.
+func invokeResidentNoToolsOnce(ctx context.Context, wire residentStreamWire, callbacks AgentStreamCallbacks) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	streamed, interrupts, err := wire.step(ctx, nil, callbacks)
+	if err != nil {
+		return err
+	}
+	if len(interrupts) > 0 {
+		return errors.New("interrupts are disabled for no-tools model requests")
+	}
+	if len(streamed.ToolCalls) > 0 {
+		return errors.New("provider returned a tool call for a no-tools model request")
+	}
+	return nil
+}
+
 // invokeResidentToolLoop runs the shared resident-agent tool loop: stream a
 // model round, dispatch tool calls, fold interrupts into the conversation,
 // and stop with a budgeted final answer when the tool phase is exhausted.
@@ -245,12 +264,6 @@ func residentBudgetLimitMessage(payload map[string]any) string {
 	}
 	phase, _ := payload["phase"].(string)
 	return "resident " + firstNonEmpty(phase, "turn") + " budget (" + toolJSON(payload) + ")"
-}
-
-// limitToolResultForModel remains a compatibility helper for direct callers
-// and tests. Production paths use the selected turn budget below.
-func limitToolResultForModel(result string) string {
-	return limitToolResultForBudget(result, residentTurnBudgetFor("ask").MaxToolOutputChars)
 }
 
 func limitToolResultForBudget(result string, maxChars int) string {

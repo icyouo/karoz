@@ -10,13 +10,10 @@ func TestBlackboardProjectsRuntimeFactsWithoutBecomingBacklog(t *testing.T) {
 	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
 	now := time.Now().UTC()
 	a := &app{
-		settings:        Settings{DataDir: t.TempDir()},
-		agents:          map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Nickname: "Karoz"}, {ID: "designer", ProjectID: "p1", Nickname: "Designer"}}},
-		tasks:           map[string][]Task{"p1": {{ID: "task-1", ProjectID: "p1", Title: "Build mockup", Status: "running", UpdatedAt: now}}},
-		inbox:           map[string][]AgentInboxMessage{},
-		blackboard:      map[string][]AgentBlackboardEntry{},
-		runtimeHooks:    map[string]bool{},
-		runtimeWatchers: map[string]map[chan RuntimeEvent]bool{},
+		settings:       Settings{DataDir: t.TempDir()},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{"p1": {{ID: "karoz", ProjectID: "p1", Nickname: "Karoz"}, {ID: "designer", ProjectID: "p1", Nickname: "Designer"}}}),
+		projectTasks:   projectTasksForTest(map[string][]Task{"p1": {{ID: "task-1", ProjectID: "p1", Title: "Build mockup", Status: "running", UpdatedAt: now}}}),
+		agentRuntime:   newAgentRuntimeCoordinator(),
 	}
 
 	a.emitRuntimeStateChanged(RuntimeEvent{ID: "e1", ProjectID: "p1", Kind: "agent_run_changed", EntityID: "designer", RunID: "run-1", Trigger: "user_direct", To: string(RunStatePreparingContext), CreatedAt: now})
@@ -55,13 +52,10 @@ func TestBlackboardHandoffProjectionUpsertsAndStartupRebuilds(t *testing.T) {
 	t.Setenv("KAROZ_AGENT_AUTO_RESPOND", "0")
 	now := time.Now().UTC()
 	a := &app{
-		settings:        Settings{DataDir: t.TempDir()},
-		agents:          map[string][]Agent{"p1": {{ID: "product", ProjectID: "p1", Nickname: "Product"}, {ID: "designer", ProjectID: "p1", Nickname: "Designer"}}},
-		tasks:           map[string][]Task{"p1": {{ID: "task-1", ProjectID: "p1", Title: "Implement design", Status: "done", Result: "complete", CreatedAt: now, UpdatedAt: now}}},
-		inbox:           map[string][]AgentInboxMessage{},
-		blackboard:      map[string][]AgentBlackboardEntry{},
-		runtimeHooks:    map[string]bool{},
-		runtimeWatchers: map[string]map[chan RuntimeEvent]bool{},
+		settings:       Settings{DataDir: t.TempDir()},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{"p1": {{ID: "product", ProjectID: "p1", Nickname: "Product"}, {ID: "designer", ProjectID: "p1", Nickname: "Designer"}}}),
+		projectTasks:   projectTasksForTest(map[string][]Task{"p1": {{ID: "task-1", ProjectID: "p1", Title: "Implement design", Status: "done", Result: "complete", CreatedAt: now, UpdatedAt: now}}}),
+		agentRuntime:   newAgentRuntimeCoordinator(),
 	}
 	msg := AgentInboxMessage{
 		ID: "handoff-1", ProjectID: "p1", SourceAgentID: "product", TargetAgentID: "designer",

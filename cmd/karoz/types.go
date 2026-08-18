@@ -6,6 +6,7 @@ import (
 	agentdomain "github.com/karoz/karoz/internal/agent"
 	artifactdomain "github.com/karoz/karoz/internal/artifact"
 	collaborationdomain "github.com/karoz/karoz/internal/collaboration"
+	executiondomain "github.com/karoz/karoz/internal/execution"
 	monitordomain "github.com/karoz/karoz/internal/monitor"
 	processdomain "github.com/karoz/karoz/internal/process"
 	projectdomain "github.com/karoz/karoz/internal/project"
@@ -18,89 +19,32 @@ import (
 )
 
 type app struct {
-	mu                                 sync.Mutex
-	supervisorCtx                      context.Context
-	supervisorCancel                   context.CancelFunc
-	processRuntime                     *processRuntimePersistence
-	processSupervisor                  *processSupervisor
-	processPersistenceFail             func(processPersistenceFailpoint) error
-	processTerminalDrainMu             sync.Mutex
-	processTerminalWake                chan struct{}
-	processTerminalWorkerOnce          sync.Once
-	processOutputMonitorOnce           sync.Once
-	processOutputMonitorCh             chan processOutputObservation
-	processOutputBaselines             map[string]uint64
-	processOutputCursors               map[string]uint64
-	processOutputGapMu                 sync.Mutex
-	processOutputGapDrainMu            sync.Mutex
-	processOutputPendingGaps           map[string]processOutputGapDelta
-	processOutputGapWake               chan struct{}
-	processOutputGapWorkerOnce         sync.Once
-	monitorCtx                         context.Context
-	monitorCancel                      context.CancelFunc
-	monitorProbeWG                     sync.WaitGroup
-	monitorProbeStopping               bool
-	monitorProbeCancels                map[string]context.CancelFunc
-	monitorProbeProjectSlots           map[string]chan struct{}
-	monitorProbeReservations           map[string]monitorProbeReservation
-	monitorProbeChallenges             map[string]monitorProbeChallenge
-	monitorProbeReceipts               map[string]monitordomain.ProbeApprovalReceipt
-	monitorProbeSessions               map[string]monitorProbeOperatorSession
-	backgroundOwnerMu                  sync.Mutex
-	backgroundOwnerDeleting            map[string]bool
-	projectRegistrationMu              sync.Mutex
-	projectCreateAfterRegistrationHook func()
-	settingsUpdateBeforeRegistryHook   func()
-	projectImportSettingsSave          func() error
-	taskRunMu                          sync.Mutex
-	taskRunCancels                     map[string]taskRun
-	taskIntegrationLocksMu             sync.Mutex
-	taskIntegrationLocks               map[string]*sync.Mutex
-	taskIntegrationPreLockHook         func()
-	artifactOpsMu                      sync.Mutex
-	handoffOpsMu                       sync.Mutex
-	handoffReplyMu                     sync.Mutex
-	schedulerPersistMu                 sync.Mutex
-	scheduledRunsSaveOverride          func(scheduledRunSnapshot) error
-	settings                           Settings
-	tasks                              map[string][]Task
-	agents                             map[string][]Agent
-	archives                           map[string][]AgentArchiveMessage
-	memories                           map[string][]AgentMemoryEntry
-	blackboard                         map[string][]AgentBlackboardEntry
-	monitors                           map[string][]Monitor
-	artifacts                          map[string][]Artifact
-	groups                             map[string][]AgentGroup
-	groupInbox                         map[string][]GroupInboxMessage
-	plans                              map[string][]WorkPlan
-	inbox                              map[string][]AgentInboxMessage
-	taskHooks                          map[string][]TaskRuntimeHook
-	agentRoutes                        map[string][]AgentRoute
-	agentMessages                      map[string][]AgentMessage
-	agentTranscripts                   map[string][]AgentTranscriptItem
-	agentSessions                      map[string]AgentSessionState
-	projectAliases                     map[string]string
-	agentRuns                          map[string]AgentRun
-	agentRunCancels                    map[string]context.CancelFunc
-	agentRunContexts                   map[string]context.Context
-	agentRunWorkers                    map[string]string
-	agentRunCancelling                 map[string]string
-	agentRunResultCommitted            map[string]string
-	agentRunLedgers                    map[string]*agentRunLedger
-	agentRunFinishedWatchers           map[string]map[chan struct{}]struct{}
-	agentRunAfterProviderHook          func()
-	agentRunAfterSuccessHook           func()
-	scheduledRunBeforeBindHook         func()
-	scheduledRunBeforeResultCommitHook func()
-	residentBashApprovals              map[string]ResidentBashApproval
-	schedulerQueue                     *runtimedomain.SchedulerQueue
-	schedulerExecutors                 map[ScheduledRunKind]ScheduledRunExecutor
-	runtimeHooks                       map[string]bool
-	runtimeWatchers                    map[string]map[chan RuntimeEvent]bool
-	residentToolsOnce                  sync.Once
-	residentTools                      *tooldomain.Registry[ResidentToolContext]
-	modelProvider                      runtimedomain.ModelProvider[CLI2APIRequest, ResidentToolContext, AgentStreamCallbacks]
-	dynamicTools                       tooldomain.DynamicProvider
+	mu               sync.Mutex
+	supervisorCtx    context.Context
+	supervisorCancel context.CancelFunc
+	processRuntimeCoordinator
+	processTerminalOutbox *processTerminalOutboxCoordinator
+	processOutputRuntime  *processOutputCoordinator
+	monitorRuntimeCoordinator
+	settings             Settings
+	projectTasks         *projectTaskCoordinator
+	agentDirectory       *agentDirectory
+	memoryStore          *memoryStore
+	artifactCatalog      *artifactCatalog
+	conversation         *conversationService
+	collaboration        *collaborationService
+	projectRegistry      *projectRegistry
+	agentRuntime         *agentRuntimeCoordinator
+	checkpointTimeout    time.Duration
+	checkpointRetryDelay time.Duration
+	residentTools        *tooldomain.Registry[ResidentToolContext]
+	modelProvider        runtimedomain.ModelProvider[CLI2APIRequest, ResidentToolContext, AgentStreamCallbacks]
+	dynamicTools         tooldomain.DynamicProvider
+	commandRunner        executiondomain.Runner
+	streamRunner         executiondomain.StreamRunner
+	sandboxEnforcer      executiondomain.SandboxEnforcer
+	agentService         *agentdomain.Service
+	taskService          *taskdomain.Service
 }
 
 type Settings = settingsdomain.Settings
@@ -272,6 +216,7 @@ type CLI2APIRequest struct {
 	Prompt         string                `json:"prompt"`
 	Workdir        string                `json:"workdir,omitempty"`
 	Mode           string                `json:"mode,omitempty"`
+	NoTools        bool                  `json:"-"`
 	Transcript     []AgentTranscriptItem `json:"-"`
 }
 
@@ -322,6 +267,7 @@ type BashToolResult struct {
 
 type ResidentBashApproval struct {
 	ID             string
+	RequestRunID   string
 	RunID          string
 	Subject        residentBashSubject
 	State          string
@@ -348,6 +294,8 @@ type TaskCreateRequest struct {
 	Title        string   `json:"title"`
 	Description  string   `json:"description"`
 	Goal         string   `json:"goal"`
+	MaxRuntimeMS *int64   `json:"max_runtime_ms,omitempty"`
+	SandboxMode  string   `json:"sandbox_mode,omitempty"`
 	ArtifactIDs  []string `json:"artifact_ids,omitempty"`
 	OwnerAgentID string   `json:"owner_agent_id,omitempty"`
 	PlanID       string   `json:"plan_id,omitempty"`

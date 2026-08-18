@@ -1,6 +1,9 @@
 package process
 
-import "time"
+import (
+	runtimedomain "github.com/karoz/karoz/internal/runtime"
+	"time"
+)
 
 type State string
 
@@ -88,6 +91,21 @@ type Process struct {
 	StartedAt          time.Time  `json:"started_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 	EndedAt            *time.Time `json:"ended_at,omitempty"`
+}
+
+func (item Process) Operation(defaultLifetime time.Duration) runtimedomain.Operation {
+	lifetime := item.LifetimeMS
+	var startedAt *time.Time
+	if !item.StartedAt.IsZero() {
+		value := item.StartedAt
+		startedAt = &value
+	}
+	return runtimedomain.Operation{
+		ID: item.ID, OwnerID: item.ProjectID + "/" + item.AgentID,
+		Class: "background_process", State: string(item.State),
+		Deadline:  runtimedomain.DeadlineFromMilliseconds(&lifetime, defaultLifetime),
+		StartedAt: startedAt, UpdatedAt: item.UpdatedAt,
+	}
 }
 
 // Normalize makes a recovered record safe for a new server instance. Process

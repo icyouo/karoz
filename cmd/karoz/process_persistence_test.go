@@ -1784,7 +1784,7 @@ func TestImportProjectSettingsFailureAbortsClaimAndRollsBackConfig(t *testing.T)
 		}
 		before[path] = body
 	}
-	a.projectImportSettingsSave = func() error {
+	a.projectRegistryLocked().importSettingsSave = func() error {
 		return errors.New("settings save failed")
 	}
 	if _, err := a.importProject(ProjectCreateRequest{
@@ -1792,7 +1792,7 @@ func TestImportProjectSettingsFailureAbortsClaimAndRollsBackConfig(t *testing.T)
 	}); err == nil {
 		t.Fatal("settings failure did not reject import")
 	}
-	a.projectImportSettingsSave = nil
+	a.projectRegistryLocked().importSettingsSave = nil
 
 	for _, path := range paths {
 		after, err := os.ReadFile(path)
@@ -1805,7 +1805,7 @@ func TestImportProjectSettingsFailureAbortsClaimAndRollsBackConfig(t *testing.T)
 	}
 	a.mu.Lock()
 	extraRoots := append([]string(nil), a.settings.ExtraProjectsRoots...)
-	_, aliasExists := a.projectAliases[external.ID]
+	_, aliasExists := a.projectRegistryLocked().aliases[external.ID]
 	a.mu.Unlock()
 	if len(extraRoots) != 0 || aliasExists {
 		t.Fatalf("settings failure changed in-memory config: roots=%v alias=%v", extraRoots, aliasExists)
@@ -1845,7 +1845,7 @@ func TestImportProjectSettingsFailurePreservesMissingConfigFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	external := projectFromPath(externalPath, externalPath, "extra")
-	a.projectImportSettingsSave = func() error {
+	a.projectRegistryLocked().importSettingsSave = func() error {
 		return errors.New("settings save failed")
 	}
 	if _, err := a.importProject(ProjectCreateRequest{Path: externalPath}); err == nil {
@@ -1922,7 +1922,7 @@ func TestImportProjectClaimCrashRecovery(t *testing.T) {
 			desiredSettings.ExtraProjectsRoots = normalizeWorkspaceRoots(
 				append([]string(nil), externalPath), desiredSettings.ProjectsRoot,
 			)
-			desiredAliases := cloneProjectAliases(a.projectAliases)
+			desiredAliases := cloneProjectAliases(a.projectRegistryLocked().aliases)
 			desiredAliases[external.ID] = "external"
 			settingsAfter, err := json.MarshalIndent(desiredSettings, "", "  ")
 			if err != nil {
@@ -2062,7 +2062,7 @@ func TestImportProjectClaimCrashRecovery(t *testing.T) {
 				)
 			}
 			restarted.mu.Lock()
-			recoveredAlias := restarted.projectAliases[external.ID]
+			recoveredAlias := restarted.projectRegistryLocked().aliases[external.ID]
 			restarted.mu.Unlock()
 			if test.committed && recoveredAlias != "external" {
 				t.Fatalf("recovered alias=%q, want external", recoveredAlias)
@@ -2131,7 +2131,7 @@ func TestExistingProjectReimportIsRejectedBeforeConfigMutation(t *testing.T) {
 		}
 	}
 	a.mu.Lock()
-	alias := a.projectAliases[imported.ID]
+	alias := a.projectRegistryLocked().aliases[imported.ID]
 	a.mu.Unlock()
 	if alias != "old-alias" {
 		t.Fatalf("live alias=%q, want old-alias", alias)
@@ -2157,7 +2157,7 @@ func TestExistingProjectReimportIsRejectedBeforeConfigMutation(t *testing.T) {
 		}
 	})
 	restarted.mu.Lock()
-	alias = restarted.projectAliases[imported.ID]
+	alias = restarted.projectRegistryLocked().aliases[imported.ID]
 	restarted.mu.Unlock()
 	if alias != "old-alias" {
 		t.Fatalf("restarted alias=%q, want old-alias", alias)
@@ -2314,11 +2314,11 @@ func TestSettingsUpdateAndCreateRacePreservesRuntimeProjectSet(t *testing.T) {
 	createRegistered := make(chan struct{})
 	releaseCreate := make(chan struct{})
 	settingsAtRegistry := make(chan struct{})
-	a.projectCreateAfterRegistrationHook = func() {
+	a.projectRegistryLocked().createAfterRegistrationHook = func() {
 		close(createRegistered)
 		<-releaseCreate
 	}
-	a.settingsUpdateBeforeRegistryHook = func() {
+	a.projectRegistryLocked().settingsUpdateBeforeRegistryHook = func() {
 		close(settingsAtRegistry)
 	}
 	createResult := make(chan struct {
@@ -2386,8 +2386,8 @@ func TestSettingsUpdateAndCreateRacePreservesRuntimeProjectSet(t *testing.T) {
 	if err := <-settingsResult; err == nil {
 		t.Fatal("settings update removed a concurrently registered project")
 	}
-	a.projectCreateAfterRegistrationHook = nil
-	a.settingsUpdateBeforeRegistryHook = nil
+	a.projectRegistryLocked().createAfterRegistrationHook = nil
+	a.projectRegistryLocked().settingsUpdateBeforeRegistryHook = nil
 
 	settingsAfter, err := os.ReadFile(settingsPath)
 	if err != nil {

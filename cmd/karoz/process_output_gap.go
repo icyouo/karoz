@@ -11,13 +11,14 @@ import (
 const processOutputGapRetryDelay = time.Second
 
 func (a *app) armProcessOutputGapWorker() {
-	a.processOutputGapWorkerOnce.Do(func() {
+	output := a.processOutputRuntime
+	output.gapWorkerOnce.Do(func() {
 		go func() {
 			for {
 				select {
 				case <-a.supervisorCtx.Done():
 					return
-				case <-a.processOutputGapWake:
+				case <-output.gapWake:
 					_ = a.drainProcessOutputGaps()
 				}
 			}
@@ -26,8 +27,9 @@ func (a *app) armProcessOutputGapWorker() {
 }
 
 func (a *app) drainProcessOutputGaps() error {
-	a.processOutputGapDrainMu.Lock()
-	defer a.processOutputGapDrainMu.Unlock()
+	output := a.processOutputRuntime
+	output.gapDrainMu.Lock()
+	defer output.gapDrainMu.Unlock()
 	pending := a.takeProcessOutputGapDeltas()
 	retry := false
 	var firstErr error
@@ -47,31 +49,34 @@ func (a *app) drainProcessOutputGaps() error {
 }
 
 func (a *app) takeProcessOutputGapDeltas() map[string]processOutputGapDelta {
-	a.processOutputGapMu.Lock()
-	defer a.processOutputGapMu.Unlock()
-	pending := a.processOutputPendingGaps
-	a.processOutputPendingGaps = make(map[string]processOutputGapDelta)
+	output := a.processOutputRuntime
+	output.gapMu.Lock()
+	defer output.gapMu.Unlock()
+	pending := output.pendingGaps
+	output.pendingGaps = make(map[string]processOutputGapDelta)
 	return pending
 }
 
 func (a *app) returnProcessOutputGapDelta(delta processOutputGapDelta) {
 	key := projectAgentKey(delta.ProjectID, delta.ProcessID)
-	a.processOutputGapMu.Lock()
-	current := a.processOutputPendingGaps[key]
-	a.processOutputPendingGaps[key] = mergeProcessOutputGapDeltas(delta, current)
-	a.processOutputGapMu.Unlock()
+	output := a.processOutputRuntime
+	output.gapMu.Lock()
+	current := output.pendingGaps[key]
+	output.pendingGaps[key] = mergeProcessOutputGapDeltas(delta, current)
+	output.gapMu.Unlock()
 }
 
 func (a *app) flushProcessOutputGap(projectID, processID string) error {
-	a.processOutputGapDrainMu.Lock()
-	defer a.processOutputGapDrainMu.Unlock()
+	output := a.processOutputRuntime
+	output.gapDrainMu.Lock()
+	defer output.gapDrainMu.Unlock()
 	key := projectAgentKey(projectID, processID)
-	a.processOutputGapMu.Lock()
-	delta, exists := a.processOutputPendingGaps[key]
+	output.gapMu.Lock()
+	delta, exists := output.pendingGaps[key]
 	if exists {
-		delete(a.processOutputPendingGaps, key)
+		delete(output.pendingGaps, key)
 	}
-	a.processOutputGapMu.Unlock()
+	output.gapMu.Unlock()
 	if !exists {
 		return nil
 	}
@@ -84,6 +89,7 @@ func (a *app) flushProcessOutputGap(projectID, processID string) error {
 }
 
 func (a *app) scheduleProcessOutputGapRetry() {
+	output := a.processOutputRuntime
 	time.AfterFunc(processOutputGapRetryDelay, func() {
 		select {
 		case <-a.supervisorCtx.Done():
@@ -91,7 +97,7 @@ func (a *app) scheduleProcessOutputGapRetry() {
 		default:
 		}
 		select {
-		case a.processOutputGapWake <- struct{}{}:
+		case output.gapWake <- struct{}{}:
 		default:
 		}
 	})
@@ -125,7 +131,7 @@ func (a *app) saveProcessOutputGapDiagnostics(delta processOutputGapDelta) error
 			item.Trigger.ProcessID != delta.ProcessID {
 			continue
 		}
-		baseline := a.processOutputBaselines[projectAgentKey(delta.ProjectID, item.ID)]
+		baseline := a.processOutputRuntime.baselines[projectAgentKey(delta.ProjectID, item.ID)]
 		if baseline >= delta.NewestSeq {
 			continue
 		}

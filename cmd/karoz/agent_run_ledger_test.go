@@ -152,8 +152,8 @@ func TestAgentRunLedgerTerminalRetentionIsBounded(t *testing.T) {
 		ledger.publish("done", nil)
 	}
 	a.mu.Lock()
-	count := terminalLedgerCount(a.agentRunLedgers)
-	_, oldestRetained := a.agentRunLedgers["run-0"]
+	count := terminalLedgerCount(a.agentRuntimeLocked().ledgers)
+	_, oldestRetained := a.agentRuntimeLocked().ledgers["run-0"]
 	a.mu.Unlock()
 	if count != agentRunTerminalLedgerLimit {
 		t.Fatalf("terminal ledgers=%d, want %d", count, agentRunTerminalLedgerLimit)

@@ -78,7 +78,7 @@
       await openRuntimePanel(button.dataset.sidePanel);
     };
     $('togglePreviewPane').onclick = async () => {
-      if (state.sidePanel === 'preview') {
+      if (state.sidePanel) {
         closeSidePane();
         return;
       }

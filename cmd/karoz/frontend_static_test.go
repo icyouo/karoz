@@ -68,6 +68,52 @@ func TestFrontendServesEmbeddedJS(t *testing.T) {
 	}
 }
 
+func TestRuntimeStripHidesZeroBadgesAndPreviewUsesIconOnlyControl(t *testing.T) {
+	panels, err := staticFS.ReadFile("static/js/panels.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	panelSource := string(panels)
+	for _, fragment := range []string{
+		"if (total <= 0) return '';",
+		"const countMarkup = total > 0 ? '<strong>' + total + '</strong>' : '';",
+		"const accessibleLabel = total > 0 ? label + ' ' + total : label;",
+		"chip('updates', 'Updates', updatesCount",
+		"function renderUpdatesPane(body)",
+		"data-updates-view=\"attention\"",
+		"previewToggle.classList.toggle('active', open);",
+		"previewToggle.setAttribute('aria-pressed', open ? 'true' : 'false');",
+	} {
+		if !strings.Contains(panelSource, fragment) {
+			t.Fatalf("runtime strip zero-badge handling missing %q", fragment)
+		}
+	}
+	if strings.Contains(panelSource, "chip('inbox', 'Inbox'") || strings.Contains(panelSource, "chip('blackboard', 'Activity'") {
+		t.Fatal("Inbox and Activity must share the Updates navigation entry")
+	}
+
+	index, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexSource := string(index)
+	if !strings.Contains(indexSource, `id="togglePreviewPane" class="secondary icon preview-toggle"`) ||
+		!strings.Contains(indexSource, `aria-label="Preview"`) {
+		t.Fatal("preview control must be an accessible icon-only button")
+	}
+	if strings.Contains(indexSource, `>Preview</button>`) {
+		t.Fatal("preview control still renders a text label")
+	}
+
+	bindings, err := staticFS.ReadFile("static/js/bindings.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bindings), "if (state.sidePanel) {") {
+		t.Fatal("preview control must close any open side panel")
+	}
+}
+
 func TestToolBatchFrontendKeepsMessageBoundaries(t *testing.T) {
 	renderer, err := staticFS.ReadFile("static/js/chat-render.js")
 	if err != nil {

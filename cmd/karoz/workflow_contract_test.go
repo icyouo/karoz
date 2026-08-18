@@ -21,7 +21,7 @@ func TestRunHandoffArtifactTaskContract(t *testing.T) {
 	reviewer := Agent{ID: "reviewer", ProjectID: project.ID, Name: "design-critic", Role: "review"}
 	builder := Agent{ID: "builder", ProjectID: project.ID, Name: "implementation-lead", Role: "implementation"}
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
-	a.agents[project.ID] = []Agent{designer, reviewer, builder}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{designer, reviewer, builder}
 
 	designRun, started := a.beginAgentRun(AgentRunInput{
 		RunID: "run-design", ProjectID: project.ID, AgentID: designer.ID, Trigger: RunTriggerUserDirect, TurnType: "plan",

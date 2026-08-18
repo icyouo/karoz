@@ -16,29 +16,29 @@ import (
 
 func TestCJKLexicalMemoryBehaviorTable(t *testing.T) {
 	chinese := "决定：登录页的主按钮统一使用品牌蓝 #1A73E8，不再使用绿色。"
-	english := "Decision: the login page button uses brand blue, not green."
+	scorer := newMemorySearchScorer([]string{chinese, chinese})
 	tests := []struct {
 		name  string
 		query string
 		text  string
 	}{
-		{"Chinese natural question", "登录页的按钮用什么颜色", chinese},
-		{"Chinese recall cue", "记得我们之前定的登录页按钮颜色吗", chinese},
-		{"Chinese exact phrase", "登录页的主按钮", chinese},
-		{"English unchanged", "what color is the login page button", english},
+		{"row 1", "登录页的按钮用什么颜色", chinese},
+		{"row 2", "记得我们之前定的登录页按钮颜色吗", chinese},
+		{"row 3", "我想确认一下我们当初对登录页那个主按钮的配色是怎么定的", chinese},
+		{"row 4", "帮我检查一下前端所有页面的主按钮配色是不是都符合我们之前定下来的规范", chinese},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if score := memoryMatchScore(newMemoryLexicalQuery(tt.query), tt.text); score == 0 {
+			if score := scorer.score(newMemoryLexicalQuery(tt.query), tt.text); score == 0 {
 				t.Fatalf("query %q did not retrieve %q", tt.query, tt.text)
 			}
 		})
 	}
-	if score := memoryMatchScore(newMemoryLexicalQuery("登录系统设计"), "日志里提到了登录"); score != 0 {
+	if score := scorer.score(newMemoryLexicalQuery("登录系统设计"), "日志里提到了登录"); score != 0 {
 		t.Fatalf("a single common CJK bigram produced a false positive: %d", score)
 	}
-	exact := memoryMatchScore(newMemoryLexicalQuery("登录页的主按钮"), chinese)
-	partial := memoryMatchScore(newMemoryLexicalQuery("登录页按钮颜色"), chinese)
+	exact := scorer.score(newMemoryLexicalQuery("登录页的主按钮"), chinese)
+	partial := scorer.score(newMemoryLexicalQuery("登录页按钮颜色"), chinese)
 	if exact <= partial {
 		t.Fatalf("exact phrase priority lost: exact=%d partial=%d", exact, partial)
 	}
@@ -59,14 +59,88 @@ func TestLexicalTermsPreserveNonCJKUnicodeLettersAndNumbers(t *testing.T) {
 		query string
 		text  string
 	}{
+		{"what color is the login page button", "Decision: the login page button uses brand blue, not green."},
 		{"café déjà", "Le choix du café est déjà enregistré."},
 		{"Москва проект", "Решение для проекта Москва сохранено."},
 		{"مرحبا مشروع", "تم حفظ قرار مشروع مرحبا."},
 		{"نسخة ۱۲۳", "النسخة المعتمدة هي ۱۲۳."},
 	} {
-		if score := memoryMatchScore(newMemoryLexicalQuery(tt.query), tt.text); score == 0 {
+		scorer := newMemorySearchScorer([]string{tt.text})
+		if score := scorer.score(newMemoryLexicalQuery(tt.query), tt.text); score == 0 {
 			t.Fatalf("non-CJK Unicode query %q did not match %q", tt.query, tt.text)
 		}
+	}
+}
+
+func TestCJKCorpusAwareInformationFloor(t *testing.T) {
+	relevant := "我们之前已经确认这个项目需要继续处理，请记得：登录页按钮使用品牌蓝，并补充按钮对比度测试。"
+	documents := []string{relevant}
+	for i := 0; i < 24; i++ {
+		documents = append(documents, "我们之前已经确认这个项目需要继续处理，请记得完成后更新结果。")
+	}
+	for i := 0; i < 24; i++ {
+		documents = append(documents, "完全无关的部署日志和数据库备份记录。")
+	}
+	scorer := newMemorySearchScorer(documents)
+
+	if score := scorer.score(newMemoryLexicalQuery("我们之前记得登录页按钮怎么定的"), relevant); score == 0 {
+		t.Fatal("stop-word-heavy query lost its informative login button overlap")
+	}
+	if score := scorer.score(newMemoryLexicalQuery("我们之前记得继续处理"), documents[1]); score != 0 {
+		t.Fatalf("frequent stop-word-only overlap crossed information floor: %d", score)
+	}
+	unrelated := "我们之前已经确认这个项目需要继续处理，请记得完成后更新结果。"
+	longQuery := "请回顾我们之前已经确认并记得继续处理的所有事项，然后说明登录页按钮最终使用什么颜色"
+	if score := scorer.score(newMemoryLexicalQuery(longQuery), unrelated); score != 0 {
+		t.Fatalf("unrelated long distractor query matched through common CJK overlap: %d", score)
+	}
+}
+
+func TestCJKCommonEvidenceCannotAccumulatePastCap(t *testing.T) {
+	common := "我们之前已经确认这个项目需要继续处理，请记得完成后更新结果。"
+	longStopWordQuery := "我们之前记得继续处理已经确认需要更新结果"
+	for _, tt := range []struct {
+		name        string
+		commonCount int
+	}{
+		{"90 percent DF", 91},
+		{"about 95 percent DF", 96},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			documents := make([]string, 0, 101)
+			for i := 0; i < tt.commonCount; i++ {
+				documents = append(documents, common)
+			}
+			for i := tt.commonCount; i < 101; i++ {
+				documents = append(documents, "登录页按钮使用品牌蓝，并且必须满足对比度规范。")
+			}
+			scorer := newMemorySearchScorer(documents)
+			if score := scorer.score(newMemoryLexicalQuery(longStopWordQuery), common); score != 0 {
+				t.Fatalf("common bigrams accumulated despite structural DF gate: %d", score)
+			}
+		})
+	}
+}
+
+func TestCJKSmallCorpusFallback(t *testing.T) {
+	text := "决定：登录页的主按钮统一使用品牌蓝，不再使用绿色。"
+	query := newMemoryLexicalQuery("登录页按钮颜色")
+	for _, documents := range [][]string{{text}, {text, text}} {
+		scorer := newMemorySearchScorer(documents)
+		if score := scorer.score(query, text); score == 0 {
+			t.Fatalf("small corpus with %d documents did not use fallback", len(documents))
+		}
+	}
+}
+
+func TestMemoryScoreBandsAreStrict(t *testing.T) {
+	text := "登录页的主按钮 uses brand blue"
+	scorer := newMemorySearchScorer([]string{text, "登录页按钮颜色另有记录"})
+	exact := scorer.score(newMemoryLexicalQuery("登录页的主按钮"), text)
+	term := scorer.score(newMemoryLexicalQuery("missing brand"), text)
+	cjk := scorer.score(newMemoryLexicalQuery("登录页按钮颜色"), text)
+	if exact <= term || term <= cjk || cjk <= 0 {
+		t.Fatalf("score bands exact=%d term=%d cjk=%d", exact, term, cjk)
 	}
 }
 
@@ -74,14 +148,14 @@ func TestCJKLexicalQuerySharedByRelevantMemoryAndArchive(t *testing.T) {
 	a, project, agent := newMemoryGateTestApp(t)
 	now := time.Now().UTC()
 	key := projectAgentKey(project.ID, agent.ID)
-	a.memories[key] = []AgentMemoryEntry{{
+	a.memoryStoreLocked().entries[key] = []AgentMemoryEntry{{
 		ID: "cn-decision", ProjectID: project.ID, AgentID: agent.ID, Layer: "decision", State: "active",
 		Summary: "登录页按钮颜色", Detail: "决定：登录页的主按钮统一使用品牌蓝 #1A73E8，不再使用绿色。",
 		CreatedAt: now, UpdatedAt: now,
 	}}
-	a.archives[key] = []AgentArchiveMessage{{
+	replaceProjectArchivesForTest(a, key, []AgentArchiveMessage{{
 		Seq: 7, Role: "assistant", Body: "决定：登录页的主按钮统一使用品牌蓝 #1A73E8，不再使用绿色。", CreatedAt: now,
-	}}
+	}})
 	if got := a.relevantMemoriesFor(project.ID, agent.ID, "登录页的按钮用什么颜色", 5); len(got) != 1 || got[0].ID != "cn-decision" {
 		t.Fatalf("relevant memories = %#v", got)
 	}
@@ -91,6 +165,18 @@ func TestCJKLexicalQuerySharedByRelevantMemoryAndArchive(t *testing.T) {
 	}
 	if len(result["messages"].([]any)) != 1 {
 		t.Fatalf("archive search result = %#v", result)
+	}
+
+	longQuery := "我想确认一下我们当初对登录页那个主按钮的配色是怎么定的"
+	if got := a.relevantMemoriesFor(project.ID, agent.ID, longQuery, 5); len(got) != 1 || got[0].ID != "cn-decision" {
+		t.Fatalf("same long query relevant memories = %#v", got)
+	}
+	if err := json.Unmarshal([]byte(a.searchArchive(project.ID, agent.ID, longQuery, 5)), &result); err != nil {
+		t.Fatal(err)
+	}
+	memoryEntries := result["memory_entries"].([]any)
+	if len(memoryEntries) != 1 || memoryEntries[0].(map[string]any)["id"] != "cn-decision" || len(result["messages"].([]any)) != 1 {
+		t.Fatalf("same long query archive search = %#v", result)
 	}
 }
 

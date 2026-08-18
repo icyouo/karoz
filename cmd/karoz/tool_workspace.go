@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	artifactdomain "github.com/karoz/karoz/internal/artifact"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,13 +126,23 @@ func (a *app) createTaskFromResidentTool(project Project, agent Agent, args map[
 		}
 		return toolJSON(map[string]any{"error": code, "message": err.Error()})
 	}
-	task := a.createTask(project, TaskCreateRequest{
-		Type:        taskType,
-		Title:       title,
-		Description: description,
-		Goal:        goal,
-		ArtifactIDs: artifactIDs,
+	maxRuntimeMS, err := optionalTaskMaxRuntimeArg(args)
+	if err != nil {
+		return toolJSON(map[string]any{"error": "validation_error", "message": err.Error()})
+	}
+	sandboxMode := toolStringArg(args, "sandbox_mode", 32)
+	task, err := a.createTask(project, TaskCreateRequest{
+		Type:         taskType,
+		Title:        title,
+		Description:  description,
+		Goal:         goal,
+		MaxRuntimeMS: maxRuntimeMS,
+		SandboxMode:  sandboxMode,
+		ArtifactIDs:  artifactIDs,
 	})
+	if err != nil {
+		return toolJSON(map[string]any{"error": "validation_error", "message": err.Error()})
+	}
 	a.appendTaskLog(project.ID, task.ID, "created by resident agent: "+agent.ID)
 	hook := a.registerTaskRuntimeHook(project.ID, agent.ID, task.ID, map[string]any{
 		"title":        title,
@@ -147,6 +159,34 @@ func (a *app) createTaskFromResidentTool(project Project, agent Agent, args map[
 		"hook_status": hook.Status,
 		"message":     "Task created and resident_task_completion hook registered. The resident agent will receive a task_hook message when the task completes or fails.",
 	})
+}
+
+func optionalTaskMaxRuntimeArg(args map[string]any) (*int64, error) {
+	raw, exists := args["max_runtime_ms"]
+	if !exists {
+		return nil, nil
+	}
+	var value int64
+	switch typed := raw.(type) {
+	case float64:
+		if math.Trunc(typed) != typed || typed < math.MinInt64 || typed > math.MaxInt64 {
+			return nil, fmt.Errorf("max_runtime_ms must be an integer")
+		}
+		value = int64(typed)
+	case int:
+		value = int64(typed)
+	case int64:
+		value = typed
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return nil, fmt.Errorf("max_runtime_ms must be an integer")
+		}
+		value = parsed
+	default:
+		return nil, fmt.Errorf("max_runtime_ms must be an integer")
+	}
+	return &value, nil
 }
 
 func (a *app) addAgentFromResidentTool(project Project, actor Agent, args map[string]any) string {
@@ -313,7 +353,8 @@ func residentTaskStatusTransitionAllowed(from, to string) bool {
 func (a *app) transitionTaskStatusFromResidentTool(projectID, taskID, status, result string) (Task, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	list := a.tasks[projectID]
+	state := a.projectTasksLocked()
+	list := state.tasks[projectID]
 	for i := range list {
 		if list[i].ID != taskID {
 			continue
@@ -327,7 +368,7 @@ func (a *app) transitionTaskStatusFromResidentTool(projectID, taskID, status, re
 			list[i].Result = result
 		}
 		list[i].UpdatedAt = time.Now().UTC()
-		a.tasks[projectID] = list
+		state.tasks[projectID] = list
 		return list[i], nil
 	}
 	return Task{}, fmt.Errorf("task not found")

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -140,7 +141,7 @@ func TestTaskIntegrationAdvancedBaseMergesAndConflictRestores(t *testing.T) {
 func TestTaskIntegrationSerializesAndMergeRetryIsIdempotent(t *testing.T) {
 	a, project, first := newIntegrationFixture(t, "task-one", "one.txt", "one")
 	second := createTaskBranch(t, project, "task-two", "two.txt", "two", first.BaseCommit)
-	a.tasks[project.ID] = append(a.tasks[project.ID], second)
+	a.projectTasksLocked().tasks[project.ID] = append(a.projectTasksLocked().tasks[project.ID], second)
 
 	var wg sync.WaitGroup
 	for _, task := range []Task{first, second} {
@@ -197,17 +198,17 @@ func TestRetryTaskMergePublishesTerminalSideEffectsExactlyOnce(t *testing.T) {
 	task.PlanID = "plan-1"
 	task.PlanStepID = "step-1"
 	a.updateTask(project.ID, task)
-	a.taskHooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{
+	a.projectTasksLocked().hooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{
 		ID: "hook-1", TaskID: task.ID, ProjectID: project.ID, AgentID: "agent-1",
 		HookType: "resident_task_completion", Status: "pending",
 	}}
-	a.plans[project.ID] = []WorkPlan{{
+	replacePlansForTest(a, project.ID, []WorkPlan{{
 		ID: "plan-1", ProjectID: project.ID, OwnerAgentID: "owner-1", Status: PlanActive,
 		Steps: []PlanStep{{
 			ID: "step-1", Status: PlanStepRunning,
 			TaskAttempts: []PlanTaskAttempt{{TaskID: task.ID, Status: "running"}},
 		}},
-	}}
+	}})
 
 	blocker := ScheduledRun{
 		ID: "plan-worker-blocker", ProjectID: project.ID, AgentID: "owner-1",
@@ -232,7 +233,7 @@ func TestRetryTaskMergePublishesTerminalSideEffectsExactlyOnce(t *testing.T) {
 		t.Fatalf("duplicate retry result = %+v err=%v", duplicate, err)
 	}
 
-	hooks := a.taskHooks[project.ID+"/"+task.ID]
+	hooks := a.projectTasksLocked().hooks[project.ID+"/"+task.ID]
 	if len(hooks) != 1 || hooks[0].Status != "delivered" || hooks[0].DeliveredAt == nil {
 		t.Fatalf("completion hooks = %+v", hooks)
 	}
@@ -313,13 +314,13 @@ func TestRetryTaskMergeDoesNotRepeatTerminalPlanMutation(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	project := Project{ID: "p1", Name: "project"}
 	task := Task{ID: "t1", ProjectID: project.ID, Status: "done", PlanID: "plan-1", PlanStepID: "step-1"}
-	a.plans[project.ID] = []WorkPlan{{
+	replacePlansForTest(a, project.ID, []WorkPlan{{
 		ID: "plan-1", ProjectID: project.ID, Status: PlanActive,
 		Steps: []PlanStep{{
 			ID: "step-1", Status: PlanStepAwaitingDecision, Version: 2,
 			TaskAttempts: []PlanTaskAttempt{{TaskID: task.ID, Status: "done"}},
 		}},
-	}}
+	}})
 	before, _ := a.planByID(project.ID, task.PlanID)
 	a.notifyTaskRuntimeHooks(project, task)
 	after, _ := a.planByID(project.ID, task.PlanID)
@@ -346,8 +347,8 @@ func TestTaskIntegrationPostMergeVerificationFailureWaitsAndRecovers(t *testing.
 	task.PlanID = "plan-1"
 	task.PlanStepID = "step-1"
 	a.updateTask(project.ID, task)
-	a.taskHooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{ID: "hook-1", TaskID: task.ID, ProjectID: project.ID, AgentID: "agent-1", HookType: "resident_task_completion", Status: "pending"}}
-	a.plans[project.ID] = []WorkPlan{{ID: "plan-1", ProjectID: project.ID, Status: PlanActive, Steps: []PlanStep{{ID: "step-1", Status: PlanStepRunning, TaskAttempts: []PlanTaskAttempt{{TaskID: task.ID, Status: "running"}}}}}}
+	a.projectTasksLocked().hooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{ID: "hook-1", TaskID: task.ID, ProjectID: project.ID, AgentID: "agent-1", HookType: "resident_task_completion", Status: "pending"}}
+	replacePlansForTest(a, project.ID, []WorkPlan{{ID: "plan-1", ProjectID: project.ID, Status: PlanActive, Steps: []PlanStep{{ID: "step-1", Status: PlanStepRunning, TaskAttempts: []PlanTaskAttempt{{TaskID: task.ID, Status: "running"}}}}}})
 
 	hookPath := filepath.Join(project.Path, ".git", "hooks", "post-merge")
 	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nprintf dirty > post-merge-dirty\n"), 0755); err != nil {
@@ -360,7 +361,7 @@ func TestTaskIntegrationPostMergeVerificationFailureWaitsAndRecovers(t *testing.
 	if updated.FailureSummary != "" || updated.Result != "" || updated.MergedAt != nil {
 		t.Fatalf("post-merge verification falsely reported terminal state: %+v", updated)
 	}
-	if merged, err := gitIsAncestor(project.Path, task.CommitSHA, strings.TrimSpace(gitTest(t, project.Path, "rev-parse", "HEAD"))); err != nil || !merged {
+	if merged, err := a.gitIsAncestor(project.Path, task.CommitSHA, strings.TrimSpace(gitTest(t, project.Path, "rev-parse", "HEAD"))); err != nil || !merged {
 		t.Fatalf("recorded task commit was not retained after post-merge verification failure: merged=%t err=%v", merged, err)
 	}
 	if status := gitTest(t, project.Path, "status", "--porcelain=v1", "--untracked-files=all"); !strings.Contains(status, "post-merge-dirty") {
@@ -374,7 +375,7 @@ func TestTaskIntegrationPostMergeVerificationFailureWaitsAndRecovers(t *testing.
 	}
 
 	a.notifyTaskRuntimeHooks(project, updated)
-	if got := a.taskHooks[project.ID+"/"+task.ID][0].Status; got != "pending" {
+	if got := a.projectTasksLocked().hooks[project.ID+"/"+task.ID][0].Status; got != "pending" {
 		t.Fatalf("waiting_merge delivered hook status=%s", got)
 	}
 	plan, _ := a.planByID(project.ID, "plan-1")
@@ -402,11 +403,11 @@ func TestWaitingMergeDoesNotDeliverHooksOrAdvancePlan(t *testing.T) {
 	project := Project{ID: "p1", Name: "project"}
 	now := time.Now().UTC()
 	task := Task{ID: "t1", ProjectID: project.ID, Status: "waiting_merge", PlanID: "plan-1", PlanStepID: "step-1", UpdatedAt: now}
-	a.tasks[project.ID] = []Task{task}
-	a.taskHooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{ID: "hook-1", TaskID: task.ID, ProjectID: project.ID, AgentID: "agent-1", HookType: "resident_task_completion", Status: "pending"}}
-	a.plans[project.ID] = []WorkPlan{{ID: "plan-1", ProjectID: project.ID, Status: PlanActive, Steps: []PlanStep{{ID: "step-1", Status: PlanStepRunning, TaskAttempts: []PlanTaskAttempt{{TaskID: task.ID, Status: "running"}}}}}}
+	a.projectTasksLocked().tasks[project.ID] = []Task{task}
+	a.projectTasksLocked().hooks[project.ID+"/"+task.ID] = []TaskRuntimeHook{{ID: "hook-1", TaskID: task.ID, ProjectID: project.ID, AgentID: "agent-1", HookType: "resident_task_completion", Status: "pending"}}
+	replacePlansForTest(a, project.ID, []WorkPlan{{ID: "plan-1", ProjectID: project.ID, Status: PlanActive, Steps: []PlanStep{{ID: "step-1", Status: PlanStepRunning, TaskAttempts: []PlanTaskAttempt{{TaskID: task.ID, Status: "running"}}}}}})
 	a.notifyTaskRuntimeHooks(project, task)
-	if got := a.taskHooks[project.ID+"/"+task.ID][0].Status; got != "pending" {
+	if got := a.projectTasksLocked().hooks[project.ID+"/"+task.ID][0].Status; got != "pending" {
 		t.Fatalf("waiting merge delivered hook status=%s", got)
 	}
 	plan, _ := a.planByID(project.ID, "plan-1")
@@ -443,7 +444,7 @@ func newIntegrationFixture(t *testing.T, taskID, filename, contents string) (*ap
 	project.Name = "test"
 	task := createTaskBranch(t, project, taskID, filename, contents, base)
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: repo})
-	a.tasks[project.ID] = []Task{task}
+	a.projectTasksLocked().tasks[project.ID] = []Task{task}
 	return a, project, task
 }
 
@@ -461,7 +462,10 @@ func createTaskBranch(t *testing.T, project Project, taskID, filename, contents,
 
 func gitTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	out, err := run(dir, "git", args...)
+	command := exec.Command("git", args...)
+	command.Dir = dir
+	outBytes, err := command.CombinedOutput()
+	out := string(outBytes)
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}

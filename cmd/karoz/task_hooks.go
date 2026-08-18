@@ -27,7 +27,8 @@ func (a *app) notifyTaskRuntimeHooks(project Project, task Task) {
 	now := time.Now().UTC()
 	var deliveries []TaskRuntimeHook
 	a.mu.Lock()
-	hooks := a.taskHooks[key]
+	coordinator := a.projectTasksLocked()
+	hooks := coordinator.hooks[key]
 	for i := range hooks {
 		if hooks[i].Status != "pending" || hooks[i].HookType != "resident_task_completion" {
 			continue
@@ -37,7 +38,7 @@ func (a *app) notifyTaskRuntimeHooks(project Project, task Task) {
 		hooks[i].ResponsePayload = map[string]any{"success": success, "summary": summary, "task_id": task.ID, "status": task.Status}
 		deliveries = append(deliveries, hooks[i])
 	}
-	a.taskHooks[key] = hooks
+	coordinator.hooks[key] = hooks
 	a.mu.Unlock()
 	for _, hook := range deliveries {
 		hint := fmt.Sprintf("[task hook] task_id=%s success=%t summary=%s", task.ID, success, strings.TrimSpace(summary))
@@ -104,19 +105,17 @@ func (a *app) registerTaskRuntimeHook(projectID, agentID, taskID string, payload
 		CreatedAt:      now,
 	}
 	a.mu.Lock()
-	if a.taskHooks == nil {
-		a.taskHooks = map[string][]TaskRuntimeHook{}
-	}
+	coordinator := a.projectTasksLocked()
 	key := projectID + "/" + taskID
 	var updated []TaskRuntimeHook
-	for _, existing := range a.taskHooks[key] {
+	for _, existing := range coordinator.hooks[key] {
 		if existing.AgentID == agentID && existing.HookType == hook.HookType {
 			continue
 		}
 		updated = append(updated, existing)
 	}
 	updated = append(updated, hook)
-	a.taskHooks[key] = updated
+	coordinator.hooks[key] = updated
 	a.mu.Unlock()
 	if err := a.saveTaskHooks(); err != nil {
 		log.Printf("save task hooks: %v", err)

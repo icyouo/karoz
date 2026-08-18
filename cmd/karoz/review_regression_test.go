@@ -60,7 +60,7 @@ func TestInvalidArtifactMetadataCannotReplaceApprovedFile(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
 	designer := Agent{ID: "designer", ProjectID: project.ID}
 	reviewer := Agent{ID: "reviewer", ProjectID: project.ID}
-	a.agents[project.ID] = []Agent{designer, reviewer}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{designer, reviewer}
 	ctx := ResidentToolContext{Project: project, Agent: designer, Workdir: project.Path, RunID: "run-design"}
 	initialContent := "<!doctype html><html><body>approved</body></html>"
 	writeResult, err := a.executeResidentTool(context.Background(), ctx, codexToolCall{Name: "write_workspace_file", Arguments: `{"path":"approved.html","content":"` + initialContent + `","artifact_kind":"mockup_html"}`})

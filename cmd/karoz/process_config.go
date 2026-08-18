@@ -42,11 +42,15 @@ func processReleaseConfigFromEnv() (processReleaseConfig, error) {
 	}
 	maxLifetime, err := positiveEnvDuration(
 		"KAROZ_PROCESS_MAX_LIFETIME",
-		defaultProcessLifetime,
-		maxProcessLifetime,
+		0,
+		0,
 	)
 	if err != nil {
 		return processReleaseConfig{}, err
+	}
+	defaultLifetime := defaultProcessLifetime
+	if maxLifetime > 0 && maxLifetime < defaultLifetime {
+		defaultLifetime = maxLifetime
 	}
 	logBytes, err := positiveEnvInt64(
 		"KAROZ_PROCESS_LOG_MAX_BYTES",
@@ -107,7 +111,7 @@ func processReleaseConfigFromEnv() (processReleaseConfig, error) {
 	return processReleaseConfig{
 		Supervisor: processSupervisorConfig{
 			LogBytes: logBytes, TailLines: tailLines, ExitDrain: exitDrain,
-			DefaultLifetime: maxLifetime, MaxLifetime: maxLifetime,
+			DefaultLifetime: defaultLifetime, MaxLifetime: maxLifetime,
 			MaxConcurrent: maxConcurrent, OutputEventBytes: outputEventMax,
 		},
 		Retention: processdomain.RetentionPolicy{

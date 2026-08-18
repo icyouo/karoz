@@ -143,7 +143,8 @@ func (a *app) runMonitorProbe(
 		}
 		return monitorProbeCheckResult{Error: err.Error()}, err
 	}
-	execution, _, runErr := executeMonitorProbe(
+	execution, _, runErr := executeMonitorProbeWithRunner(
+		a.commandRunnerOrDefault(),
 		ctx,
 		item.Trigger.ProbeLanguage,
 		receipt.CanonicalWorkdir,

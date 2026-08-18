@@ -57,22 +57,24 @@ func (a *app) handleRuntimeEvents(w http.ResponseWriter, r *http.Request, projec
 
 func (a *app) addRuntimeWatcher(projectID string, ch chan RuntimeEvent) {
 	a.mu.Lock()
-	if a.runtimeWatchers == nil {
-		a.runtimeWatchers = map[string]map[chan RuntimeEvent]bool{}
+	runtime := a.agentRuntimeLocked()
+	if runtime.runtimeWatchers == nil {
+		runtime.runtimeWatchers = map[string]map[chan RuntimeEvent]bool{}
 	}
-	if a.runtimeWatchers[projectID] == nil {
-		a.runtimeWatchers[projectID] = map[chan RuntimeEvent]bool{}
+	if runtime.runtimeWatchers[projectID] == nil {
+		runtime.runtimeWatchers[projectID] = map[chan RuntimeEvent]bool{}
 	}
-	a.runtimeWatchers[projectID][ch] = true
+	runtime.runtimeWatchers[projectID][ch] = true
 	a.mu.Unlock()
 }
 
 func (a *app) removeRuntimeWatcher(projectID string, ch chan RuntimeEvent) {
 	a.mu.Lock()
-	if watchers := a.runtimeWatchers[projectID]; watchers != nil {
+	runtime := a.agentRuntimeLocked()
+	if watchers := runtime.runtimeWatchers[projectID]; watchers != nil {
 		delete(watchers, ch)
 		if len(watchers) == 0 {
-			delete(a.runtimeWatchers, projectID)
+			delete(runtime.runtimeWatchers, projectID)
 		}
 	}
 	a.mu.Unlock()
@@ -80,8 +82,9 @@ func (a *app) removeRuntimeWatcher(projectID string, ch chan RuntimeEvent) {
 
 func (a *app) broadcastRuntimeEvent(event RuntimeEvent) {
 	a.mu.Lock()
+	runtime := a.agentRuntimeLocked()
 	var watchers []chan RuntimeEvent
-	for ch := range a.runtimeWatchers[event.ProjectID] {
+	for ch := range runtime.runtimeWatchers[event.ProjectID] {
 		watchers = append(watchers, ch)
 	}
 	a.mu.Unlock()
@@ -114,7 +117,7 @@ func (a *app) maybeTriggerKarozIdleReconcile(event RuntimeEvent) {
 	}
 	a.mu.Lock()
 	hasKaroz := false
-	for _, agent := range a.agents[event.ProjectID] {
+	for _, agent := range a.agentDirectoryLocked().agents[event.ProjectID] {
 		if agent.ID == "karoz" {
 			hasKaroz = true
 			break
@@ -171,7 +174,7 @@ func (a *app) projectRuntimeQuiescentIgnoring(projectID, ignoredHook, ignoredAge
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	prefix := projectID + "/"
-	for key, run := range a.agentRuns {
+	for key, run := range a.agentRuntimeLocked().runs {
 		if ignoredAgentID != "" && key == projectAgentKey(projectID, ignoredAgentID) {
 			continue
 		}
@@ -179,7 +182,7 @@ func (a *app) projectRuntimeQuiescentIgnoring(projectID, ignoredHook, ignoredAge
 			return false
 		}
 	}
-	for key, active := range a.runtimeHooks {
+	for key, active := range a.agentRuntimeLocked().runtimeHooks {
 		if ignoredHook != "" && key == projectID+"/"+ignoredHook {
 			continue
 		}
@@ -187,7 +190,7 @@ func (a *app) projectRuntimeQuiescentIgnoring(projectID, ignoredHook, ignoredAge
 			return false
 		}
 	}
-	for _, task := range a.tasks[projectID] {
+	for _, task := range a.projectTasksLocked().tasks[projectID] {
 		if taskStatusBlocksRuntimeQuiescent(task.Status) {
 			return false
 		}
@@ -219,20 +222,21 @@ func (a *app) tryBeginRuntimeHook(projectID, name string) bool {
 	key := projectID + "/" + name
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.runtimeHooks == nil {
-		a.runtimeHooks = map[string]bool{}
+	runtime := a.agentRuntimeLocked()
+	if runtime.runtimeHooks == nil {
+		runtime.runtimeHooks = map[string]bool{}
 	}
-	if a.runtimeHooks[key] {
+	if runtime.runtimeHooks[key] {
 		return false
 	}
-	a.runtimeHooks[key] = true
+	runtime.runtimeHooks[key] = true
 	return true
 }
 
 func (a *app) endRuntimeHook(projectID, name string) {
 	key := projectID + "/" + name
 	a.mu.Lock()
-	delete(a.runtimeHooks, key)
+	delete(a.agentRuntimeLocked().runtimeHooks, key)
 	a.mu.Unlock()
 }
 
@@ -257,7 +261,7 @@ func taskStatusIsBacklog(status string) bool {
 func (a *app) pendingInboxBacklog(projectID string, limit int) []AgentInboxMessage {
 	a.mu.Lock()
 	var out []AgentInboxMessage
-	for _, items := range a.inbox {
+	for _, items := range a.collaborationServiceLocked().InboxSnapshot() {
 		for _, item := range items {
 			if item.ProjectID == projectID && handoffStatusOpen(item.Status) {
 				out = append(out, item)
@@ -277,7 +281,7 @@ func (a *app) pendingInboxBacklog(projectID string, limit int) []AgentInboxMessa
 
 func (a *app) taskBacklog(projectID string, limit int) []Task {
 	a.mu.Lock()
-	items := append([]Task{}, a.tasks[projectID]...)
+	items := append([]Task{}, a.projectTasksLocked().tasks[projectID]...)
 	a.mu.Unlock()
 	var out []Task
 	for _, task := range items {

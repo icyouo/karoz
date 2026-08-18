@@ -14,17 +14,14 @@ func newMemoryGateTestApp(t *testing.T) (*app, Project, Agent) {
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
 	agent := Agent{ID: "karoz", ProjectID: "p1", Nickname: "Karoz"}
 	a := &app{
-		settings:      Settings{DataDir: t.TempDir()},
-		agents:        map[string][]Agent{"p1": {agent}},
-		agentMessages: map[string][]AgentMessage{},
-		agentSessions: map[string]AgentSessionState{},
-		memories:      map[string][]AgentMemoryEntry{},
-		archives:      map[string][]AgentArchiveMessage{},
-		blackboard:    map[string][]AgentBlackboardEntry{},
-		inbox:         map[string][]AgentInboxMessage{},
+		settings:       Settings{DataDir: t.TempDir()},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{"p1": {agent}}),
+		conversation:   newConversationService(),
+		memoryStore:    newMemoryStore(),
 	}
+	initializeResidentToolsForTest(t, a)
 	now := time.Now().UTC()
-	a.memories[projectAgentKey("p1", "karoz")] = []AgentMemoryEntry{
+	a.memoryStoreLocked().entries[projectAgentKey("p1", "karoz")] = []AgentMemoryEntry{
 		{ID: "fact-pg", ProjectID: "p1", AgentID: "karoz", Layer: "fact", State: "active", Summary: "Postgres is the durable store", Detail: "All project state lives in Postgres 16.", CreatedAt: now, UpdatedAt: now},
 	}
 	return a, project, agent

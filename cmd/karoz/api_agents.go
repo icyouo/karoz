@@ -97,13 +97,11 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 		return
 	}
 	if len(parts) == 2 && parts[1] == "memory" && r.Method == http.MethodGet {
-		writeJSON(w, a.activeMemoriesFor(project.ID, agent.ID, "", 100))
+		writeJSON(w, a.memorySummaries(a.visibleActiveMemoriesFor(project.ID, agent.ID, 100)))
 		return
 	}
 	if len(parts) == 2 && parts[1] == "archive" && r.Method == http.MethodGet {
-		a.mu.Lock()
-		items := append([]AgentArchiveMessage{}, a.archives[projectAgentKey(project.ID, agent.ID)]...)
-		a.mu.Unlock()
+		items := a.conversationServiceLocked().ArchivedMessagesFor(projectAgentKey(project.ID, agent.ID))
 		if items == nil {
 			items = []AgentArchiveMessage{}
 		}

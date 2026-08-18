@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -54,12 +53,12 @@ func (a *app) handleFolderDialog(w http.ResponseWriter, r *http.Request) {
 		prompt = "Choose a folder"
 	}
 	script := `POSIX path of (choose folder with prompt ` + strconvQuoteAppleScript(prompt) + `)`
-	out, err := exec.CommandContext(r.Context(), "osascript", "-e", script).Output()
+	result, err := a.runCapturedCommand(r.Context(), "", "osascript", "-e", script)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("choose folder: %w", err))
 		return
 	}
-	path := filepath.Clean(strings.TrimSpace(string(out)))
+	path := filepath.Clean(strings.TrimSpace(result.Output()))
 	if path == "." || path == "" {
 		writeError(w, http.StatusBadRequest, errors.New("no folder selected"))
 		return
@@ -100,11 +99,11 @@ func (a *app) updateSettings(req SettingsUpdateRequest) error {
 	if root == "" {
 		return errors.New("projects_root is required")
 	}
-	if a.settingsUpdateBeforeRegistryHook != nil {
-		a.settingsUpdateBeforeRegistryHook()
+	if hook := a.projectRegistryLocked().settingsUpdateBeforeRegistryHook; hook != nil {
+		hook()
 	}
-	a.projectRegistrationMu.Lock()
-	defer a.projectRegistrationMu.Unlock()
+	a.projectRegistryLocked().registrationMu.Lock()
+	defer a.projectRegistryLocked().registrationMu.Unlock()
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return fmt.Errorf("create projects root: %w", err)
 	}
@@ -189,8 +188,8 @@ func (a *app) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err := os.Stat(a.settings.ProjectsRoot)
 	writeJSON(w, Diagnostics{
-		CodexCLI:       toolStatus("codex"),
-		ClaudeCLI:      toolStatus("claude"),
+		CodexCLI:       a.toolStatus("codex"),
+		ClaudeCLI:      a.toolStatus("claude"),
 		ProjectsRootOK: err == nil,
 	})
 }

@@ -33,9 +33,6 @@ func (a *app) bootstrap() error {
 	if err := a.loadArtifacts(); err != nil {
 		return err
 	}
-	if err := a.loadArchives(); err != nil {
-		return err
-	}
 	if err := a.loadMemories(); err != nil {
 		return err
 	}
@@ -51,13 +48,7 @@ func (a *app) bootstrap() error {
 	if err := a.loadAgentRoutes(); err != nil {
 		return err
 	}
-	if err := a.loadAgentMessages(); err != nil {
-		return err
-	}
-	if err := a.loadAgentTranscripts(); err != nil {
-		return err
-	}
-	if err := a.loadAgentSessions(); err != nil {
+	if err := a.loadAgentSessionEvents(); err != nil {
 		return err
 	}
 	if err := a.loadMonitors(); err != nil {
@@ -91,7 +82,7 @@ func (a *app) loadArtifacts() error {
 	if err != nil {
 		return err
 	}
-	a.artifacts = map[string][]Artifact{}
+	loaded := map[string][]Artifact{}
 	for _, project := range projects {
 		var items []Artifact
 		found, loadErr := persistenceadapter.NewJSONStore(filepath.Join(project.Path, ".karoz")).Load("artifacts.json", &items)
@@ -99,11 +90,11 @@ func (a *app) loadArtifacts() error {
 			return loadErr
 		}
 		if found {
-			a.artifacts[project.ID] = items
+			loaded[project.ID] = items
 		}
 	}
 	changed := false
-	for projectID, artifacts := range a.artifacts {
+	for projectID, artifacts := range loaded {
 		for i := range artifacts {
 			if artifacts[i].Revision <= 0 {
 				artifacts[i].Revision = 1
@@ -123,8 +114,11 @@ func (a *app) loadArtifacts() error {
 			}
 			artifacts[i].Previewable = artifactPreviewable(artifacts[i].MimeType)
 		}
-		a.artifacts[projectID] = artifacts
+		loaded[projectID] = artifacts
 	}
+	a.mu.Lock()
+	a.artifactCatalogLocked().artifacts = loaded
+	a.mu.Unlock()
 	if changed {
 		return a.saveArtifacts()
 	}
@@ -143,8 +137,9 @@ func (a *app) saveArtifacts() error {
 	// Resolve project paths before taking a.mu: projectByID locks a.mu
 	// internally (applyProjectAlias), so it cannot run while a.mu is held.
 	a.mu.Lock()
-	projectIDs := make([]string, 0, len(a.artifacts))
-	for projectID := range a.artifacts {
+	catalog := a.artifactCatalogLocked()
+	projectIDs := make([]string, 0, len(catalog.artifacts))
+	for projectID := range catalog.artifacts {
 		projectIDs = append(projectIDs, projectID)
 	}
 	a.mu.Unlock()
@@ -160,8 +155,9 @@ func (a *app) saveArtifacts() error {
 	// concurrent saves cannot snapshot and write artifacts.json out of order.
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	catalog = a.artifactCatalogLocked()
 	for projectID, path := range projectPaths {
-		if err := persistenceadapter.NewJSONStore(filepath.Join(path, ".karoz")).Save("artifacts.json", a.artifacts[projectID], 0644); err != nil {
+		if err := persistenceadapter.NewJSONStore(filepath.Join(path, ".karoz")).Save("artifacts.json", catalog.artifacts[projectID], 0644); err != nil {
 			return err
 		}
 	}
@@ -187,88 +183,88 @@ func (a *app) saveSettings() error {
 }
 
 func (a *app) loadProjectAliases() error {
-	found, err := a.loadJSON("project-aliases.json", &a.projectAliases)
+	loaded := map[string]string{}
+	found, err := a.loadJSON("project-aliases.json", &loaded)
 	if err != nil {
 		return err
 	}
 	if !found {
-		if a.projectAliases == nil {
-			a.projectAliases = map[string]string{}
-		}
-		return nil
+		loaded = map[string]string{}
 	}
-	if a.projectAliases == nil {
-		a.projectAliases = map[string]string{}
-	}
+	a.mu.Lock()
+	a.projectRegistryLocked().aliases = loaded
+	a.mu.Unlock()
 	return nil
 }
 
 func (a *app) saveProjectAliases() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.projectAliases == nil {
-		a.projectAliases = map[string]string{}
-	}
-	return a.saveJSON("project-aliases.json", a.projectAliases, 0644)
+	return a.saveJSON("project-aliases.json", a.projectRegistryLocked().aliases, 0644)
 }
 
 func (a *app) loadTasks() error {
-	_, err := a.loadJSON("tasks.json", &a.tasks)
+	loaded := map[string][]Task{}
+	_, err := a.loadJSON("tasks.json", &loaded)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.projectTasksLocked().tasks = loaded
+	a.mu.Unlock()
 	return err
 }
 
 func (a *app) saveTasks() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.saveJSON("tasks.json", a.tasks, 0644)
+	return a.saveJSON("tasks.json", a.projectTasksLocked().tasks, 0644)
 }
 
 func (a *app) loadAgents() error {
-	_, err := a.loadJSON("agents.json", &a.agents)
+	loaded := map[string][]Agent{}
+	_, err := a.loadJSON("agents.json", &loaded)
 	if err != nil {
 		return err
 	}
-	if a.agents == nil {
-		a.agents = map[string][]Agent{}
-	}
+	a.mu.Lock()
+	a.agentDirectoryLocked().agents = loaded
+	a.mu.Unlock()
 	return nil
 }
 
 func (a *app) saveAgents() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.saveJSON("agents.json", a.agents, 0644)
-}
-
-func (a *app) loadArchives() error {
-	_, err := a.loadJSON("agent-archive-messages.json", &a.archives)
-	return err
-}
-
-func (a *app) saveArchives() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.saveJSON("agent-archive-messages.json", a.archives, 0644)
+	return a.saveJSON("agents.json", a.agentDirectoryLocked().agents, 0644)
 }
 
 func (a *app) loadMemories() error {
-	_, err := a.loadJSON("agent-memory.json", &a.memories)
-	return err
+	loaded := map[string][]AgentMemoryEntry{}
+	_, err := a.loadJSON("agent-memory.json", &loaded)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.memoryStoreLocked().entries = loaded
+	a.mu.Unlock()
+	return nil
 }
 
 func (a *app) saveMemories() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.saveJSON("agent-memory.json", a.memories, 0644)
+	return a.saveJSON("agent-memory.json", a.memoryStoreLocked().entries, 0644)
 }
 
 func (a *app) loadBlackboard() error {
-	found, err := a.loadJSON("agent-blackboard.json", &a.blackboard)
+	loaded := map[string][]AgentBlackboardEntry{}
+	found, err := a.loadJSON("agent-blackboard.json", &loaded)
 	if err != nil || !found {
 		return err
 	}
 	changed := false
-	for projectID, entries := range a.blackboard {
+	for projectID, entries := range loaded {
 		for i := range entries {
 			if strings.TrimSpace(entries[i].SourceType) == "" {
 				entries[i].SourceType = blackboardSourceAgentReport
@@ -283,8 +279,9 @@ func (a *app) loadBlackboard() error {
 				changed = true
 			}
 		}
-		a.blackboard[projectID] = entries
+		loaded[projectID] = entries
 	}
+	a.collaborationServiceLocked().ReplaceBlackboard(loaded)
 	if changed {
 		return a.saveBlackboard()
 	}
@@ -295,25 +292,25 @@ func (a *app) saveBlackboard() error {
 	if strings.TrimSpace(a.settings.DataDir) == "" {
 		return nil
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.saveJSON("agent-blackboard.json", a.blackboard, 0644)
+	return a.saveJSON("agent-blackboard.json", a.collaborationServiceLocked().BlackboardSnapshot(), 0644)
 }
 
 func (a *app) loadInbox() error {
-	found, err := a.loadJSON("agent-inbox.json", &a.inbox)
+	loaded := map[string][]AgentInboxMessage{}
+	found, err := a.loadJSON("agent-inbox.json", &loaded)
 	if err != nil || !found {
 		return err
 	}
 	changed := false
-	for key, messages := range a.inbox {
+	for key, messages := range loaded {
 		for i := range messages {
 			var itemChanged bool
 			messages[i], itemChanged = normalizeHandoffMessage(messages[i])
 			changed = changed || itemChanged
 		}
-		a.inbox[key] = messages
+		loaded[key] = messages
 	}
+	a.collaborationServiceLocked().ReplaceInbox(loaded)
 	if changed {
 		return a.saveInbox()
 	}
@@ -321,108 +318,36 @@ func (a *app) loadInbox() error {
 }
 
 func (a *app) saveInbox() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.saveJSON("agent-inbox.json", a.inbox, 0644)
+	return a.saveJSON("agent-inbox.json", a.collaborationServiceLocked().InboxSnapshot(), 0644)
 }
 
 func (a *app) loadTaskHooks() error {
-	_, err := a.loadJSON("task-hooks.json", &a.taskHooks)
-	return err
+	loaded := map[string][]TaskRuntimeHook{}
+	_, err := a.loadJSON("task-hooks.json", &loaded)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.projectTasksLocked().hooks = loaded
+	a.mu.Unlock()
+	return nil
 }
 
 func (a *app) saveTaskHooks() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.saveJSON("task-hooks.json", a.taskHooks, 0644)
+	return a.saveJSON("task-hooks.json", a.projectTasksLocked().hooks, 0644)
 }
 
 func (a *app) loadAgentRoutes() error {
-	_, err := a.loadJSON("agent-routes.json", &a.agentRoutes)
+	loaded := map[string][]AgentRoute{}
+	_, err := a.loadJSON("agent-routes.json", &loaded)
+	a.collaborationServiceLocked().ReplaceAllRoutes(loaded)
 	return err
 }
 
 func (a *app) saveAgentRoutes() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.saveJSON("agent-routes.json", a.agentRoutes, 0644)
-}
-
-func (a *app) loadAgentMessages() error {
-	found, err := a.loadJSON("agent-messages.json", &a.agentMessages)
-	if err != nil || !found {
-		return err
-	}
-	changed := false
-	for key, messages := range a.agentMessages {
-		for i := range messages {
-			if messages[i].Seq <= 0 {
-				messages[i].Seq = int64(i + 1)
-				changed = true
-			}
-			if strings.TrimSpace(messages[i].SessionID) == "" {
-				parts := strings.SplitN(key, "/", 2)
-				if len(parts) == 2 {
-					messages[i].SessionID = residentSessionID(parts[0], parts[1])
-					changed = true
-				}
-			}
-		}
-		a.agentMessages[key] = messages
-	}
-	if changed {
-		return a.saveAgentMessages()
-	}
-	return nil
-}
-
-func (a *app) saveAgentMessages() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.saveJSON("agent-messages.json", a.agentMessages, 0644)
-}
-
-func (a *app) loadAgentTranscripts() error {
-	_, err := a.loadJSON("agent-transcripts.json", &a.agentTranscripts)
-	if err != nil {
-		return err
-	}
-	if a.agentTranscripts == nil {
-		a.agentTranscripts = map[string][]AgentTranscriptItem{}
-	}
-	return nil
-}
-
-func (a *app) saveAgentTranscripts() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.saveJSON("agent-transcripts.json", a.agentTranscripts, 0644)
-}
-
-func (a *app) loadAgentSessions() error {
-	_, err := a.loadJSON("agent-session-state.json", &a.agentSessions)
-	if err != nil {
-		return err
-	}
-	changed := false
-	for key, state := range a.agentSessions {
-		normalized := normalizeResidentSummary(state.ResidentSummary, 6000)
-		if normalized != state.ResidentSummary {
-			state.ResidentSummary = normalized
-			a.agentSessions[key] = state
-			changed = true
-		}
-	}
-	if changed {
-		return a.saveAgentSessions()
-	}
-	return nil
-}
-
-func (a *app) saveAgentSessions() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.saveJSON("agent-session-state.json", a.agentSessions, 0644)
+	return a.saveJSON("agent-routes.json", a.collaborationServiceLocked().RoutesSnapshot(), 0644)
 }
 
 func (a *app) appendTaskLog(projectID, taskID, line string) {

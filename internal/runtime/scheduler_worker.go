@@ -88,7 +88,8 @@ func (worker *SchedulerWorker) Run(ctx context.Context, key string) {
 		// available and its Run-owned context is bound. A busy-agent wait has a
 		// separate deadline above, so it cannot eat into provider/tool work or
 		// the final-response reserve.
-		runCtx, cancel := context.WithTimeout(boundCtx, job.Timeout(worker.defaultTimeout))
+		timeoutMS := job.TimeoutMS
+		runCtx, cancel := DeadlineFromMilliseconds(&timeoutMS, worker.defaultTimeout).Bind(boundCtx)
 		if err := runCtx.Err(); err != nil {
 			cancel()
 			if worker.hooks.Finish != nil {

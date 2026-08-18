@@ -1,11 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	processdomain "github.com/karoz/karoz/internal/process"
@@ -14,7 +15,7 @@ import (
 func (a *app) agentMessagesFor(projectID, agentID string) []AgentMessage {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	out := append([]AgentMessage{}, a.agentMessages[projectAgentKey(projectID, agentID)]...)
+	out := a.conversationServiceLocked().MessagesFor(projectAgentKey(projectID, agentID))
 	return out
 }
 
@@ -111,8 +112,8 @@ func (a *app) admitProcessTerminalMessage(event RuntimeEvent) (bool, error) {
 	if err := validateProcessRuntimeEvent(event); err != nil {
 		return false, err
 	}
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -127,7 +128,7 @@ func (a *app) admitProcessTerminalMessage(event RuntimeEvent) (bool, error) {
 		Body:      processTerminalMessageBody(event),
 		CreatedAt: event.CreatedAt,
 	}
-	for key, messages := range a.agentMessages {
+	for key, messages := range a.conversationServiceLocked().MessageSnapshot() {
 		if !strings.HasPrefix(key, event.ProjectID+"/") {
 			continue
 		}
@@ -147,11 +148,15 @@ func (a *app) admitProcessTerminalMessage(event RuntimeEvent) (bool, error) {
 		}
 	}
 	key := projectAgentKey(event.ProjectID, targetID)
-	previous := append([]AgentMessage{}, a.agentMessages[key]...)
+	previousEvents := a.conversationServiceLocked().EventsFor(key)
+	previousMessages := a.conversationServiceLocked().MessagesFor(key)
+	previousTranscripts := a.conversationServiceLocked().TranscriptsFor(key)
 	expected.Seq = a.nextAgentTranscriptSequenceLocked(event.ProjectID, targetID)
-	a.agentMessages[key] = append(a.agentMessages[key], expected)
-	if err := a.saveJSON("agent-messages.json", a.agentMessages, 0644); err != nil {
-		a.agentMessages[key] = previous
+	a.appendAgentSessionEventLocked(newAgentMessageSessionEvent(expected, agentTranscriptAppendMetadata{}))
+	if err := a.saveAgentSessionEventsLocked(); err != nil {
+		a.conversationServiceLocked().Replace(key, previousEvents)
+		a.conversationServiceLocked().ReplaceMessages(key, previousMessages)
+		a.conversationServiceLocked().ReplaceTranscripts(key, previousTranscripts)
 		return false, err
 	}
 	if err := a.processRuntimePersistenceFail(processPersistAfterTerminalMessage); err != nil {
@@ -162,8 +167,8 @@ func (a *app) admitProcessTerminalMessage(event RuntimeEvent) (bool, error) {
 
 func (a *app) processTerminalMessageTargetLocked(projectID, ownerID string) string {
 	key := projectAgentKey(projectID, ownerID)
-	if !a.backgroundOwnerDeleting[key] {
-		for _, agent := range a.agents[projectID] {
+	if !a.agentRuntimeLocked().backgroundOwnerDeleting[key] {
+		for _, agent := range a.agentDirectoryLocked().agents[projectID] {
 			if agent.ID == ownerID {
 				return ownerID
 			}
@@ -219,8 +224,9 @@ func (a *app) appendAgentMessageForRun(projectID, agentID, runID, role, intent, 
 func (a *app) appendAgentMessageForRunWithTranscript(projectID, agentID, runID, role, intent, body string, metadata agentTranscriptAppendMetadata) (AgentMessage, bool) {
 	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
-	run, ok := a.agentRuns[key]
-	if !ok || !run.State.Active() || strings.TrimSpace(runID) == "" || run.ID != runID || a.agentRunCancelling[key] == runID {
+	runtime := a.agentRuntimeLocked()
+	run, ok := runtime.runs[key]
+	if !ok || !run.State.Active() || strings.TrimSpace(runID) == "" || run.ID != runID || runtime.cancelling[key] == runID {
 		a.mu.Unlock()
 		return AgentMessage{}, false
 	}
@@ -240,7 +246,7 @@ func (a *app) latestMatchingAgentMessage(projectID, agentID, role, intent, body 
 	wantBody := strings.TrimSpace(body)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	items := a.agentMessages[key]
+	items := a.conversationServiceLocked().MessagesFor(key)
 	for index := len(items) - 1; index >= 0; index-- {
 		item := items[index]
 		if item.Role == role && item.Intent == intent && item.Body == wantBody {
@@ -255,10 +261,6 @@ func (a *app) appendAgentMessageLocked(projectID, agentID, role, intent, body st
 }
 
 func (a *app) appendAgentMessageLockedWithTranscript(projectID, agentID, role, intent, body string, metadata agentTranscriptAppendMetadata) AgentMessage {
-	if a.agentMessages == nil {
-		a.agentMessages = map[string][]AgentMessage{}
-	}
-	key := projectAgentKey(projectID, agentID)
 	session := a.ensureAgentSessionLocked(projectID, agentID)
 	msg := AgentMessage{
 		ID:        messageID(),
@@ -271,17 +273,14 @@ func (a *app) appendAgentMessageLockedWithTranscript(projectID, agentID, role, i
 		Body:      strings.TrimSpace(body),
 		CreatedAt: time.Now().UTC(),
 	}
-	a.agentMessages[key] = append(a.agentMessages[key], msg)
-	a.appendTranscriptForAgentMessageLocked(msg, metadata)
+	a.appendAgentSessionEventLocked(newAgentMessageSessionEvent(msg, metadata))
 	return msg
 }
 
 func (a *app) persistAppendedAgentMessage(projectID, agentID string) {
-	if err := a.saveAgentMessages(); err != nil {
-		log.Printf("save agent messages: %v", err)
-	}
-	if err := a.saveAgentTranscripts(); err != nil {
-		log.Printf("save agent transcripts: %v", err)
+	if err := a.saveAgentSessionEvents(); err != nil {
+		log.Printf("save agent session events: %v", err)
+		return
 	}
 	a.maybeCheckpointAgentSession(projectID, agentID, false)
 }
@@ -293,11 +292,9 @@ func (a *app) ensureAgentSession(projectID, agentID string) AgentSessionState {
 }
 
 func (a *app) ensureAgentSessionLocked(projectID, agentID string) AgentSessionState {
-	if a.agentSessions == nil {
-		a.agentSessions = map[string]AgentSessionState{}
-	}
 	key := projectAgentKey(projectID, agentID)
-	if state, ok := a.agentSessions[key]; ok && strings.TrimSpace(state.SessionID) != "" {
+	conversations := a.conversationServiceLocked()
+	if state, ok := conversations.Session(key); ok && strings.TrimSpace(state.SessionID) != "" {
 		return state
 	}
 	state := AgentSessionState{
@@ -307,7 +304,7 @@ func (a *app) ensureAgentSessionLocked(projectID, agentID string) AgentSessionSt
 		ShortWindowStartSeq: 1,
 		LastCheckpointAt:    time.Now().UTC(),
 	}
-	a.agentSessions[key] = state
+	conversations.SetSession(key, state)
 	return state
 }
 
@@ -317,19 +314,31 @@ func (a *app) agentSessionState(projectID, agentID string) AgentSessionState {
 
 func (a *app) updateAgentSessionState(state AgentSessionState) {
 	a.mu.Lock()
-	a.agentSessions[projectAgentKey(state.ProjectID, state.AgentID)] = state
+	a.conversationServiceLocked().SetSession(projectAgentKey(state.ProjectID, state.AgentID), state)
+	a.appendAgentSessionEventLocked(newAgentCheckpointSessionEvent(state))
 	a.mu.Unlock()
-	if err := a.saveAgentSessions(); err != nil {
-		log.Printf("save agent sessions: %v", err)
+	if err := a.saveAgentSessionEvents(); err != nil {
+		log.Printf("save agent session event: %v", err)
 	}
 }
 
 func (a *app) maybeCheckpointAgentSession(projectID, agentID string, force bool) {
 	const shortWindowLimit int64 = 50
 	const summaryLimit = 24
-	state := a.agentSessionState(projectID, agentID)
-	messages := a.agentMessagesFor(projectID, agentID)
+	key := projectAgentKey(projectID, agentID)
+	a.mu.Lock()
+	state, stateExists := a.conversationServiceLocked().Session(key)
+	if !stateExists || strings.TrimSpace(state.SessionID) == "" {
+		state = AgentSessionState{
+			SessionID:           residentSessionID(projectID, agentID),
+			ProjectID:           projectID,
+			AgentID:             agentID,
+			ShortWindowStartSeq: 1,
+		}
+	}
+	messages := a.conversationServiceLocked().MessagesFor(key)
 	if len(messages) == 0 {
+		a.mu.Unlock()
 		return
 	}
 	maxSeq := messages[len(messages)-1].Seq
@@ -340,10 +349,12 @@ func (a *app) maybeCheckpointAgentSession(projectID, agentID string, force bool)
 		maxSeq = messages[len(messages)-1].Seq
 	}
 	if !force && maxSeq-state.ShortWindowStartSeq+1 <= shortWindowLimit {
+		a.mu.Unlock()
 		return
 	}
 	boundarySeq := maxSeq - shortWindowLimit
 	if boundarySeq <= state.BoundarySeq {
+		a.mu.Unlock()
 		return
 	}
 	nextSeq := state.CoveredSeqEnd + 1
@@ -352,6 +363,9 @@ func (a *app) maybeCheckpointAgentSession(projectID, agentID string, force bool)
 	}
 	var batch []AgentMessage
 	for _, msg := range messages {
+		if strings.TrimSpace(msg.SessionID) != "" && msg.SessionID != state.SessionID {
+			continue
+		}
 		if msg.Seq >= nextSeq && msg.Seq <= boundarySeq {
 			batch = append(batch, msg)
 			if len(batch) >= summaryLimit {
@@ -360,41 +374,362 @@ func (a *app) maybeCheckpointAgentSession(projectID, agentID string, force bool)
 		}
 	}
 	if len(batch) == 0 {
+		a.mu.Unlock()
 		return
 	}
-	a.archiveAgentMessages(projectID, agentID, messages, state.ShortWindowStartSeq, batch[len(batch)-1].Seq)
-	var b strings.Builder
-	if previous := normalizeResidentSummary(state.ResidentSummary, 2400); previous != "" {
-		b.WriteString("Earlier checkpoint highlights:\n")
-		b.WriteString(previous)
-		b.WriteString("\n\n")
+	claim := agentCheckpointClaim{
+		ProjectID:             projectID,
+		AgentID:               agentID,
+		SessionID:             state.SessionID,
+		CapturedVersion:       state.LongTermVersion,
+		CapturedCoveredSeqEnd: state.CoveredSeqEnd,
+		SeqStart:              batch[0].Seq,
+		SeqEnd:                batch[len(batch)-1].Seq,
+		PreviousSummary:       normalizeResidentSummary(state.ResidentSummary, checkpointPreviousSummaryMaxChars),
+		Messages:              append([]AgentMessage{}, batch...),
+		Agent:                 a.checkpointAgentConfigLocked(projectID, agentID),
 	}
-	b.WriteString("Recent checkpoint highlights:\n")
-	for _, msg := range batch {
-		line := compactAgentSummaryLine(msg)
-		if line == "" {
+	claimKey := checkpointClaimKey(claim)
+	runtime := a.agentRuntimeLocked()
+	if runtime.checkpointClaims == nil {
+		runtime.checkpointClaims = map[string]agentCheckpointClaim{}
+	}
+	if runtime.checkpointRetryNotBefore == nil {
+		runtime.checkpointRetryNotBefore = map[string]time.Time{}
+	}
+	if _, active := runtime.checkpointClaims[claimKey]; active {
+		a.mu.Unlock()
+		return
+	}
+	if retryAt := runtime.checkpointRetryNotBefore[claimKey]; time.Now().Before(retryAt) {
+		a.mu.Unlock()
+		return
+	}
+	runtime.checkpointClaims[claimKey] = claim
+	a.mu.Unlock()
+
+	go a.runAgentCheckpoint(claim)
+}
+
+const (
+	checkpointPreviousSummaryMaxChars = 2400
+	checkpointMessageBodyMaxChars     = 1000
+	checkpointPromptMaxChars          = 14000
+	checkpointOutputMaxChars          = 6000
+	checkpointDefaultTimeout          = 30 * time.Second
+	checkpointDefaultRetryDelay       = 500 * time.Millisecond
+)
+
+type agentCheckpointClaim struct {
+	ProjectID             string
+	AgentID               string
+	SessionID             string
+	CapturedVersion       int64
+	CapturedCoveredSeqEnd int64
+	SeqStart              int64
+	SeqEnd                int64
+	PreviousSummary       string
+	Messages              []AgentMessage
+	Agent                 Agent
+}
+
+func checkpointClaimKey(claim agentCheckpointClaim) string {
+	return projectAgentKey(claim.ProjectID, claim.AgentID) + "/" + claim.SessionID
+}
+
+func sameCheckpointClaim(left, right agentCheckpointClaim) bool {
+	return left.ProjectID == right.ProjectID &&
+		left.AgentID == right.AgentID &&
+		left.SessionID == right.SessionID &&
+		left.CapturedVersion == right.CapturedVersion &&
+		left.CapturedCoveredSeqEnd == right.CapturedCoveredSeqEnd &&
+		left.SeqStart == right.SeqStart &&
+		left.SeqEnd == right.SeqEnd
+}
+
+func (a *app) checkpointAgentConfigLocked(projectID, agentID string) Agent {
+	for _, candidate := range a.agentDirectoryLocked().agents[projectID] {
+		if candidate.ID == agentID {
+			return normalizeAgentModelConfig(candidate)
+		}
+	}
+	return normalizeAgentModelConfig(Agent{ID: agentID, ProjectID: projectID})
+}
+
+func (a *app) runAgentCheckpoint(claim agentCheckpointClaim) {
+	started := time.Now()
+	base := a.supervisorCtx
+	if base == nil {
+		base = context.Background()
+	}
+	timeout := a.checkpointTimeout
+	if timeout <= 0 {
+		timeout = checkpointDefaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(base, timeout)
+	defer cancel()
+
+	var output strings.Builder
+	var outputMu sync.Mutex
+	outputChars := 0
+	request := CLI2APIRequest{
+		Provider:       claim.Agent.Provider,
+		Model:          claim.Agent.Model,
+		ThinkingEffort: claim.Agent.ThinkingEffort,
+		Prompt:         buildAgentCheckpointPrompt(claim),
+		Workdir:        a.settings.ProjectsRoot,
+		Mode:           "checkpoint",
+		NoTools:        true,
+	}
+	// The provider request is bounded by ctx. Independently cap streamed text
+	// at the collector boundary so no provider adapter can enlarge persisted
+	// checkpoint state.
+	callbacks := AgentStreamCallbacks{OnDelta: func(delta string) {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		remaining := checkpointOutputMaxChars - outputChars
+		if remaining <= 0 {
+			return
+		}
+		runes := []rune(delta)
+		if len(runes) > remaining {
+			runes = runes[:remaining]
+		}
+		output.WriteString(string(runes))
+		outputChars += len(runes)
+	}}
+	provider := a.residentModelProvider()
+	if capabilities := provider.Capabilities(request); !capabilities.Streaming {
+		a.releaseAgentCheckpoint(claim, true)
+		logCheckpointResult(claim, started, "unsupported_provider")
+		return
+	}
+	err := provider.Stream(ctx, request, ResidentToolContext{
+		Agent: claim.Agent, Workdir: request.Workdir, TurnType: "checkpoint", EnforcePolicy: true,
+	}, callbacks)
+	if err != nil {
+		status := "provider_error"
+		if ctx.Err() == context.DeadlineExceeded {
+			status = "timeout"
+		} else if ctx.Err() != nil {
+			status = "cancelled"
+		}
+		a.releaseAgentCheckpoint(claim, true)
+		logCheckpointResult(claim, started, status)
+		return
+	}
+	if ctx.Err() != nil {
+		status := "cancelled"
+		if ctx.Err() == context.DeadlineExceeded {
+			status = "timeout"
+		}
+		a.releaseAgentCheckpoint(claim, true)
+		logCheckpointResult(claim, started, status)
+		return
+	}
+	outputMu.Lock()
+	summary := normalizeResidentSummary(output.String(), checkpointOutputMaxChars)
+	outputMu.Unlock()
+	if summary == "" {
+		a.releaseAgentCheckpoint(claim, true)
+		logCheckpointResult(claim, started, "empty")
+		return
+	}
+	if isCheckpointProviderBoilerplate(summary) {
+		a.releaseAgentCheckpoint(claim, true)
+		logCheckpointResult(claim, started, "provider_boilerplate")
+		return
+	}
+	status := a.commitAgentCheckpoint(claim, summary)
+	logCheckpointResult(claim, started, status)
+	if status == "success" {
+		a.maybeCheckpointAgentSession(claim.ProjectID, claim.AgentID, false)
+	}
+}
+
+// isCheckpointProviderBoilerplate rejects only short, operational provider
+// setup responses. It deliberately avoids broad words such as "provider" or
+// "unavailable", which may be legitimate facts in a continuity summary.
+func isCheckpointProviderBoilerplate(output string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(output), " "))
+	if normalized == "" || len(normalized) > 512 {
+		return false
+	}
+	if strings.HasPrefix(normalized, "karoz received the request.") &&
+		strings.Contains(normalized, "cli2api is running in stub mode") &&
+		strings.Contains(normalized, "set karoz_agent_provider=") {
+		return true
+	}
+	switch strings.TrimRight(normalized, ".; ") {
+	case "codex oauth credentials were not found",
+		"claude cli is not logged in and anthropic_api_key is not configured":
+		return true
+	}
+	for _, prefix := range []string{
+		"provider unavailable;",
+		"provider unavailable:",
+		"provider unavailable.",
+		"provider is unavailable;",
+		"provider is unavailable:",
+		"provider is unavailable.",
+		"selected provider unavailable;",
+		"selected provider unavailable:",
+		"selected provider unavailable.",
+		"selected provider is unavailable;",
+		"selected provider is unavailable:",
+		"selected provider is unavailable.",
+		"provider not configured;",
+		"provider not configured:",
+		"provider not configured.",
+		"provider is not configured;",
+		"provider is not configured:",
+		"provider is not configured.",
+		"no provider configured;",
+		"no provider configured:",
+		"no provider configured.",
+		"no provider is configured;",
+		"no provider is configured:",
+		"no provider is configured.",
+	} {
+		if !strings.HasPrefix(normalized, prefix) {
 			continue
 		}
-		b.WriteString("- ")
-		b.WriteString(line)
+		remainder := strings.TrimSpace(strings.TrimPrefix(normalized, prefix))
+		return strings.HasPrefix(remainder, "configure ") ||
+			strings.HasPrefix(remainder, "please configure ") ||
+			strings.HasPrefix(remainder, "set ")
+	}
+	return false
+}
+
+func buildAgentCheckpointPrompt(claim agentCheckpointClaim) string {
+	var b strings.Builder
+	b.WriteString("Checkpoint mode. Return only a compact factual continuity summary for the next model turn.\n")
+	b.WriteString("Capture decisions, durable facts, completed work, pending work, and unresolved questions.\n")
+	b.WriteString("Preserve uncertainty explicitly. Do not infer or invent facts. Do not request or call tools.\n")
+	if claim.PreviousSummary != "" {
+		b.WriteString("\nPrevious checkpoint summary:\n")
+		b.WriteString(limitString(claim.PreviousSummary, checkpointPreviousSummaryMaxChars))
 		b.WriteString("\n")
-		if b.Len() >= 5200 {
+	}
+	b.WriteString("\nExact archived message batch:\n")
+	for _, msg := range claim.Messages {
+		body := strings.Join(strings.Fields(promptAgentMessageBody(msg)), " ")
+		if body == "" {
+			continue
+		}
+		line := fmt.Sprintf("seq=%d role=%s intent=%s body=%s\n",
+			msg.Seq, strings.TrimSpace(msg.Role), strings.TrimSpace(msg.Intent),
+			limitString(body, checkpointMessageBodyMaxChars))
+		remaining := checkpointPromptMaxChars - b.Len()
+		if remaining <= 0 {
 			break
 		}
+		b.WriteString(limitString(line, remaining))
 	}
-	state.ResidentSummary = limitString(b.String(), 6000)
-	if state.CoveredSeqStart <= 0 {
-		state.CoveredSeqStart = batch[0].Seq
+	return limitString(b.String(), checkpointPromptMaxChars)
+}
+
+func (a *app) releaseAgentCheckpoint(claim agentCheckpointClaim, retry bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := checkpointClaimKey(claim)
+	if current, ok := a.agentRuntimeLocked().checkpointClaims[key]; ok && sameCheckpointClaim(current, claim) {
+		delete(a.agentRuntimeLocked().checkpointClaims, key)
+		if retry {
+			a.deferCheckpointRetryLocked(key)
+		}
 	}
-	state.CoveredSeqEnd = batch[len(batch)-1].Seq
-	state.BoundarySeq = state.CoveredSeqEnd
-	state.ShortWindowStartSeq = state.BoundarySeq + 1
-	if minStart := maxSeq - shortWindowLimit + 1; minStart > state.ShortWindowStartSeq {
-		state.ShortWindowStartSeq = minStart
+}
+
+func (a *app) commitAgentCheckpoint(claim agentCheckpointClaim, summary string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	claimKey := checkpointClaimKey(claim)
+	runtime := a.agentRuntimeLocked()
+	active, ok := runtime.checkpointClaims[claimKey]
+	if !ok || !sameCheckpointClaim(active, claim) {
+		return "stale"
 	}
-	state.LongTermVersion++
-	state.LastCheckpointAt = time.Now().UTC()
-	a.updateAgentSessionState(state)
+	defer delete(runtime.checkpointClaims, claimKey)
+
+	key := projectAgentKey(claim.ProjectID, claim.AgentID)
+	current, exists := a.conversationServiceLocked().Session(key)
+	if !exists || strings.TrimSpace(current.SessionID) == "" {
+		current = AgentSessionState{
+			SessionID:           residentSessionID(claim.ProjectID, claim.AgentID),
+			ProjectID:           claim.ProjectID,
+			AgentID:             claim.AgentID,
+			ShortWindowStartSeq: 1,
+		}
+	}
+	if current.SessionID != claim.SessionID ||
+		current.LongTermVersion != claim.CapturedVersion ||
+		current.CoveredSeqEnd != claim.CapturedCoveredSeqEnd {
+		return "stale"
+	}
+	nextState := current
+	nextState.ResidentSummary = summary
+	if nextState.CoveredSeqStart <= 0 {
+		nextState.CoveredSeqStart = claim.SeqStart
+	}
+	nextState.CoveredSeqEnd = claim.SeqEnd
+	nextState.BoundarySeq = claim.SeqEnd
+	nextState.ShortWindowStartSeq = claim.SeqEnd + 1
+	nextState.LongTermVersion++
+	nextState.LastCheckpointAt = time.Now().UTC()
+
+	nextSessions := a.conversationServiceLocked().SessionSnapshot()
+	nextSessions[key] = nextState
+	if err := a.saveCheckpointSessionsSnapshot(nextSessions); err != nil {
+		a.deferCheckpointRetryLocked(claimKey)
+		return "save_failed"
+	}
+	previousEvents := a.conversationServiceLocked().EventsFor(key)
+	a.appendAgentSessionEventLocked(newAgentCheckpointSessionEvent(nextState))
+	if err := a.saveAgentSessionEventsLocked(); err != nil {
+		a.conversationServiceLocked().Replace(key, previousEvents)
+		a.deferCheckpointRetryLocked(claimKey)
+		return "save_failed"
+	}
+	a.conversationServiceLocked().ReplaceSessions(nextSessions)
+	delete(runtime.checkpointRetryNotBefore, claimKey)
+	return "success"
+}
+
+func (a *app) deferCheckpointRetryLocked(claimKey string) {
+	runtime := a.agentRuntimeLocked()
+	if runtime.checkpointRetryNotBefore == nil {
+		runtime.checkpointRetryNotBefore = map[string]time.Time{}
+	}
+	delay := a.checkpointRetryDelay
+	if delay <= 0 {
+		delay = checkpointDefaultRetryDelay
+	}
+	runtime.checkpointRetryNotBefore[claimKey] = time.Now().Add(delay)
+}
+
+func cloneAgentSessions(source map[string]AgentSessionState) map[string]AgentSessionState {
+	cloned := make(map[string]AgentSessionState, len(source)+1)
+	for key, state := range source {
+		cloned[key] = state
+	}
+	return cloned
+}
+
+func (a *app) saveCheckpointSessionsSnapshot(snapshot map[string]AgentSessionState) error {
+	if save := a.conversationServiceLocked().checkpointSessionSaveOverride; save != nil {
+		return save(snapshot)
+	}
+	return nil
+}
+
+func logCheckpointResult(claim agentCheckpointClaim, started time.Time, status string) {
+	log.Printf(
+		"agent checkpoint project=%s agent=%s session=%s seq_start=%d seq_end=%d count=%d duration_ms=%d status=%s",
+		claim.ProjectID, claim.AgentID, claim.SessionID, claim.SeqStart, claim.SeqEnd,
+		len(claim.Messages), time.Since(started).Milliseconds(), status,
+	)
 }
 
 func normalizeResidentSummary(value string, maxChars int) string {
@@ -430,50 +765,6 @@ func normalizeResidentSummary(value string, maxChars int) string {
 		kept[len(keptReversed)-1-i] = keptReversed[i]
 	}
 	return strings.Join(kept, "\n")
-}
-
-func (a *app) archiveAgentMessages(projectID, agentID string, messages []AgentMessage, startSeq, endSeq int64) {
-	if endSeq < startSeq {
-		return
-	}
-	key := projectAgentKey(projectID, agentID)
-	now := time.Now().UTC()
-	a.mu.Lock()
-	existing := map[int64]bool{}
-	for _, archived := range a.archives[key] {
-		existing[archived.Seq] = true
-	}
-	for _, msg := range messages {
-		if msg.Seq < startSeq || msg.Seq > endSeq || existing[msg.Seq] {
-			continue
-		}
-		a.archives[key] = append(a.archives[key], AgentArchiveMessage{
-			ID:         msg.ID,
-			ProjectID:  msg.ProjectID,
-			AgentID:    msg.AgentID,
-			SessionID:  msg.SessionID,
-			Seq:        msg.Seq,
-			Role:       msg.Role,
-			Intent:     msg.Intent,
-			Body:       msg.Body,
-			CreatedAt:  msg.CreatedAt,
-			ArchivedAt: now,
-		})
-	}
-	sort.SliceStable(a.archives[key], func(i, j int) bool { return a.archives[key][i].Seq < a.archives[key][j].Seq })
-	a.mu.Unlock()
-	if err := a.saveArchives(); err != nil {
-		log.Printf("save archives: %v", err)
-	}
-}
-
-func compactAgentSummaryLine(msg AgentMessage) string {
-	content := promptAgentMessageBody(msg)
-	if content == "" {
-		return ""
-	}
-	content = strings.Join(strings.Fields(content), " ")
-	return fmt.Sprintf("seq %d %s: %s", msg.Seq, strings.TrimSpace(msg.Role), limitString(content, 280))
 }
 
 func emptyAgentOutputMessage(agent Agent) string {

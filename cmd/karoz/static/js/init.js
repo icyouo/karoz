@@ -57,9 +57,10 @@
     });
     $('createTask').onclick = async () => {
       if (!state.project) return notify('Select a project first.', 'error');
-      const t = await api('/api/projects/' + state.project.id + '/tasks', { method: 'POST', body: JSON.stringify({ type: $('taskType').value, title: $('taskTitle').value, goal: $('taskGoal').value }) });
+      const t = await api('/api/projects/' + state.project.id + '/tasks', { method: 'POST', body: JSON.stringify({ type: $('taskType').value, title: $('taskTitle').value, goal: $('taskGoal').value, max_runtime_ms: Number($('taskMaxRuntime').value) }) });
       $('taskTitle').value = '';
       $('taskGoal').value = '';
+	  $('taskMaxRuntime').value = '3600000';
       closeModal('newTaskModal');
       await loadTasks(); await selectTask(t);
       notify('Task created.', 'success');

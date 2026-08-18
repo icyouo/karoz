@@ -163,12 +163,12 @@ func bootstrapProcessTerminalOutboxApp(
 		t.Fatal(err)
 	}
 	for _, project := range projects {
-		a.agents[project.ID] = []Agent{
+		a.agentDirectoryLocked().agents[project.ID] = []Agent{
 			{ID: "karoz", ProjectID: project.ID, Name: "Karoz"},
 			{ID: "agent", ProjectID: project.ID, Name: "Agent"},
 		}
 	}
-	if err := a.loadAgentMessages(); err != nil {
+	if err := a.loadAgentSessionEvents(); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.bootstrapProcessRuntime(); err != nil {
@@ -206,7 +206,7 @@ func TestProcessTerminalOutboxPersistsMessageBeforeAcknowledging(t *testing.T) {
 		nil,
 	)
 	t.Cleanup(func() { stopOutboxAppForCrash(a) })
-	if len(a.runtimeWatchers) != 0 {
+	if len(a.agentRuntimeLocked().runtimeWatchers) != 0 {
 		t.Fatal("test unexpectedly has runtime watchers")
 	}
 	messages := a.agentMessagesFor(projects[0].ID, "agent")
@@ -262,7 +262,7 @@ func TestProcessTerminalOutboxUsesKarozAfterOwnerDeletion(t *testing.T) {
 	}
 	persistPendingTerminalProcess(t, runtime, projects[0], "deleted-owner", processdomain.StateKilled, 1, time.Now().UTC())
 	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: projectsRoot})
-	a.agents[projects[0].ID] = []Agent{{ID: "karoz", ProjectID: projects[0].ID, Name: "Karoz"}}
+	a.agentDirectoryLocked().agents[projects[0].ID] = []Agent{{ID: "karoz", ProjectID: projects[0].ID, Name: "Karoz"}}
 	if err := a.bootstrapProcessRuntime(); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestProcessTerminalOutboxUsesKarozAfterOwnerDeletion(t *testing.T) {
 func TestProcessTerminalMessageAdmissionIsIdempotentAndExact(t *testing.T) {
 	project := runtimeTestProject(t, "project")
 	a := newApp(Settings{DataDir: t.TempDir()})
-	a.agents[project.ID] = []Agent{{ID: "agent", ProjectID: project.ID}}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{ID: "agent", ProjectID: project.ID}}
 	exitCode := 4
 	event := RuntimeEvent{
 		ID: processTerminalEventID("exact"), ProjectID: project.ID,
@@ -360,7 +360,7 @@ func TestProcessTerminalOutboxHasNoSeparateTerminalCapacityStore(t *testing.T) {
 	key := projectAgentKey(projects[0].ID, "agent")
 	a.mu.Lock()
 	for index := 0; index < 4096; index++ {
-		a.agentMessages[key] = append(a.agentMessages[key], AgentMessage{
+		a.conversation.AppendMessage(key, AgentMessage{
 			ID: fmt.Sprintf("prior-%04d", index), ProjectID: projects[0].ID,
 			AgentID: "agent", Role: "system", Intent: "note", Body: "prior",
 			Seq: int64(index + 1), CreatedAt: time.Now().UTC(),
@@ -423,7 +423,7 @@ func TestProcessTerminalOutboxPersistsPendingOutputGapBeforeRelease(t *testing.T
 	)
 	a := newApp(Settings{DataDir: dataDir, ProjectsRoot: project.Path})
 	a.processRuntime = runtime
-	a.agents[project.ID] = []Agent{{
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{
 		ID: "agent", ProjectID: project.ID, Name: "Agent",
 	}}
 	t.Cleanup(a.supervisorCancel)

@@ -24,8 +24,8 @@ func (a *app) claimScriptProbeMonitor(
 	if receiptID == "" || mutationID == "" {
 		return Monitor{}, errors.New("script probe requires approval_receipt_id and mutation_id")
 	}
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	if err := a.requireMonitorOwner(project, owner.ID); err != nil {
 		return Monitor{}, err
 	}

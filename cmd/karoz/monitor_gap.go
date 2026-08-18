@@ -28,8 +28,8 @@ func (a *app) acknowledgeMonitorGap(
 		return Monitor{}, errors.New("source gap acknowledgement is incomplete")
 	}
 
-	a.backgroundOwnerMu.Lock()
-	defer a.backgroundOwnerMu.Unlock()
+	a.agentRuntimeLocked().backgroundOwnerMu.Lock()
+	defer a.agentRuntimeLocked().backgroundOwnerMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	items := a.monitors[project.ID]

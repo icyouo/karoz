@@ -30,7 +30,7 @@ func (a *app) handleProjectAudit(w http.ResponseWriter, r *http.Request, project
 func (a *app) handoffsForProject(projectID string) []AgentInboxMessage {
 	a.mu.Lock()
 	var out []AgentInboxMessage
-	for _, items := range a.inbox {
+	for _, items := range a.collaborationServiceLocked().InboxSnapshot() {
 		for _, item := range items {
 			if item.ProjectID == projectID {
 				out = append(out, item)
@@ -55,7 +55,7 @@ func (a *app) handoffsForProject(projectID string) []AgentInboxMessage {
 func (a *app) activeMemoriesForProject(projectID string) []AgentMemoryEntry {
 	a.mu.Lock()
 	var out []AgentMemoryEntry
-	for _, items := range a.memories {
+	for _, items := range a.memoryStoreLocked().entries {
 		for _, item := range items {
 			if item.ProjectID != projectID || item.State != "active" || item.ArchivedAt != nil {
 				continue

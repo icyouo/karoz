@@ -79,12 +79,14 @@ func TestToolBudgetExhaustionLeavesFinalResponseReserve(t *testing.T) {
 
 type budgetTestWire struct {
 	steps          int
+	toolsSeen      int
 	limitMessage   string
 	finalRemaining chan time.Duration
 }
 
-func (wire *budgetTestWire) step(context.Context, []map[string]any, AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {
+func (wire *budgetTestWire) step(_ context.Context, tools []map[string]any, _ AgentStreamCallbacks) (residentStepOutput, []AgentInterrupt, error) {
 	wire.steps++
+	wire.toolsSeen += len(tools)
 	return residentStepOutput{ToolCalls: []codexToolCall{{ID: "tool-1", CallID: "tool-1", Name: "bash"}}}, nil, nil
 }
 

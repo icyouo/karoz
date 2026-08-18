@@ -12,7 +12,7 @@ import (
 func (a *app) groupsForProject(projectID string) []AgentGroup {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return append([]AgentGroup{}, a.groups[projectID]...)
+	return a.collaborationServiceLocked().GroupsFor(projectID)
 }
 
 func (a *app) groupByID(projectID, groupID string) (AgentGroup, bool) {
@@ -58,11 +58,7 @@ func (a *app) upsertAgentGroup(projectID, groupID, name, templateID, coordinator
 		return AgentGroup{}, errors.New("coordinator must be a group member")
 	}
 	sort.Strings(memberIDs)
-	a.mu.Lock()
-	if a.groups == nil {
-		a.groups = map[string][]AgentGroup{}
-	}
-	items := append([]AgentGroup{}, a.groups[projectID]...)
+	items := a.collaborationServiceLocked().GroupsFor(projectID)
 	group := AgentGroup{ID: groupID, ProjectID: projectID, Name: firstNonEmpty(name, groupID), TemplateID: templateID, CoordinatorAgentID: coordinatorAgentID, MemberAgentIDs: memberIDs, Version: 1, CreatedAt: now, UpdatedAt: now}
 	found := false
 	for i := range items {
@@ -78,8 +74,7 @@ func (a *app) upsertAgentGroup(projectID, groupID, name, templateID, coordinator
 	if !found {
 		items = append(items, group)
 	}
-	a.groups[projectID] = items
-	a.mu.Unlock()
+	a.collaborationServiceLocked().ReplaceGroups(projectID, items)
 	if err := a.saveGroupsForProject(projectID); err != nil {
 		// Some unit-level and embedded callers construct an in-memory project
 		// without registering it in the project scanner. Keep the group usable in
@@ -109,18 +104,22 @@ func (a *app) transferGroupCoordinator(project Project, groupID, coordinatorAgen
 	group.Version++
 	group.UpdatedAt = time.Now().UTC()
 	a.mu.Lock()
-	for i := range a.groups[project.ID] {
-		if a.groups[project.ID][i].ID == groupID {
-			a.groups[project.ID][i] = group
+	groups := a.collaborationServiceLocked().GroupsFor(project.ID)
+	for i := range groups {
+		if groups[i].ID == groupID {
+			groups[i] = group
 		}
 	}
-	for i := range a.plans[project.ID] {
-		if a.plans[project.ID][i].OwnerType == "group" && a.plans[project.ID][i].OwnerGroupID == groupID && a.plans[project.ID][i].Status != PlanCompleted && a.plans[project.ID][i].Status != PlanCancelled {
-			a.plans[project.ID][i].OwnerAgentID = coordinatorAgentID
-			a.plans[project.ID][i].Version++
-			a.plans[project.ID][i].UpdatedAt = group.UpdatedAt
+	a.collaborationServiceLocked().ReplaceGroups(project.ID, groups)
+	plans := a.collaborationServiceLocked().PlansFor(project.ID)
+	for i := range plans {
+		if plans[i].OwnerType == "group" && plans[i].OwnerGroupID == groupID && plans[i].Status != PlanCompleted && plans[i].Status != PlanCancelled {
+			plans[i].OwnerAgentID = coordinatorAgentID
+			plans[i].Version++
+			plans[i].UpdatedAt = group.UpdatedAt
 		}
 	}
+	a.collaborationServiceLocked().ReplacePlans(project.ID, plans)
 	a.mu.Unlock()
 	if err := a.saveGroupsForProject(project.ID); err != nil {
 		return AgentGroup{}, err
@@ -227,12 +226,7 @@ func (a *app) sendToGroup(projectID, sourceAgentID, parentRunID string, args map
 	if id, _ := decoded["message_id"].(string); id != "" {
 		message.AgentInboxMessageID = id
 	}
-	a.mu.Lock()
-	if a.groupInbox == nil {
-		a.groupInbox = map[string][]GroupInboxMessage{}
-	}
-	a.groupInbox[projectID] = append(a.groupInbox[projectID], message)
-	a.mu.Unlock()
+	a.collaborationServiceLocked().AppendGroupInbox(projectID, message)
 	if err := a.saveGroupInboxForProject(projectID); err != nil {
 		return toolJSON(map[string]any{"error": "save_failed", "message": err.Error()})
 	}

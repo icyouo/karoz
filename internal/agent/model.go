@@ -47,6 +47,7 @@ type Capabilities struct {
 	CanManageRoutes       bool
 	CanInspectProjectWide bool
 	CanReconcileBacklog   bool
+	CanReviewArtifacts    bool
 }
 
 func IsKaroz(agent Agent) bool {
@@ -76,6 +77,7 @@ func CapabilitiesFor(agent Agent) Capabilities {
 	capabilities := Capabilities{
 		CanDirectChat: true, CanCreateTasks: true, CanDelegate: true, CanCreateArtifacts: true,
 		CanDesignArtifacts: IsDesign(agent),
+		CanReviewArtifacts: IsReviewer(agent),
 	}
 	if IsKaroz(agent) {
 		capabilities.CanManageAgents = true
@@ -114,11 +116,8 @@ type AgentMessage struct {
 
 // AgentTranscriptItem is the provider-neutral record used to rebuild model
 // context. AgentMessage remains the stable visible-chat API; a transcript item
-// adds Run and tool correlation without changing that response shape.
-//
-// New items are persisted separately from visible messages. Older
-// agent-messages.json records are converted lazily by the runtime, so loading a
-// pre-transcript Studio never rewrites or discards its chat history.
+// adds Run and tool correlation without changing that response shape. Both are
+// projections of the canonical session event log.
 type AgentTranscriptItem struct {
 	ID            string    `json:"id"`
 	MessageID     string    `json:"message_id,omitempty"`
@@ -177,19 +176,22 @@ type AgentArchiveMessage struct {
 }
 
 type AgentMemoryEntry struct {
-	ID         string         `json:"id"`
-	ProjectID  string         `json:"project_id"`
-	AgentID    string         `json:"agent_id"`
-	SessionID  string         `json:"session_id"`
-	Layer      string         `json:"layer"`
-	State      string         `json:"state"`
-	Priority   int            `json:"priority"`
-	Summary    string         `json:"summary"`
-	Detail     string         `json:"detail"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
-	ArchivedAt *time.Time     `json:"archived_at,omitempty"`
+	ID             string         `json:"id"`
+	ProjectID      string         `json:"project_id"`
+	AgentID        string         `json:"agent_id"`
+	SessionID      string         `json:"session_id"`
+	Layer          string         `json:"layer"`
+	Scope          string         `json:"scope,omitempty"`
+	State          string         `json:"state"`
+	Priority       int            `json:"priority"`
+	Summary        string         `json:"summary"`
+	Detail         string         `json:"detail"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+	SupersedesID   string         `json:"supersedes_id,omitempty"`
+	SupersededByID string         `json:"superseded_by_id,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	ArchivedAt     *time.Time     `json:"archived_at,omitempty"`
 }
 
 type AgentRoute struct {

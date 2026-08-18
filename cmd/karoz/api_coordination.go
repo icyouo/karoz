@@ -28,9 +28,7 @@ func (a *app) handleGroups(w http.ResponseWriter, r *http.Request, project Proje
 		return
 	}
 	if len(parts) == 2 && parts[1] == "inbox" && r.Method == http.MethodGet {
-		a.mu.Lock()
-		items := append([]GroupInboxMessage{}, a.groupInbox[project.ID]...)
-		a.mu.Unlock()
+		items := a.collaborationServiceLocked().GroupInboxFor(project.ID)
 		filtered := make([]GroupInboxMessage, 0)
 		for _, item := range items {
 			if item.GroupID == parts[0] {

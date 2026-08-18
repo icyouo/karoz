@@ -114,18 +114,16 @@ func (l *agentRunLedger) subscribe(after int64) ([]agentRunLedgerEvent, bool, in
 func (a *app) createRunLedger(runID string) *agentRunLedger {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.agentRunLedgers == nil {
-		a.agentRunLedgers = map[string]*agentRunLedger{}
-	}
-	for terminalLedgerCount(a.agentRunLedgers) >= agentRunTerminalLedgerLimit {
-		oldestID := oldestTerminalLedgerID(a.agentRunLedgers)
+	runtime := a.agentRuntimeLocked()
+	for terminalLedgerCount(runtime.ledgers) >= agentRunTerminalLedgerLimit {
+		oldestID := oldestTerminalLedgerID(runtime.ledgers)
 		if oldestID == "" {
 			break
 		}
-		delete(a.agentRunLedgers, oldestID)
+		delete(runtime.ledgers, oldestID)
 	}
 	l := newAgentRunLedger()
-	a.agentRunLedgers[runID] = l
+	runtime.ledgers[runID] = l
 	return l
 }
 
@@ -158,7 +156,7 @@ func oldestTerminalLedgerID(ledgers map[string]*agentRunLedger) string {
 func (a *app) runLedger(runID string) *agentRunLedger {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.agentRunLedgers[runID]
+	return a.agentRuntimeLocked().ledgers[runID]
 }
 
 func (a *app) streamRunLedger(w http.ResponseWriter, r *http.Request, runID string, after int64) {

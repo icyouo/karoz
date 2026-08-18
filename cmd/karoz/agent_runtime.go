@@ -177,11 +177,10 @@ func (a *app) agentRouteAllowed(projectID, fromAgentID, toAgentID, intent string
 func (a *app) activeMemoriesFor(projectID, agentID, layer string, limit int) []AgentMemoryEntry {
 	key := projectAgentKey(projectID, agentID)
 	a.mu.Lock()
-	items := append([]AgentMemoryEntry{}, a.memories[key]...)
+	items := append([]AgentMemoryEntry{}, a.memoryStoreLocked().entries[key]...)
 	a.mu.Unlock()
 	var out []AgentMemoryEntry
-	for i := len(items) - 1; i >= 0; i-- {
-		item := items[i]
+	for _, item := range items {
 		if item.State != "active" || item.ArchivedAt != nil {
 			continue
 		}
@@ -189,9 +188,67 @@ func (a *app) activeMemoriesFor(projectID, agentID, layer string, limit int) []A
 			continue
 		}
 		out = append(out, item)
-		if limit > 0 && len(out) >= limit {
-			break
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if layer == "pending" && out[i].Priority != out[j].Priority {
+			return out[i].Priority > out[j].Priority
 		}
+		left := out[i].UpdatedAt
+		if left.IsZero() {
+			left = out[i].CreatedAt
+		}
+		right := out[j].UpdatedAt
+		if right.IsZero() {
+			right = out[j].CreatedAt
+		}
+		if !left.Equal(right) {
+			return left.After(right)
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	if out == nil {
+		return []AgentMemoryEntry{}
+	}
+	return out
+}
+
+// visibleActiveMemoriesFor is the API/UI projection for one agent. It keeps
+// the agent's own active memory private while adding active project-scoped
+// facts authored by peers in the same project.
+func (a *app) visibleActiveMemoriesFor(projectID, agentID string, limit int) []AgentMemoryEntry {
+	a.mu.Lock()
+	var out []AgentMemoryEntry
+	for _, entries := range a.memoryStoreLocked().entries {
+		for _, entry := range entries {
+			if entry.ProjectID != projectID || entry.State != "active" || entry.ArchivedAt != nil {
+				continue
+			}
+			if entry.AgentID == agentID ||
+				(entry.Layer == "fact" && memoryEntryScope(entry) == "project") {
+				out = append(out, entry)
+			}
+		}
+	}
+	a.mu.Unlock()
+	sort.SliceStable(out, func(i, j int) bool {
+		left := out[i].UpdatedAt
+		if left.IsZero() {
+			left = out[i].CreatedAt
+		}
+		right := out[j].UpdatedAt
+		if right.IsZero() {
+			right = out[j].CreatedAt
+		}
+		if !left.Equal(right) {
+			return left.After(right)
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	if out == nil {
 		return []AgentMemoryEntry{}
@@ -200,9 +257,7 @@ func (a *app) activeMemoriesFor(projectID, agentID, layer string, limit int) []A
 }
 
 func (a *app) blackboardFor(projectID string, limit int) []AgentBlackboardEntry {
-	a.mu.Lock()
-	items := append([]AgentBlackboardEntry{}, a.blackboard[projectID]...)
-	a.mu.Unlock()
+	items := a.collaborationServiceLocked().BlackboardFor(projectID)
 	sort.SliceStable(items, func(i, j int) bool {
 		left := items[i].UpdatedAt
 		if left.IsZero() {
@@ -249,9 +304,7 @@ func (a *app) pendingInboxFor(projectID, agentID string, limit int) []AgentInbox
 
 func (a *app) inboxFor(projectID, agentID string, limit int) []AgentInboxMessage {
 	key := projectAgentKey(projectID, agentID)
-	a.mu.Lock()
-	items := append([]AgentInboxMessage{}, a.inbox[key]...)
-	a.mu.Unlock()
+	items := a.collaborationServiceLocked().InboxFor(key)
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
 	if limit > 0 && len(items) > limit {
 		items = items[:limit]

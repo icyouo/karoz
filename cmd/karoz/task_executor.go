@@ -21,6 +21,9 @@ func (a *app) runDevelopmentTask(ctx context.Context, project Project, task Task
 		if taskWasCancelled(ctx) {
 			return a.cancelledTask(project, task, "worktree preparation")
 		}
+		if taskTimedOut(ctx) {
+			return a.timedOutTask(project, task, "worktree preparation")
+		}
 		return a.failDevelopmentTask(project, task, "prepare task worktree failed", err)
 	}
 	worktree := task.WorktreePath
@@ -29,7 +32,7 @@ func (a *app) runDevelopmentTask(ctx context.Context, project Project, task Task
 	prompt := a.buildDevelopmentPrompt(project, task)
 	a.appendTaskLog(project.ID, task.ID, "invoking task executor provider="+provider)
 	a.appendTaskLog(project.ID, task.ID, "task executor workdir "+worktree)
-	cli, err := invokeTaskExecutor(ctx, CLI2APIRequest{
+	cli, err := a.invokeTaskExecutor(ctx, CLI2APIRequest{
 		Provider: provider,
 		Prompt:   prompt,
 		Workdir:  worktree,
@@ -39,13 +42,16 @@ func (a *app) runDevelopmentTask(ctx context.Context, project Project, task Task
 		if taskWasCancelled(ctx) {
 			return a.cancelledTask(project, task, "task executor")
 		}
+		if taskTimedOut(ctx) {
+			return a.timedOutTask(project, task, "task executor")
+		}
 		return a.failDevelopmentTask(project, task, "task executor failed", err)
 	}
 	if strings.TrimSpace(cli.Output) != "" {
 		a.appendTaskLog(project.ID, task.ID, cli.Output)
 	}
 
-	diffStat := gitOutput(worktree, "status", "--short")
+	diffStat := a.gitOutput(worktree, "status", "--short")
 	if strings.TrimSpace(diffStat) == "" {
 		task.Status = "failed"
 		task.FailureSummary = "task executor completed without repository changes"
@@ -61,11 +67,14 @@ func (a *app) runDevelopmentTask(ctx context.Context, project Project, task Task
 		a.updateTask(project.ID, task)
 		a.saveOrLog("tasks", a.saveTasks())
 		a.appendTaskLog(project.ID, task.ID, "running verification: "+verify)
-		out, verifyErr := runTaskCommand(ctx, worktree, "sh", "-lc", verify)
+		out, verifyErr := a.runTaskCommand(ctx, worktree, "sh", "-lc", verify)
 		a.appendTaskLog(project.ID, task.ID, out)
 		if verifyErr != nil {
 			if taskWasCancelled(ctx) {
 				return a.cancelledTask(project, task, "verification")
+			}
+			if taskTimedOut(ctx) {
+				return a.timedOutTask(project, task, "verification")
 			}
 			return a.failDevelopmentTask(project, task, "verification failed", verifyErr)
 		}
@@ -74,22 +83,31 @@ func (a *app) runDevelopmentTask(ctx context.Context, project Project, task Task
 	if taskWasCancelled(ctx) {
 		return a.cancelledTask(project, task, "before commit")
 	}
-	if out, addErr := runTaskCommand(ctx, worktree, "git", "add", "-A"); addErr != nil {
+	if taskTimedOut(ctx) {
+		return a.timedOutTask(project, task, "before commit")
+	}
+	if out, addErr := a.runTaskCommand(ctx, worktree, "git", "add", "-A"); addErr != nil {
 		if taskWasCancelled(ctx) {
 			return a.cancelledTask(project, task, "git add")
+		}
+		if taskTimedOut(ctx) {
+			return a.timedOutTask(project, task, "git add")
 		}
 		a.appendTaskLog(project.ID, task.ID, out)
 		return a.failDevelopmentTask(project, task, "git add failed", addErr)
 	}
 	commitMessage := "karoz: " + task.Title
-	if out, commitErr := runTaskCommand(ctx, worktree, "git", "commit", "-m", commitMessage); commitErr != nil {
+	if out, commitErr := a.runTaskCommand(ctx, worktree, "git", "commit", "-m", commitMessage); commitErr != nil {
 		if taskWasCancelled(ctx) {
 			return a.cancelledTask(project, task, "git commit")
+		}
+		if taskTimedOut(ctx) {
+			return a.timedOutTask(project, task, "git commit")
 		}
 		a.appendTaskLog(project.ID, task.ID, out)
 		return a.failDevelopmentTask(project, task, "git commit failed", commitErr)
 	}
-	task.CommitSHA = gitOutput(worktree, "rev-parse", "HEAD")
+	task.CommitSHA = a.gitOutput(worktree, "rev-parse", "HEAD")
 	if task.CommitSHA == "" {
 		return a.failDevelopmentTask(project, task, "resolve task commit failed", errors.New("git rev-parse HEAD returned no commit"))
 	}
@@ -100,6 +118,9 @@ func (a *app) runDevelopmentTask(ctx context.Context, project Project, task Task
 
 	if taskWasCancelled(ctx) {
 		return a.cancelledTask(project, task, "before integration")
+	}
+	if taskTimedOut(ctx) {
+		return a.timedOutTask(project, task, "before integration")
 	}
 	return a.integrateTaskWithContext(ctx, project, task, false)
 }
@@ -120,7 +141,7 @@ func (a *app) prepareDevelopmentTask(ctx context.Context, project Project, task 
 	lock.Lock()
 	defer lock.Unlock()
 
-	baseBranch, baseCommit, err := resolveProjectBase(ctx, project)
+	baseBranch, baseCommit, err := a.resolveProjectBase(ctx, project)
 	if err != nil {
 		return task, err
 	}
@@ -154,7 +175,7 @@ func (a *app) prepareDevelopmentTask(ctx context.Context, project Project, task 
 	}
 	a.appendTaskLog(project.ID, task.ID, "creating worktree "+worktree)
 	a.appendTaskLog(project.ID, task.ID, "base branch "+baseBranch+" at "+baseCommit)
-	if out, addErr := runTaskCommand(ctx, project.Path, "git", "worktree", "add", "-B", branch, worktree, baseCommit); addErr != nil {
+	if out, addErr := a.runTaskCommand(ctx, project.Path, "git", "worktree", "add", "-B", branch, worktree, baseCommit); addErr != nil {
 		a.appendTaskLog(project.ID, task.ID, out)
 		return task, fmt.Errorf("create worktree: %w", addErr)
 	}
@@ -169,12 +190,12 @@ func minTaskIDPrefix(id string) int {
 	return 10
 }
 
-func resolveProjectBase(ctx context.Context, project Project) (string, string, error) {
-	head, err := runTaskCommand(ctx, project.Path, "git", "rev-parse", "--verify", "HEAD^{commit}")
+func (a *app) resolveProjectBase(ctx context.Context, project Project) (string, string, error) {
+	head, err := a.runTaskCommand(ctx, project.Path, "git", "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return "", "", errors.New("repository has no initial commit; initialize it yourself before creating a Karoz development task")
 	}
-	branch, err := runTaskCommand(ctx, project.Path, "git", "branch", "--show-current")
+	branch, err := a.runTaskCommand(ctx, project.Path, "git", "branch", "--show-current")
 	if err != nil {
 		return "", "", fmt.Errorf("read primary branch: %w", err)
 	}
@@ -186,15 +207,16 @@ func resolveProjectBase(ctx context.Context, project Project) (string, string, e
 }
 
 func (a *app) projectIntegrationLock(projectID string) *sync.Mutex {
-	a.taskIntegrationLocksMu.Lock()
-	defer a.taskIntegrationLocksMu.Unlock()
-	if a.taskIntegrationLocks == nil {
-		a.taskIntegrationLocks = map[string]*sync.Mutex{}
+	coordinator := a.projectTasksLocked()
+	coordinator.integrationLocksMu.Lock()
+	defer coordinator.integrationLocksMu.Unlock()
+	if coordinator.integrationLocks == nil {
+		coordinator.integrationLocks = map[string]*sync.Mutex{}
 	}
-	lock := a.taskIntegrationLocks[projectID]
+	lock := coordinator.integrationLocks[projectID]
 	if lock == nil {
 		lock = &sync.Mutex{}
-		a.taskIntegrationLocks[projectID] = lock
+		coordinator.integrationLocks[projectID] = lock
 	}
 	return lock
 }
@@ -240,8 +262,8 @@ func (a *app) integrateTask(project Project, task Task, waitForLock bool) Task {
 func (a *app) integrateTaskWithContext(ctx context.Context, project Project, task Task, waitForLock bool) Task {
 	// Test seam: production leaves this nil. It makes the cancellation handoff
 	// boundary independently verifiable without weakening TryLock semantics.
-	if a.taskIntegrationPreLockHook != nil {
-		a.taskIntegrationPreLockHook()
+	if hook := a.projectTasksLocked().integrationPreLockHook; hook != nil {
+		hook()
 	}
 	lock := a.projectIntegrationLock(project.ID)
 	if waitForLock {
@@ -260,6 +282,9 @@ func (a *app) integrateTaskLocked(ctx context.Context, project Project, task Tas
 	var cancelled bool
 	task, cancelled = a.claimTaskIntegration(ctx, project.ID, task.ID)
 	if cancelled {
+		if taskTimedOut(ctx) {
+			return a.timedOutTask(project, task, "before integration")
+		}
 		return a.cancelledTask(project, task, "before integration")
 	}
 	if task.Status == "done" {
@@ -270,11 +295,11 @@ func (a *app) integrateTaskLocked(ctx context.Context, project Project, task Tas
 		return a.blockTaskMerge(project, task, "integration_failed", "task is missing recorded branch or commit metadata")
 	}
 
-	snapshot, reason, detail := inspectPrimaryForMerge(project, task)
+	snapshot, reason, detail := a.inspectPrimaryForMerge(project, task)
 	if reason != "" {
 		return a.blockTaskMerge(project, task, reason, detail)
 	}
-	if alreadyMerged, _ := gitIsAncestor(project.Path, task.CommitSHA, snapshot.head); alreadyMerged {
+	if alreadyMerged, _ := a.gitIsAncestor(project.Path, task.CommitSHA, snapshot.head); alreadyMerged {
 		return a.finishTaskMerge(project, task, "task commit was already present on "+task.BaseBranch)
 	}
 
@@ -283,20 +308,20 @@ func (a *app) integrateTaskLocked(ctx context.Context, project Project, task Tas
 	a.updateTask(project.ID, task)
 	a.saveOrLog("tasks", a.saveTasks())
 	a.appendTaskLog(project.ID, task.ID, "merging recorded task commit "+task.CommitSHA+" into primary branch "+task.BaseBranch)
-	out, err := run(project.Path, "git", "merge", "--no-ff", task.CommitSHA, "-m", "karoz: merge "+task.Title)
+	out, err := a.runTaskCommand(ctx, project.Path, "git", "merge", "--no-ff", task.CommitSHA, "-m", "karoz: merge "+task.Title)
 	if err == nil {
-		if verification := verifyMergedPrimary(project, task); verification != "" {
+		if verification := a.verifyMergedPrimary(project, task); verification != "" {
 			return a.blockTaskMerge(project, task, "integration_failed", "post-merge verification failed: "+verification)
 		}
 		return a.finishTaskMerge(project, task, normalizeTaskType(task.Type)+" task committed and merged into "+task.BaseBranch)
 	}
 
-	conflicts := gitOutput(project.Path, "diff", "--name-only", "--diff-filter=U")
-	abortOut, abortErr := run(project.Path, "git", "merge", "--abort")
+	conflicts := a.gitOutput(project.Path, "diff", "--name-only", "--diff-filter=U")
+	abortOut, abortErr := a.runTaskCommand(ctx, project.Path, "git", "merge", "--abort")
 	if abortErr != nil {
 		return a.blockTaskMerge(project, task, "integration_failed", "merge failed and git merge --abort failed: "+strings.TrimSpace(abortOut))
 	}
-	if restoreReason := verifyPrimarySnapshot(project, snapshot); restoreReason != "" {
+	if restoreReason := a.verifyPrimarySnapshot(project, snapshot); restoreReason != "" {
 		return a.blockTaskMerge(project, task, "integration_failed", "merge abort did not restore primary checkout exactly: "+restoreReason)
 	}
 	if strings.TrimSpace(conflicts) != "" {
@@ -313,8 +338,8 @@ type primarySnapshot struct {
 	status string
 }
 
-func inspectPrimaryForMerge(project Project, task Task) (primarySnapshot, string, string) {
-	branch, err := run(project.Path, "git", "branch", "--show-current")
+func (a *app) inspectPrimaryForMerge(project Project, task Task) (primarySnapshot, string, string) {
+	branch, err := a.runTaskCommand(context.Background(), project.Path, "git", "branch", "--show-current")
 	if err != nil {
 		return primarySnapshot{}, "integration_failed", "cannot read primary branch: " + err.Error()
 	}
@@ -322,70 +347,70 @@ func inspectPrimaryForMerge(project Project, task Task) (primarySnapshot, string
 	if branch != task.BaseBranch {
 		return primarySnapshot{}, "branch_mismatch", fmt.Sprintf("primary checkout is on %q; task was recorded on %q", branch, task.BaseBranch)
 	}
-	status, err := run(project.Path, "git", "status", "--porcelain=v1", "--untracked-files=all")
+	status, err := a.runTaskCommand(context.Background(), project.Path, "git", "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
 		return primarySnapshot{}, "integration_failed", "cannot inspect primary checkout: " + err.Error()
 	}
 	if strings.TrimSpace(status) != "" {
 		return primarySnapshot{}, "workspace_dirty", strings.TrimSpace(status)
 	}
-	head, err := run(project.Path, "git", "rev-parse", "--verify", "HEAD^{commit}")
+	head, err := a.runTaskCommand(context.Background(), project.Path, "git", "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return primarySnapshot{}, "integration_failed", "cannot resolve primary HEAD: " + err.Error()
 	}
 	head = strings.TrimSpace(head)
-	if ok, err := gitIsAncestor(project.Path, task.BaseCommit, head); err != nil || !ok {
+	if ok, err := a.gitIsAncestor(project.Path, task.BaseCommit, head); err != nil || !ok {
 		return primarySnapshot{}, "base_rewritten", "current base no longer contains recorded base commit " + task.BaseCommit
 	}
-	if ok, err := gitIsAncestor(project.Path, task.BaseCommit, task.CommitSHA); err != nil || !ok {
+	if ok, err := a.gitIsAncestor(project.Path, task.BaseCommit, task.CommitSHA); err != nil || !ok {
 		return primarySnapshot{}, "base_rewritten", "task commit does not descend from recorded base commit " + task.BaseCommit
 	}
 	return primarySnapshot{head: head, branch: branch, status: strings.TrimSpace(status)}, "", ""
 }
 
-func verifyPrimarySnapshot(project Project, snapshot primarySnapshot) string {
-	head := gitOutput(project.Path, "rev-parse", "--verify", "HEAD^{commit}")
+func (a *app) verifyPrimarySnapshot(project Project, snapshot primarySnapshot) string {
+	head := a.gitOutput(project.Path, "rev-parse", "--verify", "HEAD^{commit}")
 	if head != snapshot.head {
 		return "HEAD changed from " + snapshot.head + " to " + head
 	}
-	branch := gitOutput(project.Path, "branch", "--show-current")
+	branch := a.gitOutput(project.Path, "branch", "--show-current")
 	if branch != snapshot.branch {
 		return "branch changed from " + snapshot.branch + " to " + branch
 	}
-	status := gitOutput(project.Path, "status", "--porcelain=v1", "--untracked-files=all")
+	status := a.gitOutput(project.Path, "status", "--porcelain=v1", "--untracked-files=all")
 	if status != snapshot.status {
 		return "working tree/index status changed"
 	}
 	return ""
 }
 
-func verifyMergedPrimary(project Project, task Task) string {
-	branch := gitOutput(project.Path, "branch", "--show-current")
+func (a *app) verifyMergedPrimary(project Project, task Task) string {
+	branch := a.gitOutput(project.Path, "branch", "--show-current")
 	if branch != task.BaseBranch {
 		return "branch is " + branch + ", expected " + task.BaseBranch
 	}
-	head := gitOutput(project.Path, "rev-parse", "--verify", "HEAD^{commit}")
+	head := a.gitOutput(project.Path, "rev-parse", "--verify", "HEAD^{commit}")
 	if head == "" {
 		return "cannot resolve primary HEAD"
 	}
-	if ok, err := gitIsAncestor(project.Path, task.CommitSHA, head); err != nil || !ok {
+	if ok, err := a.gitIsAncestor(project.Path, task.CommitSHA, head); err != nil || !ok {
 		return "recorded task commit is not an ancestor of primary HEAD"
 	}
-	if status := gitOutput(project.Path, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
+	if status := a.gitOutput(project.Path, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
 		return "primary checkout is not clean: " + status
 	}
 	return ""
 }
 
-func gitIsAncestor(dir, older, newer string) (bool, error) {
-	_, err := run(dir, "git", "merge-base", "--is-ancestor", older, newer)
+func (a *app) gitIsAncestor(dir, older, newer string) (bool, error) {
+	_, err := a.runTaskCommand(context.Background(), dir, "git", "merge-base", "--is-ancestor", older, newer)
 	if err == nil {
 		return true, nil
 	}
-	if _, verifyErr := run(dir, "git", "rev-parse", "--verify", older+"^{commit}"); verifyErr != nil {
+	if _, verifyErr := a.runTaskCommand(context.Background(), dir, "git", "rev-parse", "--verify", older+"^{commit}"); verifyErr != nil {
 		return false, verifyErr
 	}
-	if _, verifyErr := run(dir, "git", "rev-parse", "--verify", newer+"^{commit}"); verifyErr != nil {
+	if _, verifyErr := a.runTaskCommand(context.Background(), dir, "git", "rev-parse", "--verify", newer+"^{commit}"); verifyErr != nil {
 		return false, verifyErr
 	}
 	return false, nil
@@ -466,11 +491,14 @@ User request:
 
 func (a *app) runDeploymentTask(ctx context.Context, project Project, task Task) Task {
 	a.appendTaskLog(project.ID, task.ID, "running local deployment placeholder")
-	out, err := runTaskCommand(ctx, project.Path, "sh", "-lc", "if [ -f package.json ]; then npm run build; else echo 'No deploy command configured for this project.'; fi")
+	out, err := a.runTaskCommand(ctx, project.Path, "sh", "-lc", "if [ -f package.json ]; then npm run build; else echo 'No deploy command configured for this project.'; fi")
 	a.appendTaskLog(project.ID, task.ID, out)
 	if err != nil {
 		if taskWasCancelled(ctx) {
 			return a.cancelledTask(project, task, "deployment")
+		}
+		if taskTimedOut(ctx) {
+			return a.timedOutTask(project, task, "deployment")
 		}
 		task.Status = "deploy_failed"
 		task.FailureSummary = err.Error()

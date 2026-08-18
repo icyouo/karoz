@@ -91,17 +91,7 @@ func (a *app) markInboxConsumed(projectID, agentID, messageID string) {
 
 func (a *app) updateInboxMessage(projectID, agentID, messageID string, update func(*AgentInboxMessage)) bool {
 	key := projectAgentKey(projectID, agentID)
-	a.mu.Lock()
-	updated := false
-	for i := range a.inbox[key] {
-		if a.inbox[key][i].ID != messageID {
-			continue
-		}
-		update(&a.inbox[key][i])
-		updated = true
-		break
-	}
-	a.mu.Unlock()
+	updated := a.collaborationServiceLocked().UpdateInbox(key, messageID, update)
 	if updated {
 		if err := a.saveInbox(); err != nil {
 			log.Printf("save inbox: %v", err)
@@ -112,9 +102,7 @@ func (a *app) updateInboxMessage(projectID, agentID, messageID string, update fu
 
 func (a *app) inboxMessage(projectID, agentID, messageID string) (AgentInboxMessage, bool) {
 	key := projectAgentKey(projectID, agentID)
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for _, msg := range a.inbox[key] {
+	for _, msg := range a.collaborationServiceLocked().InboxFor(key) {
 		if msg.ID == messageID {
 			return msg, true
 		}
@@ -148,9 +136,8 @@ func (a *app) queueInboxMessage(projectID string, msg AgentInboxMessage) error {
 	msg.DeliveredAt = nil
 	msg.UpdatedAt = time.Now().UTC()
 	key := projectAgentKey(projectID, msg.TargetAgentID)
-	a.mu.Lock()
 	correlationCount := 0
-	for _, items := range a.inbox {
+	for _, items := range a.collaborationServiceLocked().InboxSnapshot() {
 		for _, item := range items {
 			if item.ProjectID == projectID && item.CorrelationID == msg.CorrelationID {
 				correlationCount++
@@ -158,15 +145,14 @@ func (a *app) queueInboxMessage(projectID string, msg AgentInboxMessage) error {
 		}
 	}
 	if correlationCount >= maxCollaborationMessagesPerCorrelation {
-		a.mu.Unlock()
 		return fmt.Errorf("collaboration correlation %s reached message limit %d", msg.CorrelationID, maxCollaborationMessagesPerCorrelation)
 	}
-	a.inbox[key] = append(a.inbox[key], msg)
-	a.mu.Unlock()
+	a.collaborationServiceLocked().AppendInbox(key, msg)
 	if err := a.saveInbox(); err != nil {
 		log.Printf("save inbox: %v", err)
 		return err
 	}
+	a.appendAgentHandoffStateEvent(msg, "", "handoff_created")
 	a.emitRuntimeStateChanged(RuntimeEvent{
 		ID:          randomID(),
 		ProjectID:   projectID,
@@ -202,12 +188,7 @@ func (a *app) appendBlackboardEntry(projectID string, agent Agent, kind, summary
 		RequiresAction:       blackboardEntryRequiresAction(kind, summary, detail),
 	}
 	entry.SourceID = entry.ID
-	a.mu.Lock()
-	if a.blackboard == nil {
-		a.blackboard = map[string][]AgentBlackboardEntry{}
-	}
-	a.blackboard[projectID] = append(a.blackboard[projectID], entry)
-	a.mu.Unlock()
+	a.collaborationServiceLocked().AppendBlackboard(projectID, entry)
 	if err := a.saveBlackboard(); err != nil {
 		log.Printf("save blackboard: %v", err)
 	}

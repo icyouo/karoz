@@ -228,7 +228,7 @@ func TestDisabledProjectProcessSurfacesFailClosed(t *testing.T) {
 	agent := Agent{
 		ID: "owner", ProjectID: project.ID, CreatedAt: time.Now().UTC(),
 	}
-	a.agents[project.ID] = []Agent{agent}
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{agent}
 	if err := a.bootstrapProcessRuntime(); err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,8 @@ func TestProcessReleaseConfigDefaultsAndFailClosedCeilings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if config.Supervisor.MaxConcurrent != 8 ||
-		config.Supervisor.MaxLifetime != time.Hour ||
+		config.Supervisor.DefaultLifetime != time.Hour ||
+		config.Supervisor.MaxLifetime != 0 ||
 		config.Supervisor.LogBytes != 8<<20 ||
 		config.Supervisor.TailLines != 200 ||
 		config.Supervisor.OutputEventBytes != 8<<10 ||
@@ -374,7 +375,7 @@ func TestProcessReleaseConfigDefaultsAndFailClosedCeilings(t *testing.T) {
 
 	invalid := map[string]string{
 		"KAROZ_PROCESS_MAX_CONCURRENT":         "0",
-		"KAROZ_PROCESS_MAX_LIFETIME":           "24h1s",
+		"KAROZ_PROCESS_MAX_LIFETIME":           "nope",
 		"KAROZ_PROCESS_LOG_MAX_BYTES":          "-1",
 		"KAROZ_PROCESS_TAIL_LINES":             "nope",
 		"KAROZ_PROCESS_OUTPUT_EVENT_MAX_BYTES": "65537",
