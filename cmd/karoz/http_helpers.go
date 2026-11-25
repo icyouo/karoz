@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"runtime/debug"
@@ -138,6 +140,36 @@ func (w *recoveryWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+func (w *recoveryWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *recoveryWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("underlying ResponseWriter does not support hijacking")
+	}
+	w.committed = true
+	return hijacker.Hijack()
+}
+
+func isLoopbackHostHeader(hostHeader string) bool {
+	trimmed := strings.TrimSpace(hostHeader)
+	if trimmed == "" {
+		return false
+	}
+	host := trimmed
+	if h, _, err := net.SplitHostPort(trimmed); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func withRecovery(next http.Handler) http.Handler {

@@ -20,6 +20,20 @@ func (a *app) scanProjects() ([]Project, error) {
 	if err != nil {
 		return nil, err
 	}
+	a.mu.Lock()
+	excluded := make(map[string]bool, len(a.settings.ExcludedProjectIDs))
+	for _, id := range a.settings.ExcludedProjectIDs {
+		excluded[strings.TrimSpace(id)] = true
+	}
+	a.mu.Unlock()
+	filtered := projects[:0]
+	for _, project := range projects {
+		if excluded[project.ID] {
+			continue
+		}
+		filtered = append(filtered, project)
+	}
+	projects = filtered
 	for index := range projects {
 		projects[index] = a.applyProjectAlias(projects[index])
 	}
@@ -32,6 +46,33 @@ func (a *app) scanProjects() ([]Project, error) {
 		return left < right
 	})
 	return projects, nil
+}
+
+// removeProjectFromStudio removes a checkout from Karoz's project list without
+// touching the checkout itself. Re-importing the same path restores it.
+func (a *app) removeProjectFromStudio(project Project) error {
+	a.projectRegistryLocked().registrationMu.Lock()
+	defer a.projectRegistryLocked().registrationMu.Unlock()
+
+	a.mu.Lock()
+	previous := a.settings
+	for _, id := range previous.ExcludedProjectIDs {
+		if id == project.ID {
+			a.mu.Unlock()
+			return nil
+		}
+	}
+	proposed := previous
+	proposed.ExcludedProjectIDs = append(append([]string(nil), previous.ExcludedProjectIDs...), project.ID)
+	a.settings = proposed
+	a.mu.Unlock()
+	if err := a.saveSettings(); err != nil {
+		a.mu.Lock()
+		a.settings = previous
+		a.mu.Unlock()
+		return fmt.Errorf("save removed project: %w", err)
+	}
+	return nil
 }
 
 func scanProjectsForSettings(settings Settings) ([]Project, error) {
@@ -227,6 +268,12 @@ func (a *app) importProject(req ProjectCreateRequest) (Project, error) {
 		append(append([]string(nil), previousSettings.ExtraProjectsRoots...), projectPath),
 		previousSettings.ProjectsRoot,
 	)
+	desiredSettings.ExcludedProjectIDs = make([]string, 0, len(previousSettings.ExcludedProjectIDs))
+	for _, id := range previousSettings.ExcludedProjectIDs {
+		if id != project.ID {
+			desiredSettings.ExcludedProjectIDs = append(desiredSettings.ExcludedProjectIDs, id)
+		}
+	}
 	desiredAliases := cloneProjectAliases(previousAliases)
 	desiredAliases[project.ID] = name
 	a.mu.Unlock()

@@ -26,6 +26,8 @@ func NormalizeHandoffStatus(status string) HandoffStatus {
 		return HandoffStatus(strings.ToLower(strings.TrimSpace(status)))
 	case "acked", "reported", "consumed":
 		return HandoffClosed
+	case "canceled", "cancelled":
+		return HandoffDeclined
 	default:
 		return HandoffDelivered
 	}
@@ -48,7 +50,7 @@ func ValidHandoffTransition(from, to string) bool {
 	}
 	switch fromStatus {
 	case HandoffQueued:
-		return toStatus == HandoffDelivered || toStatus == HandoffFailed || toStatus == HandoffClosed
+		return toStatus == HandoffDelivered || toStatus == HandoffFailed || toStatus == HandoffClosed || toStatus == HandoffDeclined
 	case HandoffDelivered:
 		return toStatus == HandoffClaimed || toStatus == HandoffWorking || toStatus == HandoffReplied || toStatus == HandoffDeclined || toStatus == HandoffFailed || toStatus == HandoffClosed
 	case HandoffClaimed:

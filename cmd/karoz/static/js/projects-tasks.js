@@ -6,14 +6,68 @@
     function renderProjects() {
       const box = $('projects'); box.innerHTML = '';
       state.projects.forEach(p => {
+        const row = document.createElement('div');
+        row.className = 'project-row' + (state.project && state.project.id === p.id ? ' active' : '');
         const b = document.createElement('button');
         b.className = 'project' + (state.project && state.project.id === p.id ? ' active' : '');
         const initial = (p.name || '?').trim().slice(0, 1).toUpperCase();
         b.innerHTML = '<span class="initial">' + initial + '</span><span class="project-text"><strong>' + escapeHTML(p.name) + '</strong><div class="muted">' + escapeHTML((p.workspace_type || 'main') + ' · ' + p.default_branch) + '</div></span>';
         b.onclick = () => selectProject(p, { push: true });
-        box.appendChild(b);
+        const menu = document.createElement('button');
+        menu.type = 'button';
+        menu.className = 'project-menu-trigger';
+        menu.title = 'Project actions';
+        menu.setAttribute('aria-label', 'Project actions for ' + (p.name || 'project'));
+        menu.setAttribute('aria-haspopup', 'menu');
+        menu.setAttribute('aria-expanded', 'false');
+        menu.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="20.5" cy="12" r="1" fill="currentColor"/></svg>';
+        menu.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const wasOpen = menu.getAttribute('aria-expanded') === 'true';
+          document.querySelectorAll('.project-overflow-menu').forEach(item => item.remove());
+          document.querySelectorAll('.project-menu-trigger[aria-expanded="true"]').forEach(item => item.setAttribute('aria-expanded', 'false'));
+          if (wasOpen) return;
+          const popup = document.createElement('div');
+          popup.className = 'project-overflow-menu';
+          popup.setAttribute('role', 'menu');
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'danger';
+          remove.setAttribute('role', 'menuitem');
+          remove.textContent = 'Remove project';
+          remove.onclick = async (removeEvent) => {
+            removeEvent.stopPropagation();
+            const confirmed = await requestConfirmation({
+              title: 'Remove ' + (p.name || 'project') + '?',
+              message: 'This removes the project from Karoz. Its local files remain at ' + (p.path || 'the current checkout') + '.',
+              confirmLabel: 'Remove project',
+              danger: true
+            });
+            if (!confirmed) return;
+            await api('/api/projects/' + encodeURIComponent(p.id), { method: 'DELETE' });
+            if (state.project && state.project.id === p.id) {
+              stopRuntimeSubscriptions();
+              state.project = null;
+              state.agent = null;
+              state.task = null;
+            }
+            await loadProjects();
+            notify('Project removed from Karoz.', 'success');
+          };
+          popup.appendChild(remove);
+          row.appendChild(popup);
+          menu.setAttribute('aria-expanded', 'true');
+        };
+        row.append(b, menu);
+        box.appendChild(row);
       });
     }
+    document.addEventListener('click', (event) => {
+      if (event.target.closest('.project-row')) return;
+      document.querySelectorAll('.project-overflow-menu').forEach(item => item.remove());
+      document.querySelectorAll('.project-menu-trigger[aria-expanded="true"]').forEach(item => item.setAttribute('aria-expanded', 'false'));
+    });
     async function selectProject(p, opts = {}) {
       if (!p) return;
       if (state.project && state.project.id === p.id && state.agent) {
@@ -185,9 +239,9 @@
         $('taskLog').textContent = await api('/api/projects/' + state.project.id + '/tasks/' + state.task.id + '/logs');
         return;
       }
-      const path = tab === 'deploy' ? 'deployment-log' : 'runtime-log';
+      const path = tab === 'diff' ? 'diff' : (tab === 'deploy' ? 'deployment-log' : 'runtime-log');
       const payload = await api('/api/projects/' + state.project.id + '/tasks/' + state.task.id + '/' + path);
-      $('taskLog').textContent = payload.content || '';
+      $('taskLog').textContent = (payload && payload.content) ? payload.content : (tab === 'diff' ? '(no changes)' : '');
     }
     function taskTypeLabel(type) {
       if (type === 'bug' || type === 'bugfix') return 'Bugfix';

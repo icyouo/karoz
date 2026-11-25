@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	runtimedomain "github.com/karoz/karoz/internal/runtime"
+	"log"
 	"strings"
 	"time"
 )
@@ -67,7 +68,6 @@ func (a *app) beginAgentRun(input AgentRunInput) (AgentRun, bool) {
 	if !created {
 		return run, false
 	}
-	a.appendAgentRunStateEvent(run, "idle", string(input.Trigger))
 	a.emitRuntimeStateChanged(RuntimeEvent{
 		ID:        randomID(),
 		ProjectID: input.ProjectID,
@@ -90,7 +90,6 @@ func (a *app) transitionAgentRun(projectID, agentID, expectedRunID string, next 
 		return AgentRun{}, false
 	}
 	if changed {
-		a.appendAgentRunStateEvent(run, string(previous), string(run.Trigger))
 		a.emitRuntimeStateChanged(RuntimeEvent{
 			ID:        randomID(),
 			ProjectID: projectID,
@@ -117,13 +116,13 @@ func (a *app) finishAgentRun(projectID, agentID, expectedRunID string, final Run
 	if !ok {
 		return AgentRun{}, false
 	}
+	final = run.State
 	cancel := controlState.Cancel
 	a.notifyAgentRunFinished(key)
 	a.revokeResidentBashApprovalsForRun(run.ID)
 	if cancel != nil {
 		cancel()
 	}
-	a.appendAgentRunStateEvent(run, string(previous), string(run.Trigger))
 	a.emitRuntimeStateChanged(RuntimeEvent{
 		ID:        randomID(),
 		ProjectID: projectID,
@@ -189,7 +188,7 @@ func (a *app) cancelAgentRun(projectID, agentID string) (AgentRun, bool) {
 // linearization point. Scheduled Runs use the generic helper below with their
 // own result intent but the same cancellation/terminal claim.
 func (a *app) commitAgentRunSuccessWithLedger(project Project, agent Agent, runID, body string) bool {
-	return a.commitAgentRunResultWithLedger(project, agent, runID, "result", body, true)
+	return a.commitAgentRunResultWithLedger(project, agent, runID, "result", body, true) == nil
 }
 
 // commitAgentRunResultWithLedger is the one success-side linearization point:
@@ -201,25 +200,34 @@ func (a *app) commitAgentRunSuccessWithLedger(project Project, agent Agent, runI
 // workers keep that context alive until their Execute callback returns, so a
 // scheduled result uses cancelOwnedContext=false and lets SchedulerWorker clean
 // up its timeout child normally.
-func (a *app) commitAgentRunResultWithLedger(project Project, agent Agent, runID, intent, body string, cancelOwnedContext bool) bool {
+func (a *app) commitAgentRunResultWithLedger(project Project, agent Agent, runID, intent, body string, cancelOwnedContext bool) error {
 	projectID, agentID := project.ID, agent.ID
 	key := projectAgentKey(projectID, agentID)
 	now := time.Now().UTC()
 	previous := RunState("")
-	run, controlState, ok := a.agentRunControlService().CommitResult(projectID, agentID, runID, func(current AgentRun) AgentRun {
+	var persistErr error
+	run, controlState, ok := a.agentRunControlService().CommitResult(projectID, agentID, runID, func(current AgentRun) (AgentRun, bool) {
 		previous = current.State
-		a.appendAgentMessageLockedWithTranscript(projectID, agentID, "assistant", firstNonEmpty(intent, "result"), body, agentTranscriptAppendMetadata{RunID: runID})
+		message := a.newAgentMessageLocked(projectID, agentID, "assistant", firstNonEmpty(intent, "result"), body)
 		finished := runtimedomain.Finish(current, RunStateDone, nil, now)
-		session := a.ensureAgentSessionLocked(projectID, agentID)
-		a.appendAgentSessionEventLocked(newAgentRunStateSessionEvent(session, finished, string(previous), string(finished.Trigger)))
-		return finished
+		session := a.agentSessionForEventLocked(projectID, agentID)
+		persistErr = a.commitAgentSessionEventsLocked(
+			newAgentMessageSessionEvent(message, agentTranscriptAppendMetadata{RunID: runID}),
+			newAgentRunStateSessionEvent(session, finished, string(previous), string(finished.Trigger)),
+		)
+		return finished, persistErr == nil
 	})
 	if !ok {
-		return false
+		if persistErr != nil {
+			log.Printf("commit agent Run result: %v", persistErr)
+			a.finishAgentRunWithLedger(project, agent, runID, RunStateFailed, persistErr, persistErr.Error())
+			return persistErr
+		}
+		return context.Canceled
 	}
 	cancel := controlState.Cancel
 	a.notifyAgentRunFinished(key)
-	a.persistAppendedAgentMessage(projectID, agentID)
+	a.maybeCheckpointAgentSession(projectID, agentID, false)
 	a.revokeResidentBashApprovalsForRun(run.ID)
 	if cancelOwnedContext && cancel != nil {
 		cancel()
@@ -236,7 +244,7 @@ func (a *app) commitAgentRunResultWithLedger(project Project, agent Agent, runID
 		}
 		ledger.publish("done", payload)
 	}
-	return true
+	return nil
 }
 
 // waitForAgentRunFinished is the scheduler's availability signal. It checks

@@ -28,7 +28,7 @@ func TestResidentToolPolicyRegistryIsExactFailClosedBijection(t *testing.T) {
 	if len(specs) != len(handlerNames) || len(specs) != len(staticResidentToolPolicyRegistry.byName) {
 		t.Fatalf("definitions=%d handlers=%d policies=%d", len(specs), len(handlerNames), len(staticResidentToolPolicyRegistry.byName))
 	}
-	const establishedNames = "ack_inbox,add_agent,add_pending,advance_plan,bash,create_agent_team,create_monitor,create_task,decline_handoff,delete_agent,delete_monitor,drop_pending,get_artifact,get_messages,get_plan,get_task,list_agent_templates,list_artifacts,list_groups,list_monitors,list_pending,list_plans,list_processes,list_skills,list_tasks,mark_activity,mark_done,pause_monitor,prepare_monitor_probe,read_process_log,read_skill,reconcile_plan_history,record_decision,remember_fact,reply_to,repo_list,repo_read,repo_search,report_activity,request_choice,resume_monitor,review_artifact,run_background,save_plan_draft,search_archive,send_to,send_to_group,show_preview,stop_process,submit_artifact,submit_plan,update_monitor,update_task_status,web_fetch,web_search,write_workspace_file"
+	const establishedNames = "ack_inbox,add_agent,add_pending,advance_plan,android_adb_exec,android_device_start,bash,create_agent_team,create_monitor,create_task,decline_handoff,delete_agent,delete_monitor,device_action,device_list,device_logs,device_screenshot,drop_pending,get_artifact,get_messages,get_plan,get_task,list_agent_templates,list_artifacts,list_groups,list_monitors,list_pending,list_plans,list_processes,list_skills,list_tasks,mark_activity,mark_done,pause_monitor,prepare_monitor_probe,read_process_log,read_skill,reconcile_plan_history,record_decision,remember_fact,reply_to,repo_list,repo_read,repo_search,report_activity,request_choice,resume_monitor,review_artifact,run_background,save_plan_draft,search_archive,send_to,send_to_group,show_preview,stop_process,submit_artifact,submit_plan,update_monitor,update_task_status,web_fetch,web_search,write_workspace_file"
 	if got := strings.Join(staticResidentToolPolicyRegistry.names(), ","); got != establishedNames {
 		t.Fatalf("static resident tool names drifted:\n got %s\nwant %s", got, establishedNames)
 	}
@@ -73,7 +73,7 @@ func TestNewAppCompletesStaticResidentToolValidation(t *testing.T) {
 		t.Fatal("newApp returned before the static resident tool registry was initialized")
 	}
 	definitions := a.residentTools.Definitions()
-	if got, want := len(definitions), 56; got != want {
+	if got, want := len(definitions), 62; got != want {
 		t.Fatalf("initialized resident definitions = %d, want %d", got, want)
 	}
 	for _, definition := range definitions {
@@ -131,7 +131,7 @@ func TestResidentToolPolicySideEffectsMatchEstablishedContract(t *testing.T) {
 		"repo_list", "repo_read", "repo_search", "list_skills", "read_skill", "list_monitors",
 		"web_search", "web_fetch", "search_archive", "list_pending", "get_messages",
 		"list_artifacts", "get_artifact", "list_agent_templates", "list_groups", "list_plans",
-		"get_plan", "list_tasks", "get_task", "list_processes", "read_process_log",
+		"get_plan", "list_tasks", "get_task", "list_processes", "read_process_log", "device_list", "device_logs",
 	} {
 		readOnly[name] = true
 	}

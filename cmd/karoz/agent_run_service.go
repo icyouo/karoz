@@ -1,6 +1,9 @@
 package main
 
-import runtimedomain "github.com/karoz/karoz/internal/runtime"
+import (
+	runtimedomain "github.com/karoz/karoz/internal/runtime"
+	"log"
+)
 
 // appAgentRunRepository adapts the app's active-run store to the runtime
 // lifecycle port. Lifecycle policy lives in internal/runtime; application
@@ -30,6 +33,11 @@ func (repository appAgentRunRepository) Insert(run runtimedomain.Run) bool {
 	if current, ok := runtime.runs[key]; ok && current.State.Active() {
 		return false
 	}
+	session := repository.app.agentSessionForEventLocked(run.ProjectID, run.AgentID)
+	if err := repository.app.commitAgentSessionEventsLocked(newAgentRunStateSessionEvent(session, run, "idle", string(run.Trigger))); err != nil {
+		log.Printf("begin agent Run: %v", err)
+		return false
+	}
 	// A terminal predecessor may have left control handles behind while its
 	// application-side cleanup is completing. A new Run must start with a clean
 	// control slot and must never inherit the predecessor's cancel hook.
@@ -47,8 +55,16 @@ func (repository appAgentRunRepository) Mutate(projectID, agentID string, mutate
 	runtime := repository.app.agentRuntimeLocked()
 	key := projectAgentKey(projectID, agentID)
 	current, ok := runtime.runs[key]
+	previous := current
 	if !ok || !mutate(&current) {
 		return current, false
+	}
+	if current.State != previous.State {
+		session := repository.app.agentSessionForEventLocked(projectID, agentID)
+		if err := repository.app.commitAgentSessionEventsLocked(newAgentRunStateSessionEvent(session, current, string(previous.State), string(current.Trigger))); err != nil {
+			log.Printf("transition agent Run: %v", err)
+			return previous, false
+		}
 	}
 	runtime.runs[key] = current
 	return current, true
@@ -67,6 +83,11 @@ func (repository appAgentRunRepository) Remove(projectID, agentID, expectedRunID
 		return runtimedomain.Run{}, false
 	}
 	finished := mutate(current)
+	session := repository.app.agentSessionForEventLocked(projectID, agentID)
+	if err := repository.app.commitAgentSessionEventsLocked(newAgentRunStateSessionEvent(session, finished, string(current.State), string(finished.Trigger))); err != nil {
+		log.Printf("remove agent Run: %v", err)
+		return runtimedomain.Run{}, false
+	}
 	delete(runtime.runs, key)
 	return finished, true
 }
@@ -151,6 +172,14 @@ func (repository appAgentRunRepository) FinishRun(projectID, agentID, expectedRu
 	finished, accepted := mutate(&run, &state)
 	if !accepted {
 		return run, state, false
+	}
+	session := repository.app.agentSessionForEventLocked(projectID, agentID)
+	if err := repository.app.commitAgentSessionEventsLocked(newAgentRunStateSessionEvent(session, finished, string(run.State), string(finished.Trigger))); err != nil {
+		// Terminal cleanup must still release the worker and cancellation handle
+		// on a disk fault. Surface failure, never a successful terminal result.
+		log.Printf("finish agent Run: %v", err)
+		finished.State = runtimedomain.StateFailed
+		finished.Error = err.Error()
 	}
 	delete(runtime.runs, key)
 	repository.clearControlStateLocked(key)

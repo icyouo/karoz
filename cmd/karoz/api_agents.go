@@ -153,6 +153,10 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 			agent = updated
 		}
 		run, started := a.beginAgentRun(AgentRunInput{ProjectID: project.ID, AgentID: agent.ID, Trigger: RunTriggerUserDirect, TurnType: turnType})
+		if run.ID == "" {
+			writeError(w, http.StatusInternalServerError, errors.New("could not persist agent Run"))
+			return
+		}
 		messageStored := false
 		currentInput := AgentMessage{}
 		if !started {
@@ -163,6 +167,10 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 			msg, appended := a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", "interrupt", userText)
 			if !appended {
 				msg = a.appendAgentMessage(project.ID, agent.ID, "user", "interrupt", userText)
+			}
+			if msg.ID == "" {
+				writeError(w, http.StatusInternalServerError, errors.New("could not persist agent message"))
+				return
 			}
 			messageStored = true
 			currentInput = msg
@@ -200,6 +208,12 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request, project Proje
 			currentInput, appended = a.appendAgentMessageForRun(project.ID, agent.ID, run.ID, "user", turnType, userText)
 			if !appended {
 				currentInput = a.appendAgentMessage(project.ID, agent.ID, "user", turnType, userText)
+			}
+			if currentInput.ID == "" {
+				err := errors.New("could not persist agent message")
+				a.finishAgentRun(project.ID, agent.ID, run.ID, RunStateFailed, err)
+				writeError(w, http.StatusInternalServerError, err)
+				return
 			}
 		}
 		a.startAgentRunWorker(project, agent, run, userText, turnType, AgentTranscriptItem{ID: currentInput.ID, Seq: currentInput.Seq})

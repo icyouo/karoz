@@ -31,6 +31,14 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test Studio helpers
+        run: node --test cmd/karoz/static/js/*.test.cjs
+
   windows-process-guard:
     runs-on: windows-latest
     timeout-minutes: 10

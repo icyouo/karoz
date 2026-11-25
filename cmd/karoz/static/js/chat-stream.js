@@ -343,7 +343,8 @@
         })
         .slice(0, 6);
       if (!items.length) {
-        closeSkillSuggest();
+        state.skillSuggest = { open: true, items: [], active: -1, trigger };
+        renderSkillSuggest();
         return;
       }
       state.skillSuggest = { open: true, items, active: -1, trigger };
@@ -353,11 +354,18 @@
       const box = $('skillSuggest');
       const suggest = state.skillSuggest || {};
       box.innerHTML = '';
-      if (!suggest.open || !suggest.items || !suggest.items.length) {
+      if (!suggest.open) {
         box.classList.remove('open');
         return;
       }
       box.classList.add('open');
+      if (!suggest.items || !suggest.items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'skill-suggest-empty';
+        empty.textContent = 'No matching skills';
+        box.appendChild(empty);
+        return;
+      }
       suggest.items.forEach((skill, index) => {
         const button = document.createElement('button');
         button.type = 'button';

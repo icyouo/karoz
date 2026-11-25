@@ -1,4 +1,4 @@
-    const state = { settings: null, providers: [], projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, sidePanel: null, updatesView: 'attention', backgroundProcesses: [], backgroundMonitors: [], backgroundActivityView: 'processes', backgroundProbeSupported: true, backgroundEditor: null, backgroundLog: null, backgroundProbeApproval: null, backgroundCheckResults: {}, agentWorkingById: {}, agentRunStoppingByKey: {}, chatMessages: [], modelContext: [], currentContextTurn: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, chatStreaming: false, activeRunID: '', activeRunAgentID: '', lastRunSeq: 0, activeRunReplay: null, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
+    const state = { settings: null, providers: [], projects: [], project: null, agents: [], agent: null, manageAgent: null, templates: [], teams: [], groups: [], collapsedGroups: {}, plans: [], selectedTemplate: null, selectedTeam: null, addMode: 'role', newProjectMode: 'create', routes: [], task: null, taskLogTab: 'runtime', chatType: 'ask', view: 'agent', inbox: [], memory: [], blackboard: [], artifacts: [], artifactView: 'registry', archive: [], workspaceFiles: [], preview: null, previewViewport: 'desktop', previewZoom: 1, previewUrl: '', devices: [], selectedDeviceID: '', deviceLogs: '', deviceStreamStatus: '', sidePanel: null, updatesView: 'attention', backgroundProcesses: [], backgroundMonitors: [], backgroundActivityView: 'processes', backgroundProbeSupported: true, backgroundEditor: null, backgroundLog: null, backgroundProbeApproval: null, backgroundCheckResults: {}, agentWorkingById: {}, agentRunStoppingByKey: {}, chatMessages: [], modelContext: [], currentContextTurn: [], chatHasMore: false, chatNextBeforeSeq: 0, chatLoadingHistory: false, chatStreaming: false, activeRunID: '', activeRunAgentID: '', lastRunSeq: 0, activeRunReplay: null, agentAttachments: [], skills: [], skillsProjectID: '', skillSuggest: { open: false, items: [], active: -1, trigger: null } };
     let taskPollTimer = null;
     let agentPollTimer = null;
     let runtimeStateRefreshTimer = null;
@@ -115,11 +115,26 @@
       state.providers = payload && Array.isArray(payload.providers) ? payload.providers : [];
       renderModelCatalog();
     }
+    function parseCompositeModelValue(value) {
+      const raw = String(value || '');
+      const sep = raw.indexOf('::');
+      if (sep > 0) {
+        return { providerID: raw.slice(0, sep), modelID: raw.slice(sep + 2) };
+      }
+      return { providerID: '', modelID: raw };
+    }
     function selectedModelDescriptor() {
-      const value = $('agentModel').value;
+      const parsed = parseCompositeModelValue($('agentModel').value);
       for (const provider of state.providers || []) {
-        const model = (provider.models || []).find(item => item.id === value && item.provider === provider.id);
+        if (parsed.providerID && provider.id !== parsed.providerID) continue;
+        const model = (provider.models || []).find(item => item.id === parsed.modelID && item.provider === provider.id);
         if (model) return { provider, model };
+      }
+      if (parsed.providerID) {
+        for (const provider of state.providers || []) {
+          const model = (provider.models || []).find(item => item.id === parsed.modelID && item.provider === provider.id);
+          if (model) return { provider, model };
+        }
       }
       return null;
     }
@@ -174,8 +189,9 @@
         group.title = provider.reason || '';
         (provider.models || []).forEach(model => {
           const option = document.createElement('option');
-          option.value = model.id;
+          option.value = provider.id + '::' + model.id;
           option.dataset.provider = provider.id;
+          option.dataset.modelId = model.id;
           option.textContent = model.display_name || model.id;
           group.appendChild(option);
         });
@@ -183,6 +199,34 @@
       });
       restoreAgentModelSettings();
       renderContextTokenUsage();
+    }
+    async function loadInstalledSkills() {
+      const listBox = $('installedSkillsList');
+      if (!listBox) return [];
+      const payload = await api('/api/skills').catch(() => ({ skills: [] }));
+      const items = Array.isArray(payload && payload.skills) ? payload.skills : [];
+      listBox.innerHTML = '';
+      if (!items.length) {
+        listBox.innerHTML = '<div class="field-note">No GitHub skills installed yet.</div>';
+        return items;
+      }
+      items.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'skill-install-row';
+        row.innerHTML = '<div><strong>' + escapeHTML(item.name || item.slug) + '</strong><div class="field-note">' + escapeHTML(item.description || item.path || '') + '</div></div><button type="button" class="secondary" data-remove-skill="' + escapeHTML(item.slug) + '">Remove</button>';
+        row.querySelector('button').onclick = async () => {
+          try {
+            await api('/api/skills/' + encodeURIComponent(item.slug), { method: 'DELETE' });
+            state.skillsProjectID = '';
+            await loadInstalledSkills();
+            notify('Removed skill "' + (item.name || item.slug) + '".', 'success');
+          } catch (err) {
+            notify(err.message || String(err), 'error');
+          }
+        };
+        listBox.appendChild(row);
+      });
+      return items;
     }
     function settingsExtraRoots() {
       return state.settings && Array.isArray(state.settings.extra_projects_roots) ? state.settings.extra_projects_roots : [];

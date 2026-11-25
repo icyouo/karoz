@@ -284,6 +284,7 @@ func (a *app) createMonitor(project Project, item Monitor) (Monitor, error) {
 type processOutputObservation struct {
 	ProjectID string
 	ProcessID string
+	Origin    monitordomain.Origin
 	Line      processdomain.OutputLine
 	Drained   chan struct{}
 }
@@ -355,7 +356,7 @@ func (a *app) enqueueProcessOutputObservation(record processdomain.Process, line
 	if line.Sequence == 0 || output.monitorCh == nil {
 		return
 	}
-	item := processOutputObservation{ProjectID: record.ProjectID, ProcessID: record.ID, Line: line}
+	item := processOutputObservation{ProjectID: record.ProjectID, ProcessID: record.ID, Origin: record.Origin, Line: line}
 	select {
 	case output.monitorCh <- item:
 	default:
@@ -422,6 +423,10 @@ func (a *app) evaluateProcessOutput(observation processOutputObservation) {
 	coverageFailed := false
 	now := time.Now().UTC()
 	text := redactSensitiveProcessText(observation.Line.Text)
+	origin := observation.Origin
+	if origin.Kind == "" {
+		origin = monitordomain.Origin{Kind: "runtime"}
+	}
 	for i := range items {
 		item := items[i]
 		if item.State != monitordomain.StateActive ||
@@ -434,7 +439,7 @@ func (a *app) evaluateProcessOutput(observation processOutputObservation) {
 			continue
 		}
 		output.cursors[key] = observation.Line.Sequence
-		matched, detail := monitordomain.MatchProcessOutput(item, monitordomain.ProcessOutput{ProcessID: observation.ProcessID, Sequence: observation.Line.Sequence, Line: text, Origin: monitordomain.Origin{Kind: "runtime"}})
+		matched, detail := monitordomain.MatchProcessOutput(item, monitordomain.ProcessOutput{ProcessID: observation.ProcessID, Sequence: observation.Line.Sequence, Line: text, Origin: origin})
 		if !matched {
 			continue
 		}
@@ -445,7 +450,7 @@ func (a *app) evaluateProcessOutput(observation processOutputObservation) {
 			continue
 		}
 		payload, _ := json.Marshal(map[string]any{"process_id": observation.ProcessID, "seq": observation.Line.Sequence, "stream": observation.Line.Stream, "line": text})
-		event := monitordomain.Event{ID: fmt.Sprintf("process/%s/output/%d", observation.ProcessID, observation.Line.Sequence), ProjectID: observation.ProjectID, AuthorityID: "runtime", AuthorityGeneration: 1, Kind: "process_output", EntityID: observation.ProcessID, Origin: monitordomain.Origin{Kind: "runtime"}, At: now, Payload: payload}
+		event := monitordomain.Event{ID: fmt.Sprintf("process/%s/output/%d", observation.ProcessID, observation.Line.Sequence), ProjectID: observation.ProjectID, AuthorityID: "runtime", AuthorityGeneration: 1, Kind: "process_output", EntityID: observation.ProcessID, Origin: origin, At: now, Payload: payload}
 		briefing := strings.TrimSpace(items[i].Action.Template)
 		if briefing == "" {
 			briefing = detail

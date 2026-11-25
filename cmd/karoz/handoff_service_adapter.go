@@ -21,13 +21,16 @@ func (repository appHandoffRepository) Save(message AgentInboxMessage) error {
 
 type appHandoffEvents struct{ app *app }
 
-func (events appHandoffEvents) HandoffChanged(change collaborationdomain.HandoffChange) {
-	events.app.appendAgentHandoffStateEvent(change.Handoff, change.From, change.Reason)
+func (events appHandoffEvents) HandoffChanged(change collaborationdomain.HandoffChange) error {
+	if err := events.app.appendAgentHandoffStateEvent(change.Handoff, change.From, change.Reason); err != nil {
+		return err
+	}
 	events.app.emitRuntimeStateChanged(RuntimeEvent{
 		ID: randomID(), ProjectID: change.Handoff.ProjectID, Kind: "handoff_changed", EntityID: change.Handoff.ID,
 		From: change.From, To: change.To, Reason: change.Reason, CreatedAt: change.At,
 		FromAgentID: change.Handoff.SourceAgentID, ToAgentID: change.Handoff.TargetAgentID,
 	})
+	return nil
 }
 
 func (a *app) handoffService() collaborationdomain.HandoffService {

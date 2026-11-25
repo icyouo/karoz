@@ -94,8 +94,14 @@ func (a *app) agentRunLedgerCallbacks(project Project, agent Agent, runID string
 }
 
 func (a *app) finishAgentRunWithLedger(project Project, agent Agent, runID string, final RunState, runErr error, message string) {
-	if _, finished := a.finishAgentRun(project.ID, agent.ID, runID, final, runErr); !finished {
+	run, finished := a.finishAgentRun(project.ID, agent.ID, runID, final, runErr)
+	if !finished {
 		return
+	}
+	if run.State == RunStateFailed && run.Error != "" {
+		final = run.State
+		runErr = errors.New(run.Error)
+		message = run.Error
 	}
 	ledger := a.runLedger(runID)
 	if ledger == nil {

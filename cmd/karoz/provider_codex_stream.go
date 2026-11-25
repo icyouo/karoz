@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 func invokeCodexDirect(ctx context.Context, workdir, prompt string) (CLI2APIResponse, error) {
@@ -161,6 +162,10 @@ func residentToolArgumentsValid(arguments string) bool {
 
 func boundedTranscriptToolArguments(item AgentTranscriptItem) string {
 	arguments := firstNonEmpty(strings.TrimSpace(item.ToolArguments), strings.TrimSpace(item.Body))
+	scrubbed := scrubToolArgumentsForPrompt(arguments, 1400)
+	if utf8.RuneCountInString(scrubbed) <= 1400 && json.Valid([]byte(scrubbed)) {
+		return scrubbed
+	}
 	if len([]rune(arguments)) <= 1400 && json.Valid([]byte(arguments)) {
 		return arguments
 	}
@@ -225,7 +230,7 @@ func (w *codexStreamWire) appendToolResult(call codexToolCall, result string, _ 
 	w.input = append(w.input, map[string]any{
 		"type":    "function_call_output",
 		"call_id": firstNonEmpty(call.CallID, call.ID),
-		"output":  result,
+		"output":  compactToolResultForLiveStep(result, 24_000),
 	})
 }
 

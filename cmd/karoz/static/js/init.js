@@ -55,6 +55,27 @@
         else if (action === 'send') $('sendAgent').click();
       }
     });
+    $('agentMessage').addEventListener('paste', (event) => {
+      const data = event.clipboardData;
+      if (!data) return;
+      const items = Array.from(data.items || []);
+      const files = [];
+      for (const item of items) {
+        if (item.kind === 'file' && /^image\//i.test(item.type || '')) {
+          const blob = item.getAsFile();
+          if (!blob) continue;
+          if (!blob.name && typeof File !== 'undefined') {
+            const ext = (blob.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+            files.push(new File([blob], 'pasted-' + Date.now() + '-' + files.length + '.' + ext, { type: blob.type }));
+          } else {
+            files.push(blob);
+          }
+        }
+      }
+      if (!files.length) return;
+      addAgentAttachments(files);
+      if (!data.getData('text/plain')) event.preventDefault();
+    });
     $('createTask').onclick = async () => {
       if (!state.project) return notify('Select a project first.', 'error');
       const t = await api('/api/projects/' + state.project.id + '/tasks', { method: 'POST', body: JSON.stringify({ type: $('taskType').value, title: $('taskTitle').value, goal: $('taskGoal').value, max_runtime_ms: Number($('taskMaxRuntime').value) }) });

@@ -248,6 +248,7 @@ func residentStaticToolSpecs() []map[string]any {
 	specs := append([]map[string]any{}, residentToolSpecs()...)
 	specs = append(specs, residentPlanToolSpecs()...)
 	specs = append(specs, residentAgentManagementToolSpecs()...)
+	specs = append(specs, residentDeviceToolSpecs()...)
 	return specs
 }
 

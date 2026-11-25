@@ -15,7 +15,7 @@ type Skill = skilldomain.Skill
 var skillMentionPattern = regexp.MustCompile(`(?:^|\s)([$/])([A-Za-z0-9_.:-]+)`)
 
 func (a *app) discoverSkills(project Project) []Skill {
-	roots := skillRoots(project)
+	roots := skillRoots(project, a.installedSkillsDir())
 	seen := map[string]bool{}
 	var skills []Skill
 	for _, root := range roots {
@@ -31,7 +31,7 @@ func (a *app) discoverSkills(project Project) []Skill {
 				if path != base && strings.HasPrefix(d.Name(), ".") && d.Name() != ".agents" && d.Name() != ".codex" && d.Name() != ".system" {
 					return filepath.SkipDir
 				}
-				if rel, relErr := filepath.Rel(base, path); relErr == nil && rel != "." && len(strings.Split(rel, string(os.PathSeparator))) > 6 {
+				if rel, relErr := filepath.Rel(base, path); relErr == nil && rel != "." && len(strings.Split(rel, string(os.PathSeparator))) > skilldomain.MaxSkillWalkDepth {
 					return filepath.SkipDir
 				}
 				return nil
@@ -40,10 +40,11 @@ func (a *app) discoverSkills(project Project) []Skill {
 				return nil
 			}
 			skill, ok := readSkillMetadata(path, root.scope)
-			if !ok || seen[skill.Name] {
+			key := strings.ToLower(skill.Name)
+			if !ok || seen[key] {
 				return nil
 			}
-			seen[skill.Name] = true
+			seen[key] = true
 			skills = append(skills, skill)
 			return nil
 		})
@@ -62,7 +63,7 @@ type skillRoot struct {
 	scope string
 }
 
-func skillRoots(project Project) []skillRoot {
+func skillRoots(project Project, extraInstalledDir ...string) []skillRoot {
 	home, _ := os.UserHomeDir()
 	codexHome := expandHome(getenv("CODEX_HOME", "~/.codex"))
 	var roots []skillRoot
@@ -71,6 +72,11 @@ func skillRoots(project Project) []skillRoot {
 			skillRoot{path: filepath.Join(project.Path, ".agents", "skills"), scope: "project"},
 			skillRoot{path: filepath.Join(project.Path, ".codex", "skills"), scope: "project"},
 		)
+	}
+	for _, dir := range extraInstalledDir {
+		if strings.TrimSpace(dir) != "" {
+			roots = append(roots, skillRoot{path: dir, scope: "installed"})
+		}
 	}
 	if home != "" {
 		roots = append(roots, skillRoot{path: filepath.Join(home, ".agents", "skills"), scope: "user"})
@@ -103,34 +109,16 @@ func readSkillMetadata(path, scope string) (Skill, bool) {
 }
 
 func parseSkillFrontmatter(content string) map[string]string {
-	out := map[string]string{}
-	content = strings.TrimPrefix(content, "\ufeff")
-	if !strings.HasPrefix(content, "---\n") && !strings.HasPrefix(content, "---\r\n") {
-		return out
-	}
-	lines := strings.Split(content, "\n")
-	for i := 1; i < len(lines); i++ {
-		line := strings.TrimSpace(strings.TrimSuffix(lines[i], "\r"))
-		if line == "---" {
-			break
-		}
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		key = strings.ToLower(strings.TrimSpace(key))
-		value = strings.Trim(strings.TrimSpace(value), `"'`)
-		if key != "" {
-			out[key] = value
-		}
-	}
-	return out
+	return skilldomain.ParseFrontmatter(content)
 }
 
 func (a *app) renderSkillsPrompt(project Project) string {
 	skills := a.discoverSkills(project)
 	if len(skills) == 0 {
 		return ""
+	}
+	if len(skills) > skilldomain.MaxPromptSkills {
+		skills = skills[:skilldomain.MaxPromptSkills]
 	}
 	var b strings.Builder
 	b.WriteString("\n### Available skills\n")
@@ -142,9 +130,11 @@ func (a *app) renderSkillsPrompt(project Project) string {
 		b.WriteString(" [")
 		b.WriteString(skill.Scope)
 		b.WriteString("]: ")
-		b.WriteString(limitString(firstNonEmpty(skill.ShortDescription, skill.Description), 260))
+		b.WriteString(skilldomain.LimitChars(firstNonEmpty(skill.ShortDescription, skill.Description), skilldomain.MaxSkillPromptChars))
 		b.WriteString("\n")
 	}
+	b.WriteString(skilldomain.SkillPolicyBlock())
+	b.WriteString("\n")
 	return b.String()
 }
 
@@ -178,13 +168,7 @@ func (a *app) injectMentionedSkills(project Project, userText string) string {
 		if err != nil {
 			continue
 		}
-		b.WriteString("\n<skill name=\"")
-		b.WriteString(skill.Name)
-		b.WriteString("\" path=\"")
-		b.WriteString(skill.Path)
-		b.WriteString("\">\n")
-		b.WriteString(limitString(string(data), 60000))
-		b.WriteString("\n</skill>\n")
+		b.WriteString(skilldomain.WrapSkillBody(skill, string(data)))
 	}
 	return b.String()
 }
@@ -214,7 +198,7 @@ func (a *app) readSkillTool(project Project, name string) string {
 		if err != nil {
 			return toolJSON(map[string]any{"error": "read_failed", "message": err.Error()})
 		}
-		return toolJSON(map[string]any{"skill": skill, "content": string(data)})
+		return toolJSON(map[string]any{"skill": skill, "content": skilldomain.WrapSkillBody(skill, string(data))})
 	}
 	return toolJSON(map[string]any{"error": "not_found", "message": "skill not found"})
 }

@@ -15,7 +15,8 @@ func (a *app) handleProjectScoped(w http.ResponseWriter, r *http.Request) {
 	if len(parts) >= 2 &&
 		(parts[1] == "processes" ||
 			parts[1] == "monitors" ||
-			parts[1] == "monitor-probe-approvals") &&
+			parts[1] == "monitor-probe-approvals" ||
+			parts[1] == "devices") &&
 		isStateChangingMethod(r.Method) {
 		if !requireProcessMutationBoundary(w, r) {
 			return
@@ -27,6 +28,18 @@ func (a *app) handleProjectScoped(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 1 {
+		if r.Method == http.MethodDelete {
+			if err := a.removeProjectFromStudio(project); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, map[string]any{"removed": true, "project_id": project.ID})
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		writeJSON(w, project)
 		return
 	}
@@ -57,6 +70,8 @@ func (a *app) handleProjectScoped(w http.ResponseWriter, r *http.Request) {
 		a.handleTasks(w, r, project, parts[2:])
 	case "processes":
 		a.handleProcesses(w, r, project, parts[2:])
+	case "devices":
+		a.handleDevices(w, r, project, parts[2:])
 	case "audit":
 		a.handleProjectAudit(w, r, project)
 	default:

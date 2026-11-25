@@ -296,6 +296,34 @@ func TestMonitorProbeAgentChoiceClaimIsExactAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestMonitorProbeApprovalSessionFaultDoesNotGrantReceipt(t *testing.T) {
+	a, project, owner := newMonitorProbeTestApp(t)
+	toolCtx := ResidentToolContext{Project: project, Agent: owner, RunID: "request-run", TurnType: "ask", Workdir: project.Path}
+	raw := a.prepareMonitorProbeFromTool(toolCtx, map[string]any{
+		"language": "shell", "source": "printf '{\"matched\":false}'\n",
+	})
+	var choice struct {
+		Choices []struct{ ID string } `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(raw), &choice); err != nil || len(choice.Choices) != 2 {
+		t.Fatalf("prepare approval=%s err=%v", raw, err)
+	}
+	restore := blockSessionEventWrites(t, a)
+	if recognized, err := a.resolveMonitorProbeChoice(project.ID, owner.ID, "approval-run", choice.Choices[0].ID); !recognized || err == nil {
+		t.Fatalf("session fault returned approved: %t %v", recognized, err)
+	}
+	if len(a.monitorProbeReceipts) != 0 {
+		t.Fatal("failed approval audit granted an executable receipt")
+	}
+	restore()
+	if recognized, err := a.resolveMonitorProbeChoice(project.ID, owner.ID, "approval-run", choice.Choices[0].ID); !recognized || err != nil {
+		t.Fatalf("approval retry failed: %t %v", recognized, err)
+	}
+	if len(a.monitorProbeReceipts) != 1 {
+		t.Fatal("approval retry did not grant exactly one receipt")
+	}
+}
+
 func TestMonitorProbeConcurrentUIConfirmationIsIdempotent(t *testing.T) {
 	a, project, owner := newMonitorProbeTestApp(t)
 	challenge, session, err := a.prepareMonitorProbeApproval(

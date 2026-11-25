@@ -61,11 +61,20 @@ type Runner interface {
 // no Karoz policy decisions; authorization and worktree checks stay in the
 // owning application service, while this adapter enforces lifecycle and
 // output-capture invariants consistently.
-type HostRunner struct{}
+type HostRunner struct {
+	Enforcer SandboxEnforcer
+}
 
 func NewHostRunner() Runner { return HostRunner{} }
 
-func (HostRunner) Run(ctx context.Context, request CommandRequest) (CommandResult, error) {
+func (runner HostRunner) enforcer() SandboxEnforcer {
+	if runner.Enforcer != nil {
+		return runner.Enforcer
+	}
+	return UnsupportedSandboxEnforcer{}
+}
+
+func (runner HostRunner) Run(ctx context.Context, request CommandRequest) (CommandResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -73,7 +82,7 @@ func (HostRunner) Run(ctx context.Context, request CommandRequest) (CommandResul
 	if name == "" {
 		return CommandResult{ExitCode: -1}, errors.New("command name is required")
 	}
-	if err := (UnsupportedSandboxEnforcer{}).Enforce(request.Sandbox); err != nil {
+	if err := runner.enforcer().Enforce(request.Sandbox); err != nil {
 		return CommandResult{ExitCode: -1}, err
 	}
 

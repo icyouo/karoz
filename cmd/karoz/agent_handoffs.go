@@ -81,7 +81,10 @@ func (a *app) completeUnhandledInboxAfterAutoResponse(project Project, target Ag
 		return
 	}
 	a.markInboxReplied(project.ID, target.ID, current.ID, out, reply.ID)
-	a.appendAgentMessage(project.ID, current.SourceAgentID, "system", "reply", "Reply from "+target.ID+" to "+current.ID+": "+reply.Subject+"\n\n"+out)
+	if message := a.appendAgentMessage(project.ID, current.SourceAgentID, "system", "reply", "Reply from "+target.ID+" to "+current.ID+": "+reply.Subject+"\n\n"+out); message.ID == "" {
+		log.Printf("auto reply conversation save failed project=%s inbox=%s", project.ID, current.ID)
+		return
+	}
 	a.triggerAgentHandoffResponse(project, source, reply)
 }
 
@@ -152,7 +155,9 @@ func (a *app) queueInboxMessage(projectID string, msg AgentInboxMessage) error {
 		log.Printf("save inbox: %v", err)
 		return err
 	}
-	a.appendAgentHandoffStateEvent(msg, "", "handoff_created")
+	if err := a.appendAgentHandoffStateEvent(msg, "", "handoff_created"); err != nil {
+		return err
+	}
 	a.emitRuntimeStateChanged(RuntimeEvent{
 		ID:          randomID(),
 		ProjectID:   projectID,

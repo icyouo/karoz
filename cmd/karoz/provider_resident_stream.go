@@ -279,7 +279,7 @@ func limitToolResultForBudget(result string, maxChars int) string {
 	if keep < 0 {
 		keep = 0
 	}
-	return strings.TrimSpace(result[:keep]) + notice
+	return strings.TrimSpace(utf8SafePrefix(result, keep)) + notice
 }
 
 func renderAgentInterruptsForModel(interrupts []AgentInterrupt) string {

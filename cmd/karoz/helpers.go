@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 func getenv(name, fallback string) string {
@@ -119,22 +120,36 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func utf8SafePrefix(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
+}
+
 func limitString(value string, maxChars int) string {
 	value = strings.TrimSpace(value)
 	if maxChars <= 0 || len(value) <= maxChars {
 		return value
 	}
 	if maxChars <= 3 {
-		return value[:maxChars]
+		return utf8SafePrefix(value, maxChars)
 	}
-	return strings.TrimSpace(value[:maxChars-3]) + "..."
+	return strings.TrimSpace(utf8SafePrefix(value, maxChars-3)) + "..."
 }
 
 func truncateString(value string, maxChars int) (string, bool) {
 	if maxChars <= 0 || len(value) <= maxChars {
 		return value, false
 	}
-	return value[:maxChars] + "\n...[truncated]", true
+	return utf8SafePrefix(value, maxChars) + "\n...[truncated]", true
 }
 
 func slugify(value string) string {

@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -140,9 +139,8 @@ func (a *app) prepareMonitorProbeFromTool(
 			"error": "save_failed", "message": err.Error(),
 		})
 	}
-	a.appendAgentMonitorProbeApprovalEventLocked(challenge, "requested")
-	if err := a.saveAgentSessionEventsLocked(); err != nil {
-		log.Printf("save monitor probe approval event: %v", err)
+	if err := a.appendAgentMonitorProbeApprovalEventLocked(challenge, "requested"); err != nil {
+		return toolJSON(map[string]any{"error": "save_failed", "message": err.Error()})
 	}
 	return monitorProbeChoiceRequest(toolCtx, challenge)
 }
@@ -273,10 +271,7 @@ func (a *app) resolveMonitorProbeChoice(
 		delete(a.monitorProbeReservations, reservation.ID)
 		err := a.saveMonitorsLocked()
 		if err == nil {
-			a.appendAgentMonitorProbeApprovalEventLocked(challenge, "denied")
-			if eventErr := a.saveAgentSessionEventsLocked(); eventErr != nil {
-				log.Printf("save monitor probe approval event: %v", eventErr)
-			}
+			err = a.appendAgentMonitorProbeApprovalEventLocked(challenge, "denied")
 		}
 		a.mu.Unlock()
 		return true, err
@@ -360,6 +355,11 @@ func (a *app) resolveMonitorProbeChoice(
 	}
 	current.State = "consumed"
 	current.ConsumedReceiptID = receiptID
+	// Approval is a user fact; record it before granting executable authority.
+	if err := a.appendAgentMonitorProbeApprovalEventLocked(current, "approved"); err != nil {
+		a.mu.Unlock()
+		return true, err
+	}
 	a.monitorProbeChallenges[id] = current
 	a.monitorProbeReceipts[receiptID] = receipt
 	if err := a.saveMonitorsLocked(); err != nil {
@@ -368,10 +368,6 @@ func (a *app) resolveMonitorProbeChoice(
 		a.mu.Unlock()
 		_ = store.remove(relative)
 		return true, err
-	}
-	a.appendAgentMonitorProbeApprovalEventLocked(current, "approved")
-	if err := a.saveAgentSessionEventsLocked(); err != nil {
-		log.Printf("save monitor probe approval event: %v", err)
 	}
 	a.mu.Unlock()
 	return true, nil

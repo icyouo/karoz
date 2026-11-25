@@ -19,8 +19,9 @@ func (repository *memoryHandoffRepository) Save(handoff Handoff) error {
 
 type memoryHandoffEvents struct{ changes []HandoffChange }
 
-func (events *memoryHandoffEvents) HandoffChanged(change HandoffChange) {
+func (events *memoryHandoffEvents) HandoffChanged(change HandoffChange) error {
 	events.changes = append(events.changes, change)
+	return nil
 }
 
 func TestHandoffServiceTransitionsAndTimestamps(t *testing.T) {

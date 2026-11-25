@@ -2,9 +2,12 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
 	monitordomain "github.com/karoz/karoz/internal/monitor"
 	"time"
 )
+
+var ErrBusyAgent = errors.New("agent already has an active run")
 
 type Trigger string
 

@@ -6,6 +6,8 @@ import (
 	"log"
 	"sort"
 	"strings"
+
+	monitordomain "github.com/karoz/karoz/internal/monitor"
 )
 
 func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent Agent, userText, turnType string, callbacks *AgentStreamCallbacks) (string, error) {
@@ -13,17 +15,28 @@ func (a *app) runResidentAgentTurn(ctx context.Context, project Project, agent A
 }
 
 func (a *app) runResidentAgentTurnWithCurrentInput(ctx context.Context, project Project, agent Agent, userText, turnType string, currentInput AgentTranscriptItem, callbacks *AgentStreamCallbacks) (string, error) {
+	ctx, cancelObservation := context.WithCancelCause(ctx)
+	defer cancelObservation(nil)
 	var out strings.Builder
 	runID := ""
+	var runOrigin monitordomain.Origin
 	effectiveAgent := normalizeAgentModelConfig(agent)
 	if run, active := a.activeAgentRun(project.ID, agent.ID); active {
 		runID = run.ID
+		runOrigin = run.Origin
 		effectiveAgent.Provider, effectiveAgent.Model = run.Provider, run.Model
 		effectiveAgent.ThinkingEffort, effectiveAgent.ModelConfigVersion = run.ThinkingEffort, run.ModelConfigVersion
 	}
 	toolCtx := ResidentToolContext{
 		Project: project, Agent: effectiveAgent, Workdir: project.Path, RunID: runID,
-		TurnType: normalizeChatTurnType(turnType), EnforceRunScope: runID != "", EnforcePolicy: true,
+		TurnType: normalizeChatTurnType(turnType), Origin: runOrigin, EnforceRunScope: runID != "", EnforcePolicy: true,
+	}
+	failObservation := func(fact string) {
+		if run, active := a.activeAgentRun(project.ID, agent.ID); active && run.ID == runID {
+			cancelObservation(fmt.Errorf("could not persist resident %s", fact))
+		} else {
+			cancelObservation(context.Canceled)
+		}
 	}
 	cb := AgentStreamCallbacks{}
 	if callbacks != nil {
@@ -33,6 +46,7 @@ func (a *app) runResidentAgentTurnWithCurrentInput(ctx context.Context, project 
 	cb.OnDelta = func(delta string) {
 		if runID != "" {
 			if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateInvokingModel); !ok {
+				failObservation("model transition")
 				return
 			}
 		}
@@ -45,9 +59,11 @@ func (a *app) runResidentAgentTurnWithCurrentInput(ctx context.Context, project 
 	cb.OnToolStart = func(call codexToolCall) {
 		if runID != "" {
 			if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateExecutingTool); !ok {
+				failObservation("tool transition")
 				return
 			}
 			if _, ok := a.appendAgentToolCallForRun(project.ID, agent.ID, runID, call); !ok {
+				failObservation("tool call")
 				return
 			}
 		}
@@ -59,9 +75,11 @@ func (a *app) runResidentAgentTurnWithCurrentInput(ctx context.Context, project 
 	cb.OnToolResult = func(call codexToolCall, result string, success bool) {
 		if runID != "" {
 			if _, ok := a.appendAgentToolResultForRun(project.ID, agent.ID, runID, call, result, success); !ok {
+				failObservation("tool result")
 				return
 			}
 			if _, ok := a.transitionAgentRun(project.ID, agent.ID, runID, RunStateWaitingModel); !ok {
+				failObservation("tool result transition")
 				return
 			}
 		}
@@ -110,6 +128,9 @@ func (a *app) runResidentAgentTurnWithCurrentInput(ctx context.Context, project 
 	}
 	request.Transcript = history
 	err = provider.Stream(ctx, request, toolCtx, cb)
+	if cause := context.Cause(ctx); cause != nil {
+		return "", cause
+	}
 	return strings.TrimSpace(out.String()), err
 }
 

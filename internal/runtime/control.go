@@ -72,7 +72,7 @@ func (control *RunControl) RequestCancel(projectID, agentID string) (CancelReque
 // runs while the repository still owns the active Run lock, which lets the
 // application append its durable assistant message and remove the Run in one
 // atomic operation.
-func (control *RunControl) CommitResult(projectID, agentID, expectedRunID string, finalize func(Run) Run) (Run, RunControlState, bool) {
+func (control *RunControl) CommitResult(projectID, agentID, expectedRunID string, finalize func(Run) (Run, bool)) (Run, RunControlState, bool) {
 	if control == nil || control.repository == nil || strings.TrimSpace(expectedRunID) == "" || finalize == nil {
 		return Run{}, RunControlState{}, false
 	}
@@ -80,8 +80,12 @@ func (control *RunControl) CommitResult(projectID, agentID, expectedRunID string
 		if current == nil || current.ID != expectedRunID || !current.State.Active() || state == nil || state.Cancelling || state.ResultClaimed {
 			return Run{}, false
 		}
+		finished, accepted := finalize(*current)
+		if !accepted {
+			return Run{}, false
+		}
 		state.ResultClaimed = true
-		return finalize(*current), true
+		return finished, true
 	})
 }
 

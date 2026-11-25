@@ -42,7 +42,8 @@
         + chip('plans', 'Plans', (state.plans || []).filter(item => !['completed', 'cancelled'].includes(item.status)).length, 'Open WorkPlans')
 		+ chip('artifacts', 'Artifacts', (state.artifacts || []).filter(item => item.status !== 'superseded').length)
         + chip('memory', 'Memory', (state.memory || []).length, pending > 0 ? ('Open Memory · ' + pending + ' pending') : 'Open Memory', pending)
-        + chip('background', 'Background', (state.backgroundProcesses || []).length + (state.backgroundMonitors || []).length, (state.backgroundProcesses || []).length + ' processes · ' + (state.backgroundMonitors || []).length + ' monitors');
+        + chip('background', 'Background', (state.backgroundProcesses || []).length + (state.backgroundMonitors || []).length, (state.backgroundProcesses || []).length + ' processes · ' + (state.backgroundMonitors || []).length + ' monitors')
+        + chip('devices', 'Devices', (state.devices || []).length, 'Open Android Devices');
       $('agentHeaderMeta').title = 'updates ' + updatesCount + ' · memory ' + (state.memory || []).length + ' · pending ' + pending + ' · archived ' + (state.archive || []).length;
       renderAgentWorkingState();
       if (['updates', 'artifacts', 'plans', 'memory', 'pending', 'background'].includes(state.sidePanel) &&
@@ -62,6 +63,7 @@
     }
     function closeSidePane() {
       state.sidePanel = null;
+      if (typeof closeDeviceStream === 'function') closeDeviceStream();
       renderSidePane();
       renderRuntimeStrip();
     }
@@ -73,7 +75,9 @@
       state.sidePanel = panel;
       renderSidePane();
       if (panel === 'background') await loadBackgroundActivityState();
-      else await loadResidentRuntimeState();
+      else if (panel === 'devices') {
+        if (typeof loadDevices === 'function') await loadDevices();
+      } else await loadResidentRuntimeState();
       state.sidePanel = panel;
       renderSidePane();
       renderRuntimeStrip();
@@ -88,6 +92,15 @@
       previewToggle.setAttribute('aria-pressed', open ? 'true' : 'false');
       previewToggle.title = open ? 'Close side panel' : 'Preview';
       previewToggle.setAttribute('aria-label', open ? 'Close side panel' : 'Preview');
+      const devicesToggle = $('toggleDevicesPane');
+      if (devicesToggle) {
+        const devicesOpen = state.sidePanel === 'devices';
+        devicesToggle.classList.toggle('active', devicesOpen);
+        devicesToggle.setAttribute('aria-pressed', devicesOpen ? 'true' : 'false');
+      }
+      if (state.sidePanel !== 'devices' && typeof closeDeviceStream === 'function') {
+        closeDeviceStream();
+      }
       document.querySelectorAll('#agentRuntimeTools button[data-side-panel]').forEach(button => {
         button.classList.toggle('active', state.sidePanel === button.dataset.sidePanel);
       });
@@ -121,6 +134,10 @@
           renderBackgroundActivityPane(body);
           return;
         }
+        if (state.sidePanel === 'devices') {
+          if (typeof renderDevicesPane === 'function') renderDevicesPane(body);
+          return;
+        }
         renderPreviewPane(body);
       } catch (err) {
         $('sidePaneTitle').textContent = 'Panel';
@@ -147,13 +164,104 @@
       else renderRuntimeListPane(content, 'Needs attention', state.inbox || [], renderInboxEntry);
       $('sidePaneTitle').textContent = 'Updates';
     }
+    function isSafeLoopbackPreviewURL(raw) {
+      const trimmed = String(raw || '').trim();
+      if (!trimmed) return false;
+      try {
+        const u = new URL(trimmed);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+        const host = (u.hostname || '').toLowerCase();
+        return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+      } catch (_) {
+        return false;
+      }
+    }
     function renderPreviewPane(body) {
-      $('sidePaneTitle').textContent = state.preview.filename || 'Preview';
-      const content = state.preview.content || '';
-      const mime = state.preview.mime_type || '';
-      if (/html/i.test(mime) || /\.html?$/i.test(state.preview.filename || '')) {
-        body.innerHTML = '<iframe class="preview-frame" sandbox="allow-scripts allow-forms allow-same-origin"></iframe>';
-        body.querySelector('iframe').srcdoc = normalizePreviewHTML(content);
+      const preview = state.preview || {};
+      $('sidePaneTitle').textContent = preview.filename || (state.previewUrl ? 'Localhost Preview' : 'Preview');
+      const content = preview.content || '';
+      const mime = preview.mime_type || '';
+      const isHTML = /html/i.test(mime) || /\.html?$/i.test(preview.filename || '') || !!state.previewUrl;
+      if (isHTML) {
+        const viewport = state.previewViewport === 'mobile' ? 'mobile' : 'desktop';
+        const zoom = [0.75, 1, 1.25].includes(Number(state.previewZoom)) ? Number(state.previewZoom) : 1;
+        const activeURL = state.previewUrl && isSafeLoopbackPreviewURL(state.previewUrl) ? state.previewUrl : '';
+        body.innerHTML = [
+          '<div class="preview-shell">',
+          '  <div class="preview-controls-bar">',
+          '    <div class="preview-btn-group">',
+          '      <button type="button" class="secondary' + (viewport === 'desktop' ? ' active' : '') + '" data-preview-viewport="desktop">Desktop</button>',
+          '      <button type="button" class="secondary' + (viewport === 'mobile' ? ' active' : '') + '" data-preview-viewport="mobile">Mobile 390px</button>',
+          '    </div>',
+          '    <div class="preview-btn-group">',
+          '      <button type="button" class="secondary' + (zoom === 0.75 ? ' active' : '') + '" data-preview-zoom="0.75">75%</button>',
+          '      <button type="button" class="secondary' + (zoom === 1 ? ' active' : '') + '" data-preview-zoom="1">100%</button>',
+          '      <button type="button" class="secondary' + (zoom === 1.25 ? ' active' : '') + '" data-preview-zoom="1.25">125%</button>',
+          '    </div>',
+          '    <form class="preview-url-form">',
+          '      <input id="previewUrlInput" type="url" placeholder="http://localhost:3000" value="' + escapeHTML(state.previewUrl || '') + '" />',
+          '      <button type="submit" class="secondary">Go</button>',
+          activeURL ? '<button type="button" id="previewResetFile" class="secondary">File</button>' : '',
+          '    </form>',
+          '  </div>',
+          '  <div class="preview-stage-wrap' + (viewport === 'mobile' ? ' mobile' : '') + '">',
+          '    <iframe class="preview-frame" sandbox="allow-scripts allow-forms"></iframe>',
+          '  </div>',
+          '</div>',
+        ].join('\n');
+        const frame = body.querySelector('iframe');
+        const widthStyle = viewport === 'mobile' ? '390px' : (100 / zoom) + '%';
+        frame.style.width = widthStyle;
+        if (viewport === 'mobile') {
+          frame.style.maxWidth = '390px';
+          frame.style.margin = '0 auto';
+        }
+        if (zoom !== 1) {
+          frame.style.transform = 'scale(' + zoom + ')';
+          frame.style.transformOrigin = viewport === 'mobile' ? 'top center' : 'top left';
+        }
+        if (activeURL) {
+          frame.src = activeURL;
+        } else {
+          frame.srcdoc = normalizePreviewHTML(content);
+        }
+        body.querySelectorAll('button[data-preview-viewport]').forEach(btn => {
+          btn.onclick = () => {
+            state.previewViewport = btn.dataset.previewViewport || 'desktop';
+            renderPreviewPane(body);
+          };
+        });
+        body.querySelectorAll('button[data-preview-zoom]').forEach(btn => {
+          btn.onclick = () => {
+            state.previewZoom = Number(btn.dataset.previewZoom) || 1;
+            renderPreviewPane(body);
+          };
+        });
+        const form = body.querySelector('.preview-url-form');
+        if (form) {
+          form.onsubmit = (event) => {
+            event.preventDefault();
+            const raw = ($('previewUrlInput') && $('previewUrlInput').value || '').trim();
+            if (!raw) {
+              state.previewUrl = '';
+              renderPreviewPane(body);
+              return;
+            }
+            if (!isSafeLoopbackPreviewURL(raw)) {
+              notify('Preview URL must target http://localhost or http://127.0.0.1.', 'error');
+              return;
+            }
+            state.previewUrl = raw;
+            renderPreviewPane(body);
+          };
+        }
+        const resetBtn = $('previewResetFile');
+        if (resetBtn) {
+          resetBtn.onclick = () => {
+            state.previewUrl = '';
+            renderPreviewPane(body);
+          };
+        }
       } else if (/^image\//i.test(mime)) {
         const img = document.createElement('img');
         img.alt = state.preview.filename || 'Artifact preview';
@@ -460,9 +568,22 @@
       files.forEach((file, index) => {
         const chip = document.createElement('div');
         chip.className = 'attachment-chip';
-        chip.innerHTML = '<span title="' + escapeHTML(file.name) + '">' + escapeHTML(file.name) + '</span><small>' + escapeHTML(formatBytes(file.size || 0)) + '</small><button type="button" title="Remove attachment">×</button>';
+        let thumbMarkup = '';
+        if (/^image\//i.test(file.type || '') && typeof URL !== 'undefined' && URL.createObjectURL) {
+          if (!file._previewURL) {
+            try { file._previewURL = URL.createObjectURL(file); } catch (_) {}
+          }
+          if (file._previewURL) {
+            thumbMarkup = '<img class="attachment-thumb" src="' + escapeHTML(file._previewURL) + '" alt="" />';
+          }
+        }
+        chip.innerHTML = thumbMarkup + '<span title="' + escapeHTML(file.name) + '">' + escapeHTML(file.name) + '</span><small>' + escapeHTML(formatBytes(file.size || 0)) + '</small><button type="button" title="Remove attachment">×</button>';
         chip.querySelector('button').onclick = () => {
-          state.agentAttachments.splice(index, 1);
+          const [removed] = state.agentAttachments.splice(index, 1);
+          if (removed && removed._previewURL && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+            URL.revokeObjectURL(removed._previewURL);
+            removed._previewURL = '';
+          }
           renderAgentAttachments();
         };
         row.appendChild(chip);
@@ -470,6 +591,12 @@
       $('attachAgentFile').classList.toggle('active', files.length > 0);
     }
     function clearAgentAttachments() {
+      (state.agentAttachments || []).forEach(file => {
+        if (file && file._previewURL && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+          URL.revokeObjectURL(file._previewURL);
+          file._previewURL = '';
+        }
+      });
       state.agentAttachments = [];
       $('agentFileInput').value = '';
       renderAgentAttachments();

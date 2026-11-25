@@ -139,7 +139,9 @@ func (a *app) executeIdleReconcileScheduledRun(ctx context.Context, job Schedule
 	if err := a.markScheduledRunEffectsStarted(job.ID); err != nil {
 		return err
 	}
-	a.appendAgentMessageForRun(project.ID, karoz.ID, job.ID, "system", karozIdleReconcileHook, "Runtime triggered Karoz idle reconciliation after project became idle.")
+	if _, ok := a.appendAgentMessageForRun(project.ID, karoz.ID, job.ID, "system", karozIdleReconcileHook, "Runtime triggered Karoz idle reconciliation after project became idle."); !ok {
+		return fmt.Errorf("could not persist idle reconciliation notification")
+	}
 	userText := "Runtime idle reconciliation requested. The project runtime is quiescent and there is unresolved backlog.\n\n" + a.renderProjectBacklogForKaroz(project.ID) + "\n\nRules:\n- Process backlog, do not merely summarize it.\n- Pending inbox items should be routed to the target agent if that agent is idle, or answered/acked if they belong to Karoz.\n- Pending tasks should be started only through task tools when appropriate; failed tasks require review, retry planning, or user escalation.\n- Unhandled blackboard signals must be consumed exactly once: route to an agent with send_to, create a task, ask the user, ignore with reason, or expire if stale. Then call mark_activity with handling_result.\n- Do not create duplicate handoffs if a matching pending inbox already exists."
 	out, err := a.runScheduledResidentAgentTurn(ctx, job, project, karoz, userText, firstNonEmpty(job.TurnType, "dev"))
 	if err != nil {

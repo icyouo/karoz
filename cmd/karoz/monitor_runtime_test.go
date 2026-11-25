@@ -407,3 +407,78 @@ func TestProcessOutputMonitorSaveFailureRecordsCoverageGap(t *testing.T) {
 		t.Fatalf("failed monitor save published mutation: %+v", got)
 	}
 }
+
+func TestProcessOriginSuppressesMonitorFeedback(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "p1")
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	project := Project{ID: projectID(path), Name: "p1", Path: path}
+	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: root})
+	t.Cleanup(a.supervisorCancel)
+	a.agentDirectoryLocked().agents[project.ID] = []Agent{{ID: "owner", ProjectID: project.ID}}
+	now := time.Now().UTC()
+	a.monitors[project.ID] = []Monitor{
+		{
+			ID: "m-out", ProjectID: project.ID, AgentID: "owner", Name: "out",
+			Revision: 1, State: monitordomain.StateActive,
+			Trigger: monitordomain.Trigger{
+				Kind: monitordomain.TriggerProcessOutput, Revision: 1,
+				ProcessID: "proc-loop", Pattern: "loop",
+			},
+			Action: monitordomain.Action{
+				Revision: 1, Kind: monitordomain.ActionBlackboard,
+				Topic: "output", Template: "matched",
+			},
+			CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "m-exit", ProjectID: project.ID, AgentID: "owner", Name: "exit",
+			Revision: 1, State: monitordomain.StateActive,
+			Trigger: monitordomain.Trigger{
+				Kind: monitordomain.TriggerProcessExit, Revision: 1,
+				ProcessID: "proc-loop", FailureOnly: true,
+			},
+			Action: monitordomain.Action{
+				Revision: 1, Kind: monitordomain.ActionBlackboard,
+				Topic: "exit", Template: "exited",
+			},
+			CreatedAt: now, UpdatedAt: now,
+		},
+	}
+
+	// Self-originated monitor events must be suppressed unless IncludeMonitorEvents is set.
+	a.evaluateProcessOutput(processOutputObservation{
+		ProjectID: project.ID,
+		ProcessID: "proc-loop",
+		Origin:    monitordomain.Origin{Kind: "monitor", MonitorID: "m-out", FireID: "fire-1"},
+		Line:      processdomain.OutputLine{Sequence: 1, Text: "loop"},
+	})
+	code := 1
+	termEvent := (processTerminalOutboxEvent{
+		ID:         processTerminalEventID("proc-loop"),
+		ProjectID:  project.ID,
+		AgentID:    "owner",
+		ProcessID:  "proc-loop",
+		Origin:     monitordomain.Origin{Kind: "monitor", MonitorID: "m-exit", FireID: "fire-2"},
+		State:      processdomain.StateFailed,
+		ExitCode:   code,
+		OccurredAt: now,
+	}).runtimeEvent()
+	a.emitRuntimeStateChanged(termEvent)
+
+	if entries := a.blackboardFor(project.ID, 20); len(entries) != 0 {
+		t.Fatalf("monitor-originated process events should be suppressed, got %+v", entries)
+	}
+
+	// A process with empty Origin defaults to runtime origin and triggers normally.
+	a.evaluateProcessOutput(processOutputObservation{
+		ProjectID: project.ID,
+		ProcessID: "proc-loop",
+		Line:      processdomain.OutputLine{Sequence: 2, Text: "loop"},
+	})
+	if entries := a.blackboardFor(project.ID, 20); len(entries) != 1 {
+		t.Fatalf("expected runtime-origin output to trigger once, got %+v", entries)
+	}
+}

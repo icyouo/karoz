@@ -114,6 +114,48 @@ func TestRuntimeStripHidesZeroBadgesAndPreviewUsesIconOnlyControl(t *testing.T) 
 	}
 }
 
+func TestProjectOverflowMenuOffersSafeRemoval(t *testing.T) {
+	projects, err := staticFS.ReadFile("static/js/projects-tasks.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectSource := string(projects)
+	for _, fragment := range []string{
+		"project-menu-trigger",
+		"project-overflow-menu",
+		"<circle cx=\"3.5\" cy=\"12\"",
+		"<circle cx=\"20.5\" cy=\"12\"",
+		"const wasOpen = menu.getAttribute('aria-expanded') === 'true';",
+		"Remove project",
+		"method: 'DELETE'",
+		"Its local files remain at",
+	} {
+		if !strings.Contains(projectSource, fragment) {
+			t.Fatalf("project overflow menu missing %q", fragment)
+		}
+	}
+
+	styles, err := staticFS.ReadFile("static/css/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styleSource := string(styles)
+	for _, fragment := range []string{
+		".project-menu-trigger",
+		".project-row:focus-within .project-menu-trigger",
+	} {
+		if !strings.Contains(styleSource, fragment) {
+			t.Fatalf("project menu focus styling missing %q", fragment)
+		}
+	}
+	if strings.Contains(styleSource, ".project-row.active .project-menu-trigger") {
+		t.Fatal("selected projects must not permanently reveal the project menu")
+	}
+	if strings.Contains(styleSource, ".project-row { position: relative; display: flex; min-width: 0; align-items: center; border-bottom:") {
+		t.Fatal("project rows must not render separators")
+	}
+}
+
 func TestToolBatchFrontendKeepsMessageBoundaries(t *testing.T) {
 	renderer, err := staticFS.ReadFile("static/js/chat-render.js")
 	if err != nil {

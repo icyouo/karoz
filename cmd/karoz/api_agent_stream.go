@@ -99,13 +99,15 @@ func (a *app) streamAgentMessage(w http.ResponseWriter, r *http.Request, project
 		message = emptyAgentOutputMessage(agent)
 		log.Printf("agent runtime returned empty output project=%s agent=%s", project.ID, agent.ID)
 	}
-	if _, appended := a.appendAgentMessageForRun(project.ID, agent.ID, runID, "assistant", "result", message); !appended {
-		writeSSE(w, "cancelled", map[string]string{"message": "Agent run was replaced before its result could be committed."})
+	if err := a.commitAgentRunResultWithLedger(project, agent, runID, "result", message, true); err != nil {
+		event := "error"
+		if errors.Is(err, context.Canceled) {
+			event = "cancelled"
+		}
+		writeSSE(w, event, map[string]string{"message": err.Error()})
 		flusher.Flush()
 		return
 	}
-	a.transitionAgentRun(project.ID, agent.ID, runID, RunStateCompleting)
-	a.finishAgentRun(project.ID, agent.ID, runID, RunStateDone, nil)
 	writeSSE(w, "done", map[string]any{"message": message, "agent": a.agentWithRuntimeState(project, agent)})
 	flusher.Flush()
 }

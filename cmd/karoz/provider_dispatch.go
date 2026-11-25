@@ -46,8 +46,12 @@ func (a *app) invokeCLI2API(ctx context.Context, req CLI2APIRequest) (CLI2APIRes
 			Stub:     true,
 		}, nil
 	case "claude":
+		ctx, cancel := context.WithTimeout(ctx, localCLIRequestTimeout())
+		defer cancel()
 		return a.invokeClaude(ctx, workdir, prompt, req.Mode)
 	case "codex":
+		ctx, cancel := context.WithTimeout(ctx, localCLIRequestTimeout())
+		defer cancel()
 		return a.invokeCodex(ctx, workdir, prompt, req.Mode)
 	default:
 		return CLI2APIResponse{}, fmt.Errorf("unsupported provider %q", provider)

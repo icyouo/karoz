@@ -113,7 +113,9 @@ func (a *app) sendToAgentWithRoute(projectID, sourceAgentID, parentRunID string,
 	if sourceAgentID == "karoz" {
 		sourceKind = "coordinator"
 	}
-	a.appendAgentMessage(projectID, target.ID, "system", intent, "["+sourceKind+"]<from:"+a.agentNickname(project, sourceAgentID)+"> "+subject+"\n\n"+body)
+	if message := a.appendAgentMessage(projectID, target.ID, "system", intent, "["+sourceKind+"]<from:"+a.agentNickname(project, sourceAgentID)+"> "+subject+"\n\n"+body); message.ID == "" {
+		return toolJSON(map[string]any{"error": "save_failed", "message": "could not persist handoff conversation message", "message_id": msg.ID})
+	}
 	a.triggerAgentHandoffResponse(project, target, msg)
 	return toolJSON(map[string]any{"message_id": msg.ID, "correlation_id": msg.CorrelationID, "parent_run_id": msg.ParentRunID, "status": HandoffDelivered, "target": map[string]any{"nickname": firstNonEmpty(target.Nickname, target.ID)}, "delivery": map[string]any{"state": HandoffDelivered, "retry_required": false, "auto_response": true}})
 }
@@ -190,7 +192,9 @@ func (a *app) replyToInboxMessage(projectID, sourceAgentID, parentRunID string, 
 	a.markInboxReplied(projectID, sourceAgentID, original.ID, body, msg.ID)
 	a.recordPlanReviewDelivery(projectID, original.ID, sourceAgentID, body)
 	a.recordPlanGroupDelivery(projectID, original.ID, body)
-	a.appendAgentMessage(projectID, original.SourceAgentID, "system", "reply", "[peer]<from:"+a.agentNickname(project, sourceAgentID)+"> "+subject+"\n\n"+body)
+	if message := a.appendAgentMessage(projectID, original.SourceAgentID, "system", "reply", "[peer]<from:"+a.agentNickname(project, sourceAgentID)+"> "+subject+"\n\n"+body); message.ID == "" {
+		return toolJSON(map[string]any{"error": "save_failed", "message": "could not persist handoff reply", "message_id": msg.ID})
+	}
 	a.triggerAgentHandoffResponse(project, target, msg)
 	return toolJSON(map[string]any{"message_id": msg.ID, "reply_to_id": original.ID, "correlation_id": msg.CorrelationID, "parent_run_id": msg.ParentRunID, "status": HandoffDelivered, "target": map[string]any{"nickname": a.agentNickname(project, original.SourceAgentID)}, "delivery": map[string]any{"state": HandoffDelivered, "retry_required": false, "auto_response": true}})
 }
@@ -226,7 +230,9 @@ func (a *app) declineInboxHandoff(projectID, agentID string, args map[string]any
 			}
 		}
 	}
-	a.appendAgentMessage(projectID, msg.SourceAgentID, "system", "handoff_declined", "Handoff "+messageID+" declined by "+agentID+": "+reason)
+	if message := a.appendAgentMessage(projectID, msg.SourceAgentID, "system", "handoff_declined", "Handoff "+messageID+" declined by "+agentID+": "+reason); message.ID == "" {
+		return toolJSON(map[string]any{"error": "save_failed", "message": "could not persist handoff decline"})
+	}
 	return toolJSON(map[string]any{"inbox_message_id": messageID, "correlation_id": msg.CorrelationID, "status": HandoffDeclined, "reason": reason})
 }
 
@@ -358,7 +364,9 @@ func (a *app) completeCoordinatorHandoff(msg AgentInboxMessage, agent Agent, kin
 	if err := a.queueInboxMessage(msg.ProjectID, notification); err != nil {
 		return delivery, err
 	}
-	a.appendAgentMessage(msg.ProjectID, owner.ID, "system", "result", "[peer]<from:"+firstNonEmpty(agent.Nickname, agent.ID)+"> "+notification.Subject+"\n\n"+completion)
+	if message := a.appendAgentMessage(msg.ProjectID, owner.ID, "system", "result", "[peer]<from:"+firstNonEmpty(agent.Nickname, agent.ID)+"> "+notification.Subject+"\n\n"+completion); message.ID == "" {
+		return delivery, fmt.Errorf("could not persist delegated result message")
+	}
 	a.triggerAgentHandoffResponse(project, owner, notification)
 	delivery.ResultMessageID = notification.ID
 	return delivery, nil

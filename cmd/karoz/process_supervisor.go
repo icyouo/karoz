@@ -13,6 +13,7 @@ import (
 	"time"
 
 	executiondomain "github.com/karoz/karoz/internal/execution"
+	monitordomain "github.com/karoz/karoz/internal/monitor"
 	processdomain "github.com/karoz/karoz/internal/process"
 )
 
@@ -81,6 +82,7 @@ type processSupervisorConfig struct {
 
 type processStartRequest struct {
 	ID, ProjectID, AgentID, RunID string
+	Origin                        monitordomain.Origin
 	Command, Workdir, Description string
 	Lifetime                      time.Duration
 	Unlimited                     bool
@@ -291,7 +293,8 @@ func (supervisor *processSupervisor) Start(_ context.Context, request processSta
 
 	now := time.Now().UTC()
 	record := processdomain.Process{
-		ID: request.ID, ProjectID: request.ProjectID, AgentID: request.AgentID,
+		Origin: request.Origin,
+		ID:     request.ID, ProjectID: request.ProjectID, AgentID: request.AgentID,
 		RunID: request.RunID, Command: request.Command, Workdir: request.Workdir,
 		Description: request.Description, State: processdomain.StateStarting,
 		LifetimeMS: lifetime.Milliseconds(), StartedAt: now, UpdatedAt: now,
@@ -405,6 +408,11 @@ func (supervisor *processSupervisor) validateStartRequest(request processStartRe
 	if request.ID == "" || request.ProjectID == "" || request.AgentID == "" ||
 		request.Command == "" || request.Workdir == "" {
 		return 0, errors.New("invalid background process request")
+	}
+	if request.Origin.Kind != "" {
+		if err := request.Origin.Validate(); err != nil {
+			return 0, err
+		}
 	}
 	if request.Lifetime < 0 {
 		return 0, errors.New("process lifetime must not be negative")

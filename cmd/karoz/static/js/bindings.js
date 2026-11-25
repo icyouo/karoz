@@ -70,13 +70,45 @@
     $('openSettings').onclick = () => {
       renderExtraWorkspaces();
       syncWorkspaceSettingsLock();
+      if (typeof loadInstalledSkills === 'function') void loadInstalledSkills();
       openModal('settingsModal');
     };
+    const installSkillBtn = $('installSkillBtn');
+    if (installSkillBtn) {
+      installSkillBtn.onclick = async () => {
+        const input = $('skillInstallSource');
+        const source = input ? input.value.trim() : '';
+        if (!source) return notify('Enter a GitHub owner/repo or skill URL.', 'error');
+        installSkillBtn.disabled = true;
+        try {
+          const installed = await api('/api/skills', { method: 'POST', body: JSON.stringify({ source }) });
+          if (input) input.value = '';
+          state.skillsProjectID = '';
+          if (typeof loadInstalledSkills === 'function') await loadInstalledSkills();
+          notify('Installed skill "' + (installed.name || installed.slug || 'skill') + '".', 'success');
+        } catch (err) {
+          notify(err.message || String(err), 'error');
+        } finally {
+          installSkillBtn.disabled = false;
+        }
+      };
+    }
     $('agentRuntimeTools').onclick = async (event) => {
       const button = event.target.closest('button[data-side-panel]');
       if (!button) return;
       await openRuntimePanel(button.dataset.sidePanel);
     };
+    const devicesToggle = $('toggleDevicesPane');
+    if (devicesToggle) {
+      devicesToggle.onclick = async () => {
+        if (!state.project) return notify('Select a project first.', 'error');
+        if (state.sidePanel === 'devices') {
+          closeSidePane();
+          return;
+        }
+        if (typeof openDevicesPane === 'function') await openDevicesPane();
+      };
+    }
     $('togglePreviewPane').onclick = async () => {
       if (state.sidePanel) {
         closeSidePane();
