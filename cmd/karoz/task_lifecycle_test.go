@@ -22,8 +22,6 @@ func TestTaskCancelStopsExecutorProcessGroup(t *testing.T) {
 			pidFile := filepath.Join(t.TempDir(), "executor.pid")
 			startsFile := filepath.Join(t.TempDir(), "executor.starts")
 			writeExecutable(t, filepath.Join(bin, provider), `#!/bin/sh
-while [ "$#" -gt 0 ] && [ "$1" != "-C" ]; do shift; done
-shift
 sleep 30 &
 echo started >> "$TASK_TEST_STARTS"
 echo $! > "$TASK_TEST_PID_FILE"
