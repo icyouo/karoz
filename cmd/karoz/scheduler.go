@@ -255,10 +255,7 @@ func (a *app) commitScheduledRunResult(project Project, agent Agent, runID, inte
 	if hook := a.agentRuntimeLocked().scheduledRunBeforeResultCommitHook; hook != nil {
 		hook()
 	}
-	if !a.commitAgentRunResultWithLedger(project, agent, runID, intent, body, false) {
-		return context.Canceled
-	}
-	return nil
+	return a.commitAgentRunResultWithLedger(project, agent, runID, intent, body, false)
 }
 
 func (a *app) emitScheduledRunQueued(job ScheduledRun) {
@@ -312,7 +309,7 @@ func (a *app) saveScheduledRuns() error {
 	if runtime.scheduledRunsSaveOverride != nil {
 		return runtime.scheduledRunsSaveOverride(snapshot)
 	}
-	return persistenceadapter.NewJSONStore(a.settings.DataDir).Save("agent-run-queue.json", snapshot, 0644)
+	return persistenceadapter.NewJSONStore(a.settings.DataDir).SaveCompact("agent-run-queue.json", snapshot, 0644)
 }
 
 func (a *app) markScheduledRunEffectsStarted(runID string) error {
@@ -341,7 +338,7 @@ func (a *app) loadScheduledRuns() error {
 		// minute value for every turn, including plan/dev. Preserve explicitly
 		// supplied non-default values, while upgrading that legacy default to
 		// the selected resident execution total and recording a separate wait.
-		if err := persistenceadapter.NewJSONStore(a.settings.DataDir).Save("agent-run-queue.json", scheduledRunSnapshot{Jobs: snapshot.Jobs, CompletedMonitorFires: snapshot.CompletedMonitorFires, MonitorFirePendingRemoved: snapshot.MonitorFirePendingRemoved}, 0644); err != nil {
+		if err := persistenceadapter.NewJSONStore(a.settings.DataDir).SaveCompact("agent-run-queue.json", scheduledRunSnapshot{Jobs: snapshot.Jobs, CompletedMonitorFires: snapshot.CompletedMonitorFires, MonitorFirePendingRemoved: snapshot.MonitorFirePendingRemoved}, 0644); err != nil {
 			return err
 		}
 	}

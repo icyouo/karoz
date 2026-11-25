@@ -40,10 +40,11 @@ func invokeClaudeDirectStreamWithBudget(ctx context.Context, workdir, prompt, mo
 // resident tool loop. It owns the messages history and the per-round
 // tool_result buffer that becomes the next user message.
 type claudeStreamWire struct {
-	messages []map[string]any
-	model    string
-	effort   string
-	results  []map[string]any
+	messages           []map[string]any
+	model              string
+	effort             string
+	results            []map[string]any
+	currentPromptIndex int
 }
 
 func newClaudeStreamWire(workdir, prompt, model, effort string, transcript []AgentTranscriptItem) *claudeStreamWire {
@@ -52,9 +53,10 @@ func newClaudeStreamWire(workdir, prompt, model, effort string, transcript []Age
 		"type": "text", "text": prompt + "\n\nProject workspace: " + workdir,
 	}})
 	return &claudeStreamWire{
-		messages: messages,
-		model:    model,
-		effort:   effort,
+		messages:           messages,
+		model:              model,
+		effort:             effort,
+		currentPromptIndex: len(messages) - 1,
 	}
 }
 
@@ -112,7 +114,12 @@ func (w *claudeStreamWire) appendInterruptTurn(_ residentStepOutput, interrupts 
 func (w *claudeStreamWire) appendToolCall(codexToolCall) {}
 
 func (w *claudeStreamWire) appendToolResult(call codexToolCall, result string, success bool) {
-	w.results = append(w.results, map[string]any{"type": "tool_result", "tool_use_id": firstNonEmpty(call.CallID, call.ID), "content": result, "is_error": !success})
+	w.results = append(w.results, map[string]any{
+		"type":        "tool_result",
+		"tool_use_id": firstNonEmpty(call.CallID, call.ID),
+		"content":     compactToolResultForLiveStep(result, 24_000),
+		"is_error":    !success,
+	})
 }
 
 func (w *claudeStreamWire) appendInlineInterrupts(interrupts []AgentInterrupt) {
@@ -129,11 +136,135 @@ func (w *claudeStreamWire) appendLimitMessage(limitReason string) {
 }
 
 func (w *claudeStreamWire) finalize(parentCtx, finalCtx context.Context, callbacks AgentStreamCallbacks) error {
-	_, _, err := streamClaudeStep(finalCtx, w.model, w.effort, w.messages, nil, callbacks)
+	compacted := compactClaudeMessagesForFinal(w.messages, 90_000, w.currentPromptIndex)
+	_, _, err := streamClaudeStep(finalCtx, w.model, w.effort, compacted, nil, callbacks)
 	if err != nil && parentCtx.Err() != nil {
 		return parentCtx.Err()
 	}
 	return err
+}
+
+func compactClaudeMessagesForFinal(messages []map[string]any, maxChars int, requiredIndexes ...int) []map[string]any {
+	if len(messages) <= 2 || maxChars <= 0 {
+		return messages
+	}
+	fullRaw, err := json.Marshal(messages)
+	if err == nil && len(fullRaw) <= maxChars {
+		return messages
+	}
+
+	type claudeGroup struct {
+		indexes  []int
+		cost     int
+		required bool
+	}
+	reqSet := map[int]bool{
+		0:                 true,
+		len(messages) - 1: true,
+	}
+	for _, idx := range requiredIndexes {
+		if idx >= 0 && idx < len(messages) {
+			reqSet[idx] = true
+		}
+	}
+
+	var groups []claudeGroup
+	for i := 0; i < len(messages); {
+		indices := []int{i}
+		if strings.EqualFold(fmt.Sprint(messages[i]["role"]), "assistant") &&
+			claudeMessageHasBlockType(messages[i], "tool_use") &&
+			i+1 < len(messages) &&
+			strings.EqualFold(fmt.Sprint(messages[i+1]["role"]), "user") &&
+			claudeMessageHasBlockType(messages[i+1], "tool_result") {
+			indices = append(indices, i+1)
+		}
+		cost := 0
+		required := false
+		for _, idx := range indices {
+			raw, _ := json.Marshal(messages[idx])
+			cost += len(raw)
+			if reqSet[idx] {
+				required = true
+			}
+		}
+		groups = append(groups, claudeGroup{
+			indexes:  indices,
+			cost:     cost,
+			required: required,
+		})
+		i += len(indices)
+	}
+
+	selected := make([]bool, len(groups))
+	used := 0
+	for gi, g := range groups {
+		if g.required {
+			selected[gi] = true
+			used += g.cost
+		}
+	}
+	omitted := false
+	for gi := len(groups) - 1; gi >= 0; gi-- {
+		if selected[gi] {
+			continue
+		}
+		if used > 0 && used+groups[gi].cost > maxChars {
+			omitted = true
+			break
+		}
+		if groups[gi].cost > maxChars {
+			omitted = true
+			break
+		}
+		selected[gi] = true
+		used += groups[gi].cost
+	}
+	for gi := range groups {
+		if !selected[gi] {
+			omitted = true
+			break
+		}
+	}
+
+	out := make([]map[string]any, 0, len(messages)+1)
+	insertedNotice := false
+	for gi, g := range groups {
+		if !selected[gi] {
+			if omitted && !insertedNotice && gi > 0 {
+				out = append(out, map[string]any{
+					"role":    "user",
+					"content": "[Earlier Claude reasoning and tool evidence was omitted atomically to fit the final response context.]",
+				})
+				insertedNotice = true
+			}
+			continue
+		}
+		for _, idx := range g.indexes {
+			out = append(out, messages[idx])
+		}
+	}
+	return out
+}
+
+func claudeMessageHasBlockType(msg map[string]any, targetType string) bool {
+	if msg == nil {
+		return false
+	}
+	switch content := msg["content"].(type) {
+	case []map[string]any:
+		for _, block := range content {
+			if fmt.Sprint(block["type"]) == targetType {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range content {
+			if block, ok := item.(map[string]any); ok && fmt.Sprint(block["type"]) == targetType {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func streamClaudeStep(ctx context.Context, model, effort string, messages []map[string]any, tools []map[string]any, callbacks AgentStreamCallbacks) (claudeStreamResult, []AgentInterrupt, error) {

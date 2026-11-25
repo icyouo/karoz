@@ -33,6 +33,12 @@ func (a *app) notifyTaskRuntimeHooks(project Project, task Task) {
 		if hooks[i].Status != "pending" || hooks[i].HookType != "resident_task_completion" {
 			continue
 		}
+		hint := fmt.Sprintf("[task hook] task_id=%s success=%t summary=%s", task.ID, success, strings.TrimSpace(summary))
+		if message := a.appendAgentMessageLocked(project.ID, hooks[i].AgentID, "system", "task_hook", hint); message.ID == "" {
+			// Retain pending delivery on a session-store fault instead of
+			// acknowledging a notification that the owner cannot replay.
+			continue
+		}
 		hooks[i].Status = "delivered"
 		hooks[i].DeliveredAt = &now
 		hooks[i].ResponsePayload = map[string]any{"success": success, "summary": summary, "task_id": task.ID, "status": task.Status}
@@ -41,8 +47,7 @@ func (a *app) notifyTaskRuntimeHooks(project Project, task Task) {
 	coordinator.hooks[key] = hooks
 	a.mu.Unlock()
 	for _, hook := range deliveries {
-		hint := fmt.Sprintf("[task hook] task_id=%s success=%t summary=%s", task.ID, success, strings.TrimSpace(summary))
-		a.appendAgentMessage(project.ID, hook.AgentID, "system", "task_hook", hint)
+		a.maybeCheckpointAgentSession(project.ID, hook.AgentID, false)
 		a.appendTaskLog(project.ID, task.ID, "resident hook delivered to agent "+hook.AgentID+": "+hook.ID)
 		a.triggerAgentTaskEvent(project, task, hook)
 	}

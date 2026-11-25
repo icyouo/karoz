@@ -1,6 +1,7 @@
 package persistence
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,22 @@ func (store JSONStore) Load(name string, target any) (bool, error) {
 	return true, nil
 }
 
+// LoadStrict preserves an authoritative file on decode failure. Unlike
+// optional configuration, a corrupt event log must not become an empty store.
+func (store JSONStore) LoadStrict(name string, target any) (bool, error) {
+	data, err := os.ReadFile(store.path(name))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return true, fmt.Errorf("decode authoritative state %s: %w", store.path(name), err)
+	}
+	return true, nil
+}
+
 func (store JSONStore) quarantineCorrupt(name string) (string, error) {
 	path := store.path(name)
 	quarantined := fmt.Sprintf("%s.corrupt-%d", path, time.Now().UnixNano())
@@ -54,6 +71,10 @@ func (store JSONStore) Save(name string, value any, perm os.FileMode) error {
 	return SaveJSONAtomic(store.path(name), value, perm)
 }
 
+func (store JSONStore) SaveCompact(name string, value any, perm os.FileMode) error {
+	return SaveJSONCompactAtomic(store.path(name), value, perm)
+}
+
 // SaveJSONAtomic writes value as indented JSON to path via a temp file +
 // rename, fsyncing the temp file before the rename and the directory after
 // it, so a crash cannot tear the file or lose the rename.
@@ -63,13 +84,45 @@ func SaveJSONAtomic(path string, value any, perm os.FileMode) error {
 		return err
 	}
 	data = append(data, '\n')
+	return writeBytesAtomic(path, data, perm)
+}
+
+// SaveJSONCompactAtomic writes value as compact JSON to path using the same
+// temp-file + fsync + atomic rename protocol as SaveJSONAtomic, avoiding
+// whitespace inflation on high-frequency machine ledgers.
+func SaveJSONCompactAtomic(path string, value any, perm os.FileMode) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return writeBytesAtomic(path, data, perm)
+}
+
+func writeBytesAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	tmp := fmt.Sprintf("%s.tmp-%d-%d", path, os.Getpid(), time.Now().UnixNano())
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
-	if err != nil {
-		return err
+	// Wall clocks can return the same nanosecond for concurrent writers. Use
+	// random names with exclusive creation, preserving the caller's umask just
+	// as a normal OpenFile does (CreateTemp followed by Chmod would bypass it).
+	var tmp string
+	var file *os.File
+	var err error
+	for {
+		var nonce [16]byte
+		if _, err = rand.Read(nonce[:]); err != nil {
+			return err
+		}
+		tmp = fmt.Sprintf("%s.tmp-%x", path, nonce)
+		file, err = os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		break
 	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()

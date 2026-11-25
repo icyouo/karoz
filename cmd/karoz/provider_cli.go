@@ -12,8 +12,6 @@ import (
 )
 
 func (a *app) invokeClaude(ctx context.Context, workdir, prompt, mode string) (CLI2APIResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, taskExecutorTimeout())
-	defer cancel()
 	permissionMode := "plan"
 	if strings.EqualFold(mode, "edit") {
 		permissionMode = "bypassPermissions"
@@ -29,8 +27,6 @@ func (a *app) invokeClaude(ctx context.Context, workdir, prompt, mode string) (C
 }
 
 func (a *app) invokeCodex(ctx context.Context, workdir, prompt, mode string) (CLI2APIResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, taskExecutorTimeout())
-	defer cancel()
 	sandbox := "read-only"
 	if strings.EqualFold(mode, "edit") {
 		sandbox = "danger-full-access"
@@ -45,7 +41,9 @@ func (a *app) invokeCodex(ctx context.Context, workdir, prompt, mode string) (CL
 	return CLI2APIResponse{Provider: "codex", Output: strings.TrimSpace(result.Output())}, nil
 }
 
-func taskExecutorTimeout() time.Duration {
+// localCLIRequestTimeout bounds standalone CLI model requests. Development
+// tasks bypass this request-level limit and use their admitted Task context.
+func localCLIRequestTimeout() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("KAROZ_TASK_TIMEOUT"))
 	if raw == "" {
 		return 30 * time.Minute

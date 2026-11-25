@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"os"
+	"os/exec"
+	"strings"
 )
 
 func (a *app) handleTasks(w http.ResponseWriter, r *http.Request, project Project, parts []string) {
@@ -96,5 +100,50 @@ func (a *app) handleTasks(w http.ResponseWriter, r *http.Request, project Projec
 		writeJSON(w, TaskLogResponse{Content: string(logs)})
 		return
 	}
+	if len(parts) == 2 && parts[1] == "diff" && r.Method == http.MethodGet {
+		diff, err := a.readTaskDiff(r.Context(), project, task)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, TaskLogResponse{Content: diff})
+		return
+	}
 	http.NotFound(w, r)
+}
+
+func (a *app) readTaskDiff(ctx context.Context, project Project, task Task) (string, error) {
+	dir := strings.TrimSpace(task.WorktreePath)
+	if dir != "" {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			dir = ""
+		}
+	}
+	if dir == "" {
+		dir = strings.TrimSpace(project.Path)
+	}
+	if dir == "" {
+		return "", nil
+	}
+	const maxDiffBytes = 256 << 10
+	runGitDiff := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "diff"}, args...)...)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		if err := cmd.Run(); err != nil {
+			return "", err
+		}
+		raw := out.Bytes()
+		if len(raw) > maxDiffBytes {
+			return string(raw[:maxDiffBytes]) + "\n... (diff truncated)\n", nil
+		}
+		return string(raw), nil
+	}
+	if out, err := runGitDiff("HEAD"); err == nil {
+		return out, nil
+	}
+	if out, err := runGitDiff(); err == nil {
+		return out, nil
+	}
+	return "", nil
 }

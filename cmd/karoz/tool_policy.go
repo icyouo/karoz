@@ -156,6 +156,13 @@ func residentStaticToolPolicies() []residentToolPolicy {
 		p("submit_plan", "planning", plan, true, residentAllowAll, nil),
 		p("reconcile_plan_history", "planning", plan, true, residentAllowAll, nil),
 		p("advance_plan", "planning", plan, true, residentAllowAll, residentOwnsActivePlan),
+
+		p("device_list", "devices", all, false, residentAllowAll, nil),
+		p("device_logs", "devices", all, false, residentAllowAll, nil),
+		p("android_device_start", "devices", dev, true, residentAllowAll, nil),
+		p("device_screenshot", "devices", dev, true, residentAllowAll, nil),
+		p("device_action", "devices", dev, true, residentAllowAll, nil),
+		p("android_adb_exec", "devices", dev, true, residentAllowAll, nil),
 	}
 }
 

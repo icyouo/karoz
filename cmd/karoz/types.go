@@ -6,6 +6,7 @@ import (
 	agentdomain "github.com/karoz/karoz/internal/agent"
 	artifactdomain "github.com/karoz/karoz/internal/artifact"
 	collaborationdomain "github.com/karoz/karoz/internal/collaboration"
+	devicedomain "github.com/karoz/karoz/internal/device"
 	executiondomain "github.com/karoz/karoz/internal/execution"
 	monitordomain "github.com/karoz/karoz/internal/monitor"
 	processdomain "github.com/karoz/karoz/internal/process"
@@ -45,6 +46,7 @@ type app struct {
 	sandboxEnforcer      executiondomain.SandboxEnforcer
 	agentService         *agentdomain.Service
 	taskService          *taskdomain.Service
+	deviceManager        *devicedomain.Manager
 }
 
 type Settings = settingsdomain.Settings
@@ -249,6 +251,7 @@ type ResidentToolContext struct {
 	Workdir         string
 	RunID           string
 	TurnType        string
+	Origin          monitordomain.Origin
 	EnforceRunScope bool
 	EnforcePolicy   bool
 }

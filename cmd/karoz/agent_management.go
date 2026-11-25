@@ -388,9 +388,6 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	if agentID == "karoz" {
 		return fmt.Errorf("default agent cannot be deleted")
 	}
-	if group, ok := a.groupForAgent(project.ID, agentID); ok && group.CoordinatorAgentID == agentID {
-		return fmt.Errorf("group coordinator cannot be deleted before coordination is transferred")
-	}
 	key := projectAgentKey(project.ID, agentID)
 	a.mu.Lock()
 	agents := a.agentDirectoryLocked().agents[project.ID]
@@ -456,7 +453,48 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 		a.mu.Unlock()
 		return fmt.Errorf("agent %s not found", agentID)
 	}
+	groupsChanged := false
+	groups := a.collaborationServiceLocked().GroupsFor(project.ID)
+	remainingGroups := make([]AgentGroup, 0, len(groups))
+	dissolvedGroupIDs := map[string]bool{}
+	for _, group := range groups {
+		if group.CoordinatorAgentID == agentID {
+			groupsChanged = true
+			dissolvedGroupIDs[group.ID] = true
+			continue
+		}
+		members := make([]string, 0, len(group.MemberAgentIDs))
+		for _, memberID := range group.MemberAgentIDs {
+			if memberID != agentID {
+				members = append(members, memberID)
+			}
+		}
+		if len(members) == 0 {
+			groupsChanged = true
+			continue
+		}
+		if len(members) != len(group.MemberAgentIDs) {
+			groupsChanged = true
+			group.MemberAgentIDs = members
+			group.Version++
+			group.UpdatedAt = time.Now().UTC()
+		}
+		remainingGroups = append(remainingGroups, group)
+	}
+	for i := range next {
+		if !dissolvedGroupIDs[next[i].GroupID] {
+			continue
+		}
+		next[i].GroupID = ""
+		next[i].GroupName = ""
+		next[i].GroupRole = ""
+		next[i].GroupOrder = 0
+		next[i].UpdatedAt = time.Now().UTC()
+	}
 	a.agentDirectoryLocked().agents[project.ID] = next
+	if groupsChanged {
+		a.collaborationServiceLocked().ReplaceGroups(project.ID, remainingGroups)
+	}
 	// A deleted owner must not leave a latent monitor able to wake a recreated
 	// same-ID agent.  Pending work is discarded under the same deletion fence.
 	probeMonitorIDs := make([]string, 0)
@@ -515,6 +553,11 @@ func (a *app) deleteProjectAgent(project Project, agentID string) error {
 	}
 	if err := a.saveAgents(); err != nil {
 		return err
+	}
+	if groupsChanged {
+		if err := a.saveGroupsForProject(project.ID); err != nil {
+			return err
+		}
 	}
 	if err := a.saveAgentRoutes(); err != nil {
 		return err

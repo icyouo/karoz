@@ -95,13 +95,10 @@ func (a *app) appendAgentModelOnlyTranscriptForRun(projectID, agentID, runID, in
 	for _, item := range a.conversationServiceLocked().TranscriptsFor(key) {
 		if item.ModelOnly && item.RunID == runID && item.Role == "user" && item.Intent == intent && item.Body == body {
 			a.mu.Unlock()
-			if err := a.saveAgentSessionEvents(); err != nil {
-				return item, true, err
-			}
 			return item, true, nil
 		}
 	}
-	session := a.ensureAgentSessionLocked(projectID, agentID)
+	session := a.agentSessionForEventLocked(projectID, agentID)
 	item := AgentTranscriptItem{
 		ID:        messageID(),
 		ProjectID: projectID,
@@ -117,10 +114,10 @@ func (a *app) appendAgentModelOnlyTranscriptForRun(projectID, agentID, runID, in
 		ModelOnly: true,
 		CreatedAt: time.Now().UTC(),
 	}
-	a.appendAgentSessionEventLocked(newAgentModelInputSessionEvent(item))
+	err := a.commitAgentSessionEventsLocked(newAgentModelInputSessionEvent(item))
 	a.mu.Unlock()
-	if err := a.saveAgentSessionEvents(); err != nil {
-		return item, true, err
+	if err != nil {
+		return AgentTranscriptItem{}, false, err
 	}
 	return item, true, nil
 }

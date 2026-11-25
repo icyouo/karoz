@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	monitordomain "github.com/karoz/karoz/internal/monitor"
 	processdomain "github.com/karoz/karoz/internal/process"
 )
 
@@ -19,6 +20,7 @@ type processTerminalOutboxEvent struct {
 	AgentID    string
 	ProcessID  string
 	RunID      string
+	Origin     monitordomain.Origin
 	State      processdomain.State
 	ExitCode   int
 	OccurredAt time.Time
@@ -33,17 +35,26 @@ func (event processTerminalOutboxEvent) validate() error {
 		event.OccurredAt.IsZero() {
 		return errors.New("invalid process terminal outbox event")
 	}
+	if event.Origin.Kind != "" {
+		if err := event.Origin.Validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (event processTerminalOutboxEvent) runtimeEvent() RuntimeEvent {
 	exitCode := event.ExitCode
+	origin := event.Origin
+	if origin.Kind == "" {
+		origin = monitordomain.Origin{Kind: "runtime"}
+	}
 	return RuntimeEvent{
 		ID: event.ID, ProjectID: event.ProjectID,
 		Kind: processTerminalEventKind, EntityID: event.ProcessID,
 		AgentID: event.AgentID, RunID: event.RunID,
 		To: string(event.State), ExitCode: &exitCode,
-		Reason: "process_terminal", CreatedAt: event.OccurredAt,
+		Reason: "process_terminal", Origin: origin, CreatedAt: event.OccurredAt,
 	}
 }
 
@@ -107,6 +118,7 @@ func (runtime *processRuntimePersistence) PendingTerminalEvents() (
 				AgentID:    record.Process.AgentID,
 				ProcessID:  processID,
 				RunID:      record.Process.RunID,
+				Origin:     record.Process.Origin,
 				State:      record.Event.State,
 				ExitCode:   record.Event.ExitCode,
 				OccurredAt: record.Event.OccurredAt,

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	agentdomain "github.com/karoz/karoz/internal/agent"
+	devicedomain "github.com/karoz/karoz/internal/device"
 	executiondomain "github.com/karoz/karoz/internal/execution"
 	httpapiadapter "github.com/karoz/karoz/internal/httpapi"
 	runtimedomain "github.com/karoz/karoz/internal/runtime"
@@ -52,9 +53,18 @@ func (a *app) httpHandler() http.Handler {
 	mux := httpapiadapter.NewMux(httpapiadapter.Handlers{
 		Index: a.handleIndex, Settings: a.handleSettings, FolderDialog: a.handleFolderDialog,
 		AgentTemplates: a.handleAgentTemplates, AgentTeamTemplates: a.handleAgentTeamTemplates,
-		Diagnostics: a.handleDiagnostics, CLI2API: a.handleCLI2API,
+		Diagnostics: a.handleDiagnostics, CLI2API: a.handleCLI2API, Skills: a.handleSkills,
 		RuntimeProviders: a.handleRuntimeProviders,
 		Projects:         a.handleProjects, ProjectScoped: a.handleProjectScoped,
 	})
 	return withLocalStudioMutationGuard(mux)
+}
+
+func (a *app) devices() *devicedomain.Manager {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.deviceManager == nil {
+		a.deviceManager = devicedomain.NewManager()
+	}
+	return a.deviceManager
 }

@@ -1,6 +1,7 @@
 package process
 
 import (
+	monitordomain "github.com/karoz/karoz/internal/monitor"
 	runtimedomain "github.com/karoz/karoz/internal/runtime"
 	"time"
 )
@@ -61,13 +62,15 @@ type SeqRange struct {
 }
 
 type Process struct {
-	ID          string `json:"id"`
-	ProjectID   string `json:"project_id"`
-	AgentID     string `json:"agent_id"`
-	RunID       string `json:"run_id,omitempty"`
-	Command     string `json:"command"`
-	Workdir     string `json:"workdir"`
-	Description string `json:"description,omitempty"`
+	Origin      monitordomain.Origin `json:"origin,omitempty"`
+	Version     int64                `json:"version,omitempty"`
+	ID          string               `json:"id"`
+	ProjectID   string               `json:"project_id"`
+	AgentID     string               `json:"agent_id"`
+	RunID       string               `json:"run_id,omitempty"`
+	Command     string               `json:"command"`
+	Workdir     string               `json:"workdir"`
+	Description string               `json:"description,omitempty"`
 
 	PID      int    `json:"pid,omitempty"`
 	GuardPID int    `json:"guard_pid,omitempty"`

@@ -102,9 +102,9 @@ func TestRunControlCancellationWinsOverResultCommit(t *testing.T) {
 	if !accepted || request.Run.ID != "run-1" || !request.WorkerOwned || !repository.state.Cancelling {
 		t.Fatalf("cancel request = %+v, state=%+v, accepted=%v", request, repository.state, accepted)
 	}
-	if _, _, committed := control.CommitResult("p1", "a1", "run-1", func(run Run) Run {
+	if _, _, committed := control.CommitResult("p1", "a1", "run-1", func(run Run) (Run, bool) {
 		run.State = StateDone
-		return run
+		return run, true
 	}); committed {
 		t.Fatal("result commit won after cancellation claim")
 	}
@@ -113,15 +113,32 @@ func TestRunControlCancellationWinsOverResultCommit(t *testing.T) {
 func TestRunControlCommitsResultOnce(t *testing.T) {
 	repository := &controlMemoryRepository{run: Run{ID: "run-1", State: StateInvokingModel}}
 	control := NewRunControl(repository)
-	finished, state, committed := control.CommitResult("p1", "a1", "run-1", func(run Run) Run {
+	finished, state, committed := control.CommitResult("p1", "a1", "run-1", func(run Run) (Run, bool) {
 		run.State = StateDone
-		return run
+		return run, true
 	})
 	if !committed || finished.State != StateDone || !state.ResultClaimed {
 		t.Fatalf("commit = %+v, state=%+v, committed=%v", finished, state, committed)
 	}
-	if _, _, committed := control.CommitResult("p1", "a1", "run-1", func(run Run) Run { return run }); committed {
+	if _, _, committed := control.CommitResult("p1", "a1", "run-1", func(run Run) (Run, bool) { return run, true }); committed {
 		t.Fatal("duplicate result commit unexpectedly succeeded")
+	}
+}
+
+func TestRunControlRejectedResultPreservesCancellationAndRetry(t *testing.T) {
+	repository := &controlMemoryRepository{run: Run{ID: "run-1", State: StateInvokingModel}}
+	control := NewRunControl(repository)
+	if _, _, committed := control.CommitResult("p1", "a1", "run-1", func(run Run) (Run, bool) {
+		run.State = StateDone
+		return run, false
+	}); committed {
+		t.Fatal("rejected persistence committed a result")
+	}
+	if repository.run.State != StateInvokingModel || repository.state.ResultClaimed {
+		t.Fatalf("rejected result changed control state: %+v %+v", repository.run, repository.state)
+	}
+	if _, accepted := control.RequestCancel("p1", "a1"); !accepted {
+		t.Fatal("rejected result blocked cancellation")
 	}
 }
 

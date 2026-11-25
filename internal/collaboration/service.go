@@ -21,7 +21,7 @@ type HandoffChange struct {
 }
 
 type HandoffEventSink interface {
-	HandoffChanged(HandoffChange)
+	HandoffChanged(HandoffChange) error
 }
 
 type HandoffService struct {
@@ -77,7 +77,9 @@ func (service HandoffService) Transition(projectID, agentID, messageID, next, re
 		return Handoff{}, err
 	}
 	if service.Events != nil {
-		service.Events.HandoffChanged(HandoffChange{Handoff: handoff, From: previous, To: next, Reason: "handoff_" + next, At: now})
+		if err := service.Events.HandoffChanged(HandoffChange{Handoff: handoff, From: previous, To: next, Reason: "handoff_" + next, At: now}); err != nil {
+			return handoff, err
+		}
 	}
 	return handoff, nil
 }

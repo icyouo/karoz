@@ -56,6 +56,12 @@
               <div class="agent-chat-tools" aria-label="Workspace tools">
                 <div id="agentRuntimeTools" class="agent-runtime-tools" aria-label="Agent runtime views"></div>
                 <span class="agent-tool-separator" aria-hidden="true"></span>
+                <button id="toggleDevicesPane" class="secondary icon devices-toggle" title="Devices" aria-label="Devices" aria-pressed="false">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" focusable="false" aria-hidden="true">
+                    <rect x="6" y="2" width="12" height="20" rx="2.5"></rect>
+                    <line x1="10" y1="18.5" x2="14" y2="18.5"></line>
+                  </svg>
+                </button>
                 <button id="togglePreviewPane" class="secondary icon preview-toggle" title="Preview" aria-label="Preview" aria-pressed="false">
                   <svg viewBox="0 0 23.3887 17.9785" fill="none" focusable="false" aria-hidden="true">
                     <path d="M3.06641 17.9785L19.9609 17.9785C22.0117 17.9785 23.0273 16.9727 23.0273 14.9609L23.0273 3.02734C23.0273 1.01562 22.0117 0 19.9609 0L3.06641 0C1.02539 0 0 1.01562 0 3.02734L0 14.9609C0 16.9727 1.02539 17.9785 3.06641 17.9785ZM3.08594 16.4062C2.10938 16.4062 1.57227 15.8887 1.57227 14.873L1.57227 3.11523C1.57227 2.09961 2.10938 1.57227 3.08594 1.57227L19.9414 1.57227C20.9082 1.57227 21.4551 2.09961 21.4551 3.11523L21.4551 14.873C21.4551 15.8887 20.9082 16.4062 19.9414 16.4062Z" fill="currentColor" fill-opacity="0.85"/>
@@ -136,6 +142,7 @@
                 <button class="task-log-tab active" data-task-log="runtime">Runtime</button>
                 <button class="task-log-tab" data-task-log="deploy">Deploy</button>
                 <button class="task-log-tab" data-task-log="all">All</button>
+                <button class="task-log-tab" data-task-log="diff">Diff</button>
               </div>
             </div>
             <pre id="taskLog" class="custom-scrollbar"></pre>
@@ -203,6 +210,15 @@
         </div>
         <div class="form-actions">
           <button id="saveSettings">Save Settings</button>
+        </div>
+        <div class="field">
+          <label for="skillInstallSource">Install Skill from GitHub</label>
+          <div class="inline-field">
+            <input id="skillInstallSource" placeholder="owner/repo or https://github.com/owner/repo/tree/main/skills/my-skill" />
+            <button id="installSkillBtn" type="button" class="secondary">Install</button>
+          </div>
+          <div id="installedSkillsList" class="skill-install-list"></div>
+          <div class="field-note">Downloads GitHub tarballs cleanly into your local Studio skills directory.</div>
         </div>
         <div id="workspaceSettingsDockerNotice" class="workspace-settings-notice" role="note" hidden>Workspace settings are unavailable when Karoz is running in Docker. Docker workspace mounts are configured at startup and cannot be changed from this page.</div>
       </div>
@@ -354,6 +370,7 @@
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script src="/static/js/context-tokens.js"></script>
   <script src="/static/js/core.js"></script>
+  <script src="/static/js/devices.js"></script>
   <script src="/static/js/router.js"></script>
   <script src="/static/js/agents.js"></script>
   <script src="/static/js/background-activity.js"></script>

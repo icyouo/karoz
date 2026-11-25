@@ -196,6 +196,24 @@ func (a *app) residentStaticToolHandlers() map[string]tooldomain.Handler[Residen
 		"reconcile_plan_history": func(_ context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
 			return a.reconcilePlanHistoryFromResidentTool(toolCtx.Project, toolCtx.Agent, args), nil
 		},
+		"device_list": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+			return a.executeResidentDeviceListTool(ctx, toolCtx, args), nil
+		},
+		"android_device_start": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+			return a.executeResidentAndroidDeviceStartTool(ctx, toolCtx, args), nil
+		},
+		"device_screenshot": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+			return a.executeResidentDeviceScreenshotTool(ctx, toolCtx, args), nil
+		},
+		"device_logs": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+			return a.executeResidentDeviceLogsTool(ctx, toolCtx, args), nil
+		},
+		"device_action": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+			return a.executeResidentDeviceActionTool(ctx, toolCtx, args), nil
+		},
+		"android_adb_exec": func(ctx context.Context, toolCtx ResidentToolContext, args map[string]any) (string, error) {
+			return a.executeResidentAndroidADBExecTool(ctx, toolCtx, args), nil
+		},
 	}
 }
 

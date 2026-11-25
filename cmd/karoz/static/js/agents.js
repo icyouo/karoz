@@ -209,22 +209,63 @@
       state.skillsProjectID = state.project.id;
       return state.skills;
     }
+    function buildAgentRowButton(agent) {
+      const b = document.createElement('button');
+      b.className = 'nav-item' + (state.agent && state.agent.id === agent.id ? ' active' : '');
+      b.dataset.agentId = agent.id;
+      const label = agent.nickname || agent.display_name || agent.name || 'agent';
+      const group = agent.group_id ? '<span class="group-tag">' + escapeHTML(agent.group_id) + (agent.group_role ? ' · ' + escapeHTML(agent.group_role) : '') + '</span>' : '';
+      const working = agentWorking(agent) ? '<span class="agent-working-pulse" aria-label="Agent is working"><i></i><i></i><i></i></span>' : '';
+      b.innerHTML = '<strong>' + escapeHTML(label) + working + '</strong><div class="muted">' + escapeHTML(agent.short_name || agent.name || 'agent') + ' · ' + escapeHTML(agent.runtime || 'resident') + ' · ' + (agent.message_count || 0) + ' msgs</div>' + group;
+      b.onclick = () => selectAgent(agent, { push: true });
+      return b;
+    }
     function renderAgents() {
       const box = $('agentList'); box.innerHTML = '';
       if (!state.project) {
         renderAgentWorkingState();
         return;
       }
-      state.agents.forEach(agent => {
-        const b = document.createElement('button');
-        b.className = 'nav-item' + (state.agent && state.agent.id === agent.id ? ' active' : '');
-        b.dataset.agentId = agent.id;
-        const label = agent.nickname || agent.display_name || agent.name || 'agent';
-        const group = agent.group_id ? '<span class="group-tag">' + escapeHTML(agent.group_id) + (agent.group_role ? ' · ' + escapeHTML(agent.group_role) : '') + '</span>' : '';
-        const working = agentWorking(agent) ? '<span class="agent-working-pulse" aria-label="Agent is working"><i></i><i></i><i></i></span>' : '';
-        b.innerHTML = '<strong>' + escapeHTML(label) + working + '</strong><div class="muted">' + escapeHTML(agent.short_name || agent.name || 'agent') + ' · ' + escapeHTML(agent.runtime || 'resident') + ' · ' + (agent.message_count || 0) + ' msgs</div>' + group;
-        b.onclick = () => selectAgent(agent, { push: true });
-        box.appendChild(b);
+      const ungrouped = [];
+      const groupOrder = [];
+      const byGroup = new Map();
+      (state.agents || []).forEach(agent => {
+        const gid = String(agent.group_id || '').trim();
+        if (!gid) {
+          ungrouped.push(agent);
+          return;
+        }
+        if (!byGroup.has(gid)) {
+          byGroup.set(gid, []);
+          groupOrder.push(gid);
+        }
+        byGroup.get(gid).push(agent);
+      });
+      ungrouped.forEach(agent => box.appendChild(buildAgentRowButton(agent)));
+      const collapsedMap = state.collapsedGroups || (state.collapsedGroups = {});
+      groupOrder.forEach(gid => {
+        const members = byGroup.get(gid) || [];
+        const groupRecord = (state.groups || []).find(g => g.id === gid);
+        const groupTitle = (groupRecord && groupRecord.name) ? groupRecord.name : gid;
+        const collapsed = !!collapsedMap[gid];
+        const header = document.createElement('button');
+        header.type = 'button';
+        header.className = 'agent-group-header' + (collapsed ? ' collapsed' : '');
+        header.dataset.groupId = gid;
+        header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        header.innerHTML = '<span class="agent-group-chevron" aria-hidden="true">' + (collapsed ? '▸' : '▾') + '</span><span class="agent-group-title">' + escapeHTML(groupTitle) + '</span><span class="agent-group-count">' + members.length + '</span>';
+        header.onclick = () => {
+          collapsedMap[gid] = !collapsed;
+          renderAgents();
+        };
+        box.appendChild(header);
+        if (!collapsed) {
+          const wrap = document.createElement('div');
+          wrap.className = 'agent-group-items';
+          wrap.dataset.groupId = gid;
+          members.forEach(agent => wrap.appendChild(buildAgentRowButton(agent)));
+          box.appendChild(wrap);
+        }
       });
       renderAgentWorkingState();
     }
@@ -344,14 +385,24 @@
       const modelSelect = $('agentModel');
       const effortSelect = $('agentThinkingEffort');
       if (!modelSelect || !effortSelect) return;
+      const providerID = String((state.agent && state.agent.provider) || '').trim();
       const model = String((state.agent && state.agent.model) || 'gpt-5.6-luna').trim();
-      if (!Array.from(modelSelect.options).some(option => option.value === model)) {
+      const composite = providerID ? (providerID + '::' + model) : '';
+      const options = Array.from(modelSelect.options || []);
+      let matched = options.find(option => composite && option.value === composite);
+      if (!matched) {
+        matched = options.find(option => (option.dataset && option.dataset.modelId === model) || option.value === model);
+      }
+      if (!matched) {
         const option = document.createElement('option');
-        option.value = model;
+        option.value = composite || model;
+        option.dataset.provider = providerID;
+        option.dataset.modelId = model;
         option.textContent = model;
         modelSelect.prepend(option);
+        matched = option;
       }
-      modelSelect.value = model;
+      modelSelect.value = matched.value;
       syncEffortOptionsForSelectedModel(String((state.agent && state.agent.thinking_effort) || 'medium').toLowerCase());
       modelSelect.disabled = currentAgentWorking();
       renderContextTokenUsage();
@@ -375,11 +426,11 @@
       if (!state.project || !state.agent) return;
       const projectID = state.project.id;
       const agentID = state.agent.id;
-      const model = $('agentModel').value;
       const thinkingEffort = $('agentThinkingEffort').value;
       const selected = selectedModelDescriptor();
       if (!selected || !selected.provider.available) return restoreAgentModelSettings();
       const provider = selected.provider.id;
+      const model = selected.model.id;
       const serial = ++modelSettingsSaveSerial;
       $('agentModel').disabled = true;
       $('agentThinkingEffort').disabled = true;

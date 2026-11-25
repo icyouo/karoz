@@ -94,7 +94,7 @@ func (a *app) executeResidentRunBackgroundTool(
 	}
 	record, err := a.processSupervisor.Start(ctx, processStartRequest{
 		ID: randomID(), ProjectID: toolCtx.Project.ID, AgentID: toolCtx.Agent.ID,
-		RunID: toolCtx.RunID, Command: command, Workdir: workdir,
+		RunID: toolCtx.RunID, Origin: toolCtx.Origin, Command: command, Workdir: workdir,
 		Description: toolStringArg(args, "description", 500),
 		Lifetime:    lifetime,
 		Unlimited:   unlimited,

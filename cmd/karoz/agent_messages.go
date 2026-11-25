@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	processdomain "github.com/karoz/karoz/internal/process"
 )
@@ -99,7 +100,9 @@ func (a *app) appendAgentMessage(projectID, agentID, role, intent, body string) 
 	a.mu.Lock()
 	msg := a.appendAgentMessageLocked(projectID, agentID, role, intent, body)
 	a.mu.Unlock()
-	a.persistAppendedAgentMessage(projectID, agentID)
+	if msg.ID != "" {
+		a.maybeCheckpointAgentSession(projectID, agentID, false)
+	}
 	return msg
 }
 
@@ -147,16 +150,8 @@ func (a *app) admitProcessTerminalMessage(event RuntimeEvent) (bool, error) {
 			return false, nil
 		}
 	}
-	key := projectAgentKey(event.ProjectID, targetID)
-	previousEvents := a.conversationServiceLocked().EventsFor(key)
-	previousMessages := a.conversationServiceLocked().MessagesFor(key)
-	previousTranscripts := a.conversationServiceLocked().TranscriptsFor(key)
 	expected.Seq = a.nextAgentTranscriptSequenceLocked(event.ProjectID, targetID)
-	a.appendAgentSessionEventLocked(newAgentMessageSessionEvent(expected, agentTranscriptAppendMetadata{}))
-	if err := a.saveAgentSessionEventsLocked(); err != nil {
-		a.conversationServiceLocked().Replace(key, previousEvents)
-		a.conversationServiceLocked().ReplaceMessages(key, previousMessages)
-		a.conversationServiceLocked().ReplaceTranscripts(key, previousTranscripts)
+	if err := a.commitAgentSessionEventsLocked(newAgentMessageSessionEvent(expected, agentTranscriptAppendMetadata{})); err != nil {
 		return false, err
 	}
 	if err := a.processRuntimePersistenceFail(processPersistAfterTerminalMessage); err != nil {
@@ -233,7 +228,10 @@ func (a *app) appendAgentMessageForRunWithTranscript(projectID, agentID, runID, 
 	metadata.RunID = runID
 	msg := a.appendAgentMessageLockedWithTranscript(projectID, agentID, role, intent, body, metadata)
 	a.mu.Unlock()
-	a.persistAppendedAgentMessage(projectID, agentID)
+	if msg.ID == "" {
+		return AgentMessage{}, false
+	}
+	a.maybeCheckpointAgentSession(projectID, agentID, false)
 	return msg, true
 }
 
@@ -261,7 +259,16 @@ func (a *app) appendAgentMessageLocked(projectID, agentID, role, intent, body st
 }
 
 func (a *app) appendAgentMessageLockedWithTranscript(projectID, agentID, role, intent, body string, metadata agentTranscriptAppendMetadata) AgentMessage {
-	session := a.ensureAgentSessionLocked(projectID, agentID)
+	msg := a.newAgentMessageLocked(projectID, agentID, role, intent, body)
+	if err := a.commitAgentSessionEventsLocked(newAgentMessageSessionEvent(msg, metadata)); err != nil {
+		log.Printf("append agent message: %v", err)
+		return AgentMessage{}
+	}
+	return msg
+}
+
+func (a *app) newAgentMessageLocked(projectID, agentID, role, intent, body string) AgentMessage {
+	session := a.agentSessionForEventLocked(projectID, agentID)
 	msg := AgentMessage{
 		ID:        messageID(),
 		ProjectID: projectID,
@@ -273,16 +280,7 @@ func (a *app) appendAgentMessageLockedWithTranscript(projectID, agentID, role, i
 		Body:      strings.TrimSpace(body),
 		CreatedAt: time.Now().UTC(),
 	}
-	a.appendAgentSessionEventLocked(newAgentMessageSessionEvent(msg, metadata))
 	return msg
-}
-
-func (a *app) persistAppendedAgentMessage(projectID, agentID string) {
-	if err := a.saveAgentSessionEvents(); err != nil {
-		log.Printf("save agent session events: %v", err)
-		return
-	}
-	a.maybeCheckpointAgentSession(projectID, agentID, false)
 }
 
 func (a *app) ensureAgentSession(projectID, agentID string) AgentSessionState {
@@ -292,6 +290,13 @@ func (a *app) ensureAgentSession(projectID, agentID string) AgentSessionState {
 }
 
 func (a *app) ensureAgentSessionLocked(projectID, agentID string) AgentSessionState {
+	state := a.agentSessionForEventLocked(projectID, agentID)
+	a.conversationServiceLocked().SetSession(projectAgentKey(projectID, agentID), state)
+	return state
+}
+
+// Live writers obtain identity without publishing an uncommitted session.
+func (a *app) agentSessionForEventLocked(projectID, agentID string) AgentSessionState {
 	key := projectAgentKey(projectID, agentID)
 	conversations := a.conversationServiceLocked()
 	if state, ok := conversations.Session(key); ok && strings.TrimSpace(state.SessionID) != "" {
@@ -304,7 +309,6 @@ func (a *app) ensureAgentSessionLocked(projectID, agentID string) AgentSessionSt
 		ShortWindowStartSeq: 1,
 		LastCheckpointAt:    time.Now().UTC(),
 	}
-	conversations.SetSession(key, state)
 	return state
 }
 
@@ -314,10 +318,9 @@ func (a *app) agentSessionState(projectID, agentID string) AgentSessionState {
 
 func (a *app) updateAgentSessionState(state AgentSessionState) {
 	a.mu.Lock()
-	a.conversationServiceLocked().SetSession(projectAgentKey(state.ProjectID, state.AgentID), state)
-	a.appendAgentSessionEventLocked(newAgentCheckpointSessionEvent(state))
+	err := a.commitAgentSessionEventsLocked(newAgentCheckpointSessionEvent(state))
 	a.mu.Unlock()
-	if err := a.saveAgentSessionEvents(); err != nil {
+	if err != nil {
 		log.Printf("save agent session event: %v", err)
 	}
 }
@@ -685,10 +688,7 @@ func (a *app) commitAgentCheckpoint(claim agentCheckpointClaim, summary string) 
 		a.deferCheckpointRetryLocked(claimKey)
 		return "save_failed"
 	}
-	previousEvents := a.conversationServiceLocked().EventsFor(key)
-	a.appendAgentSessionEventLocked(newAgentCheckpointSessionEvent(nextState))
-	if err := a.saveAgentSessionEventsLocked(); err != nil {
-		a.conversationServiceLocked().Replace(key, previousEvents)
+	if err := a.commitAgentSessionEventsLocked(newAgentCheckpointSessionEvent(nextState)); err != nil {
 		a.deferCheckpointRetryLocked(claimKey)
 		return "save_failed"
 	}
@@ -752,7 +752,7 @@ func normalizeResidentSummary(value string, maxChars int) string {
 		if seen[line] {
 			continue
 		}
-		cost := len(line) + 1
+		cost := utf8.RuneCountInString(line) + 1
 		if len(keptReversed) > 0 && used+cost > maxChars {
 			break
 		}
@@ -907,6 +907,184 @@ func scrubToolPromptString(key, value string) string {
 	}
 }
 
+func compactToolResultForLiveStep(body string, maxChars int) string {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return ""
+	}
+	if maxChars <= 0 {
+		maxChars = 24_000
+	}
+	if toolResultIsChoiceRequest(trimmed) && len(trimmed) <= maxChars {
+		return trimmed
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+		scrubbed := scrubLiveToolValue("", decoded)
+		if data, err := json.Marshal(scrubbed); err == nil {
+			return limitToolResultForBudget(string(data), maxChars)
+		}
+	}
+	if looksLikeLargeBase64(trimmed) {
+		return fmt.Sprintf("[omitted %d chars of base64 data]", len(trimmed))
+	}
+	return limitToolResultForBudget(trimmed, maxChars)
+}
+
+func scrubLiveToolValue(key string, value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for k, v := range typed {
+			out[k] = scrubLiveToolValue(k, v)
+		}
+		return out
+	case []any:
+		limit := len(typed)
+		if limit > 24 {
+			limit = 24
+		}
+		out := make([]any, 0, limit+1)
+		for i := 0; i < limit; i++ {
+			out = append(out, scrubLiveToolValue(key, typed[i]))
+		}
+		if len(typed) > limit {
+			out = append(out, fmt.Sprintf("[omitted %d additional items]", len(typed)-limit))
+		}
+		return out
+	case string:
+		return scrubLiveToolString(key, typed)
+	default:
+		return typed
+	}
+}
+
+func scrubLiveToolString(key, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
+	}
+	lowerKey := strings.ToLower(strings.TrimSpace(key))
+	if lowerKey == "data" && len(value) > 400 {
+		return fmt.Sprintf("[omitted %d chars of data]", len(value))
+	}
+	if strings.HasPrefix(value, "data:image/") && len(value) > 200 {
+		return fmt.Sprintf("[omitted %d chars of image data URL]", len(value))
+	}
+	if looksLikeLargeBase64(value) {
+		return fmt.Sprintf("[omitted %d chars of base64 data]", len(value))
+	}
+	switch lowerKey {
+	case "stdout":
+		return limitString(value, 8000)
+	case "stderr":
+		return limitString(value, 4000)
+	case "result", "output", "body", "text", "content":
+		return limitString(value, 12000)
+	default:
+		return limitString(value, 4000)
+	}
+}
+
+func scrubToolArgumentsForPrompt(arguments string, maxChars int) string {
+	trimmed := strings.TrimSpace(arguments)
+	if trimmed == "" {
+		return ""
+	}
+	if maxChars <= 0 {
+		maxChars = 1400
+	}
+	if utf8.RuneCountInString(trimmed) <= maxChars && json.Valid([]byte(trimmed)) &&
+		!strings.Contains(trimmed, "data:image/") && !containsLargeBase64Token(trimmed) {
+		return trimmed
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &obj); err == nil && obj != nil {
+		scrubbed := make(map[string]any, len(obj))
+		for k, v := range obj {
+			scrubbed[k] = scrubToolArgValue(k, v)
+		}
+		if data, err := json.Marshal(scrubbed); err == nil {
+			return string(data)
+		}
+	}
+	return trimmed
+}
+
+func scrubToolArgValue(key string, value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for k, v := range typed {
+			out[k] = scrubToolArgValue(k, v)
+		}
+		return out
+	case []any:
+		limit := len(typed)
+		if limit > 12 {
+			limit = 12
+		}
+		out := make([]any, 0, limit+1)
+		for i := 0; i < limit; i++ {
+			out = append(out, scrubToolArgValue(key, typed[i]))
+		}
+		if len(typed) > limit {
+			out = append(out, fmt.Sprintf("[omitted %d additional items]", len(typed)-limit))
+		}
+		return out
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if strings.HasPrefix(trimmed, "data:image/") && len(trimmed) > 200 {
+			return fmt.Sprintf("[omitted %d chars of image data URL]", len(trimmed))
+		}
+		if looksLikeLargeBase64(trimmed) {
+			return fmt.Sprintf("[omitted %d chars of base64 data]", len(trimmed))
+		}
+		lowerKey := strings.ToLower(strings.TrimSpace(key))
+		switch lowerKey {
+		case "content", "patch", "diff", "data", "body", "html", "code":
+			if len(typed) > 480 {
+				prefix := utf8SafePrefix(typed, 320)
+				return prefix + fmt.Sprintf(" ...[omitted %d bytes]", len(typed)-len(prefix))
+			}
+			return typed
+		default:
+			if len(trimmed) > 800 {
+				return limitString(trimmed, 600)
+			}
+			return typed
+		}
+	default:
+		return typed
+	}
+}
+
+func containsLargeBase64Token(value string) bool {
+	if len(value) < 800 {
+		return false
+	}
+	start := -1
+	for i := 0; i <= len(value); i++ {
+		isB64 := false
+		if i < len(value) {
+			b := value[i]
+			isB64 = (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') ||
+				b == '+' || b == '/' || b == '=' || b == '-' || b == '_'
+		}
+		if isB64 {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 && i-start >= 800 && looksLikeLargeBase64(value[start:i]) {
+			return true
+		}
+		start = -1
+	}
+	return false
+}
+
 func looksLikeLargeBase64(value string) bool {
 	if len(value) < 800 {
 		return false
@@ -916,10 +1094,18 @@ func looksLikeLargeBase64(value string) bool {
 		sample = sample[:1200]
 	}
 	matches := 0
-	for _, r := range sample {
-		if r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '+' || r == '/' || r == '=' {
+	var seen [256]bool
+	distinct := 0
+	for i := 0; i < len(sample); i++ {
+		b := sample[i]
+		if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') ||
+			b == '+' || b == '/' || b == '=' || b == '-' || b == '_' {
 			matches++
+			if !seen[b] {
+				seen[b] = true
+				distinct++
+			}
 		}
 	}
-	return matches*100/len(sample) > 95
+	return distinct >= 8 && matches*100/len(sample) > 95
 }

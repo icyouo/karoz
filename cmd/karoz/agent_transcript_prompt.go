@@ -40,7 +40,7 @@ func promptAgentTranscriptBody(item AgentTranscriptItem) string {
 	case "tool_call":
 		name := firstNonEmpty(strings.TrimSpace(item.ToolName), strings.TrimSpace(item.Intent), "unknown")
 		callID := firstNonEmpty(strings.TrimSpace(item.ToolCallID), "legacy-unpaired")
-		arguments := firstNonEmpty(strings.TrimSpace(item.ToolArguments), strings.TrimSpace(item.Body))
+		arguments := scrubToolArgumentsForPrompt(firstNonEmpty(strings.TrimSpace(item.ToolArguments), strings.TrimSpace(item.Body)), 1400)
 		return "tool_call id=" + callID + " name=" + name + " arguments=" + limitString(arguments, 1400)
 	case "tool_result":
 		name := firstNonEmpty(strings.TrimSpace(item.ToolName), strings.TrimSpace(item.Intent), "unknown")

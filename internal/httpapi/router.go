@@ -11,6 +11,7 @@ type Handlers struct {
 	Diagnostics        http.HandlerFunc
 	RuntimeProviders   http.HandlerFunc
 	CLI2API            http.HandlerFunc
+	Skills             http.HandlerFunc
 	Projects           http.HandlerFunc
 	ProjectScoped      http.HandlerFunc
 }
@@ -25,6 +26,10 @@ func NewMux(handlers Handlers) *http.ServeMux {
 	mux.HandleFunc("/api/diagnostics", handlers.Diagnostics)
 	mux.HandleFunc("/api/runtime/providers", handlers.RuntimeProviders)
 	mux.HandleFunc("/api/cli2api", handlers.CLI2API)
+	if handlers.Skills != nil {
+		mux.HandleFunc("/api/skills", handlers.Skills)
+		mux.HandleFunc("/api/skills/", handlers.Skills)
+	}
 	mux.HandleFunc("/api/projects", handlers.Projects)
 	mux.HandleFunc("/api/projects/", handlers.ProjectScoped)
 	return mux

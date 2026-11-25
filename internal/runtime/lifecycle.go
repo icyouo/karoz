@@ -39,6 +39,17 @@ func (lifecycle *RunLifecycle) clock() time.Time {
 	return time.Now().UTC()
 }
 
+// Registry serializes each atomic mutation by owner. Do not hold a second
+// global lifecycle mutex while waiting for an owner's database commit.
+// Legacy repositories still receive the original aggregate serialization.
+func (lifecycle *RunLifecycle) lockRepository() func() {
+	if _, ok := lifecycle.repository.(*Registry); ok {
+		return func() {}
+	}
+	lifecycle.mu.Lock()
+	return lifecycle.mu.Unlock
+}
+
 // Begin creates a run unless the project/agent already has an active one.
 // runID is supplied by the caller so ID generation stays at the application
 // boundary and can be deterministic in tests or scheduled-run replay.
@@ -53,8 +64,8 @@ func (lifecycle *RunLifecycle) Begin(input RunInput, runID string) (Run, bool) {
 		return Run{}, false
 	}
 
-	lifecycle.mu.Lock()
-	defer lifecycle.mu.Unlock()
+	unlock := lifecycle.lockRepository()
+	defer unlock()
 	if current, ok := lifecycle.repository.Find(input.ProjectID, input.AgentID); ok && current.State.Active() {
 		return current, false
 	}
@@ -75,8 +86,8 @@ func (lifecycle *RunLifecycle) Find(projectID, agentID string) (Run, bool) {
 	if lifecycle == nil || lifecycle.repository == nil {
 		return Run{}, false
 	}
-	lifecycle.mu.Lock()
-	defer lifecycle.mu.Unlock()
+	unlock := lifecycle.lockRepository()
+	defer unlock()
 	return lifecycle.repository.Find(strings.TrimSpace(projectID), strings.TrimSpace(agentID))
 }
 
@@ -92,8 +103,8 @@ func (lifecycle *RunLifecycle) Transition(projectID, agentID, expectedRunID stri
 	if lifecycle == nil || lifecycle.repository == nil || strings.TrimSpace(expectedRunID) == "" {
 		return Run{}, "", false, false
 	}
-	lifecycle.mu.Lock()
-	defer lifecycle.mu.Unlock()
+	unlock := lifecycle.lockRepository()
+	defer unlock()
 	var previous State
 	changed := false
 	run, ok := lifecycle.repository.Mutate(strings.TrimSpace(projectID), strings.TrimSpace(agentID), func(current *Run) bool {
@@ -116,8 +127,8 @@ func (lifecycle *RunLifecycle) Finish(projectID, agentID, expectedRunID string, 
 	if lifecycle == nil || lifecycle.repository == nil || strings.TrimSpace(expectedRunID) == "" {
 		return Run{}, "", false
 	}
-	lifecycle.mu.Lock()
-	defer lifecycle.mu.Unlock()
+	unlock := lifecycle.lockRepository()
+	defer unlock()
 	previous := State("")
 	run, ok := lifecycle.repository.Remove(strings.TrimSpace(projectID), strings.TrimSpace(agentID), expectedRunID, func(current Run) Run {
 		previous = current.State
@@ -133,8 +144,8 @@ func (lifecycle *RunLifecycle) EnqueueInterrupt(projectID, agentID string, item 
 	if lifecycle == nil || lifecycle.repository == nil {
 		return Run{}, false
 	}
-	lifecycle.mu.Lock()
-	defer lifecycle.mu.Unlock()
+	unlock := lifecycle.lockRepository()
+	defer unlock()
 	run, ok := lifecycle.repository.Mutate(strings.TrimSpace(projectID), strings.TrimSpace(agentID), func(current *Run) bool {
 		if current == nil || !current.State.Active() {
 			return false
@@ -157,8 +168,8 @@ func (lifecycle *RunLifecycle) DrainInterrupts(projectID, agentID, expectedRunID
 	if lifecycle == nil || lifecycle.repository == nil || strings.TrimSpace(expectedRunID) == "" {
 		return []Interrupt{}, false
 	}
-	lifecycle.mu.Lock()
-	defer lifecycle.mu.Unlock()
+	unlock := lifecycle.lockRepository()
+	defer unlock()
 	items := []Interrupt{}
 	_, ok := lifecycle.repository.Mutate(strings.TrimSpace(projectID), strings.TrimSpace(agentID), func(current *Run) bool {
 		if current == nil || current.ID != expectedRunID || len(current.Interrupts) == 0 {

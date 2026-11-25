@@ -19,3 +19,20 @@ func TestHostRunnerFailsClosedForRequestedSandbox(t *testing.T) {
 		t.Fatalf("sandbox request did not fail closed: %v", err)
 	}
 }
+
+func TestFailClosedEnforcerRejectsRequiredPolicyWhenRuntimeIsDown(t *testing.T) {
+	enforcer := FailClosedEnforcer{Check: func(context.Context) error {
+		return errors.New("sandboxd unavailable")
+	}}
+	err := enforcer.Enforce(SandboxPolicy{Filesystem: true, Network: true, Processes: true})
+	var unavailable SandboxUnavailableError
+	if !errors.As(err, &unavailable) || !unavailable.Policy.Filesystem || !unavailable.Policy.Network || !unavailable.Policy.Processes {
+		t.Fatalf("unavailable sandbox was not rejected: %v", err)
+	}
+	if err := (FailClosedEnforcer{Check: func(context.Context) error { return nil }}).Enforce(SandboxPolicy{Filesystem: true}); err != nil {
+		t.Fatalf("healthy sandbox was rejected: %v", err)
+	}
+	if err := (FailClosedEnforcer{}).Enforce(SandboxPolicy{}); err != nil {
+		t.Fatalf("empty policy was rejected: %v", err)
+	}
+}

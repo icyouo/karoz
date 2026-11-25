@@ -854,6 +854,7 @@ func TestAgentInterruptQueueDrainsForModelInjection(t *testing.T) {
 func TestAgentRunControllerTracksTriggerTransitionsAndFailure(t *testing.T) {
 	events := make(chan RuntimeEvent, 8)
 	a := &app{
+		settings:     Settings{DataDir: t.TempDir()},
 		agentRuntime: agentRuntimeForTestWithRuntimeState(nil, nil, map[string]map[chan RuntimeEvent]bool{"p1": {events: true}}),
 		projectTasks: newProjectTaskCoordinator(),
 		memoryStore:  newMemoryStore(),
@@ -1169,6 +1170,43 @@ func TestDeleteProjectAgentRemovesAgentAndRoutes(t *testing.T) {
 	}
 }
 
+func TestDeleteProjectAgentDissolvesCoordinatorGroup(t *testing.T) {
+	projectPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectPath, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	project := projectFromPath(projectPath, projectPath, "main")
+	a := &app{
+		settings:       Settings{DataDir: t.TempDir(), ProjectsRoot: projectPath},
+		agentDirectory: agentDirectoryForTest(map[string][]Agent{project.ID: {{ID: "karoz", ProjectID: project.ID, Name: "Karoz"}, {ID: "architect", ProjectID: project.ID, Name: "Architect", GroupID: "build", GroupRole: "architect"}, {ID: "builder", ProjectID: project.ID, Name: "Builder", GroupID: "build", GroupRole: "builder"}}}),
+		collaboration:  newCollaborationService(),
+		agentRuntime:   agentRuntimeForTest(nil),
+	}
+	replaceGroupsForTest(a, project.ID, []AgentGroup{{
+		ID:                 "build",
+		ProjectID:          project.ID,
+		CoordinatorAgentID: "architect",
+		MemberAgentIDs:     []string{"architect", "builder"},
+	}})
+
+	if err := a.deleteProjectAgent(project, "architect"); err != nil {
+		t.Fatalf("delete coordinator: %v", err)
+	}
+	if _, ok := a.projectAgent(project, "architect"); ok {
+		t.Fatal("coordinator still exists")
+	}
+	builder, ok := a.projectAgent(project, "builder")
+	if !ok {
+		t.Fatal("group member was deleted with its coordinator")
+	}
+	if builder.GroupID != "" || builder.GroupName != "" || builder.GroupRole != "" || builder.GroupOrder != 0 {
+		t.Fatalf("group member still has group fields: %+v", builder)
+	}
+	if groups := a.groupsForProject(project.ID); len(groups) != 0 {
+		t.Fatalf("groups = %+v, want none", groups)
+	}
+}
+
 func TestKarozOnlyAgentManagementTools(t *testing.T) {
 	project := Project{ID: "p1", Name: "demo", Path: t.TempDir(), DefaultBranch: "main"}
 	a := &app{
@@ -1274,7 +1312,8 @@ func toolSpecNames(specs []map[string]any) map[string]bool {
 func TestResidentToolRegistryCoversStaticDefinitions(t *testing.T) {
 	a := newApp(Settings{DataDir: t.TempDir(), ProjectsRoot: t.TempDir()})
 	expectedSpecs := append(residentToolSpecs(), residentPlanToolSpecs()...)
-	expected := toolSpecNames(append(expectedSpecs, residentAgentManagementToolSpecs()...))
+	expectedSpecs = append(expectedSpecs, residentAgentManagementToolSpecs()...)
+	expected := toolSpecNames(append(expectedSpecs, residentDeviceToolSpecs()...))
 	definitions := a.residentToolRegistry().Definitions()
 	if len(definitions) != len(expected) {
 		t.Fatalf("registry definitions = %d, expected %d", len(definitions), len(expected))

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -344,10 +345,14 @@ func (a *app) requestResidentBashApprovalSubject(
 		approvals[approval.ID] = approval
 		created = true
 	}
-	a.mu.Unlock()
 	if created {
-		a.appendAgentBashApprovalEvent(approval, "requested")
+		if err := a.appendAgentBashApprovalEventLocked(approval, "requested"); err != nil {
+			delete(approvals, approval.ID)
+			a.mu.Unlock()
+			return toolJSON(map[string]any{"error": "save_failed", "message": err.Error()})
+		}
 	}
+	a.mu.Unlock()
 
 	agentName := firstNonEmpty(toolCtx.Agent.Nickname, toolCtx.Agent.DisplayName, toolCtx.Agent.Name, toolCtx.Agent.ID, "resident agent")
 	action, choiceLabel := "run this command", "Run command"
@@ -420,9 +425,9 @@ func (a *app) resolveResidentBashChoice(projectID, agentID, runID, choiceID stri
 	}
 	if denied {
 		delete(approvals, id)
+		err := a.appendAgentBashApprovalEventLocked(approval, "denied")
 		a.mu.Unlock()
-		a.appendAgentBashApprovalEvent(approval, "denied")
-		return true, nil
+		return true, err
 	}
 	if strings.TrimSpace(runID) == "" {
 		a.mu.Unlock()
@@ -430,9 +435,12 @@ func (a *app) resolveResidentBashChoice(projectID, agentID, runID, choiceID stri
 	}
 	approval.State = residentBashApprovalGranted
 	approval.RunID = runID
+	if err := a.appendAgentBashApprovalEventLocked(approval, "approved"); err != nil {
+		a.mu.Unlock()
+		return true, err
+	}
 	approvals[id] = approval
 	a.mu.Unlock()
-	a.appendAgentBashApprovalEvent(approval, "approved")
 	return true, nil
 }
 
@@ -469,7 +477,10 @@ func (a *app) consumeResidentBashApprovalSubject(
 	if consumed.ID == "" {
 		return false
 	}
-	a.appendAgentBashApprovalEvent(consumed, "consumed")
+	if err := a.appendAgentBashApprovalEvent(consumed, "consumed"); err != nil {
+		log.Printf("consume resident Bash approval: %v", err)
+		return false
+	}
 	return true
 }
 

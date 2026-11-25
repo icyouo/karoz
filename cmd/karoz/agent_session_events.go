@@ -3,11 +3,12 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	persistenceadapter "github.com/karoz/karoz/internal/persistence"
 )
 
 const (
@@ -145,6 +146,8 @@ func newAgentModelInputSessionEvent(item AgentTranscriptItem) AgentSessionEvent 
 	}
 }
 
+// appendAgentSessionEventLocked applies an already-durable event during
+// commit or replay. Live writers must use commitAgentSessionEventsLocked.
 func (a *app) appendAgentSessionEventLocked(event AgentSessionEvent) {
 	if event.EventSeq <= 0 {
 		event.EventSeq = a.nextAgentSessionEventSequenceLocked(event.ProjectID, event.AgentID)
@@ -158,6 +161,41 @@ func (a *app) appendAgentSessionEventLocked(event AgentSessionEvent) {
 	a.applyAgentSessionEventProjectionLocked(event)
 }
 
+// commitAgentSessionEventsLocked persists the candidate event stream before
+// publishing any projection. The app lock makes a batch (such as a result and
+// its terminal Run event) one transaction for all conversation readers.
+func (a *app) commitAgentSessionEventsLocked(events ...AgentSessionEvent) error {
+	store := a.conversationServiceLocked()
+	snapshot := store.Snapshot()
+	for index := range events {
+		event := cloneAgentSessionEvent(events[index])
+		key := projectAgentKey(event.ProjectID, event.AgentID)
+		items := snapshot[key]
+		var last int64
+		if len(items) > 0 {
+			last = items[len(items)-1].EventSeq
+		}
+		if event.EventSeq == 0 {
+			event.EventSeq = last + 1
+		}
+		if event.EventSeq <= last {
+			return fmt.Errorf("non-append agent session event order for %s", key)
+		}
+		if err := validateAgentSessionEvent(event); err != nil {
+			return err
+		}
+		snapshot[key] = append(items, event)
+		events[index] = event
+	}
+	if err := a.saveJSONCompact("agent-session-events.json", snapshot, 0644); err != nil {
+		return fmt.Errorf("persist agent session events: %w", err)
+	}
+	for _, event := range events {
+		a.appendAgentSessionEventLocked(event)
+	}
+	return nil
+}
+
 func (a *app) nextAgentSessionEventSequenceLocked(projectID, agentID string) int64 {
 	key := projectAgentKey(projectID, agentID)
 	var last int64
@@ -169,52 +207,35 @@ func (a *app) nextAgentSessionEventSequenceLocked(projectID, agentID string) int
 	return last + 1
 }
 
-func (a *app) appendAgentRunStateEvent(run AgentRun, fromState, reason string) {
-	if strings.TrimSpace(run.ProjectID) == "" || strings.TrimSpace(run.AgentID) == "" || strings.TrimSpace(run.ID) == "" {
-		return
-	}
-	a.mu.Lock()
-	session := a.ensureAgentSessionLocked(run.ProjectID, run.AgentID)
-	a.appendAgentSessionEventLocked(newAgentRunStateSessionEvent(session, run, fromState, reason))
-	a.mu.Unlock()
-	if err := a.saveAgentSessionEvents(); err != nil {
-		log.Printf("save agent Run event: %v", err)
-	}
-}
-
-func (a *app) appendAgentHandoffStateEvent(handoff AgentInboxMessage, fromState, reason string) {
+func (a *app) appendAgentHandoffStateEvent(handoff AgentInboxMessage, fromState, reason string) error {
 	if strings.TrimSpace(handoff.ProjectID) == "" || strings.TrimSpace(handoff.TargetAgentID) == "" || strings.TrimSpace(handoff.ID) == "" {
-		return
+		return fmt.Errorf("handoff event requires project, agent, and handoff identity")
 	}
 	a.mu.Lock()
-	session := a.ensureAgentSessionLocked(handoff.ProjectID, handoff.TargetAgentID)
-	a.appendAgentSessionEventLocked(newAgentHandoffSessionEvent(session, handoff, fromState, reason))
+	session := a.agentSessionForEventLocked(handoff.ProjectID, handoff.TargetAgentID)
+	err := a.commitAgentSessionEventsLocked(newAgentHandoffSessionEvent(session, handoff, fromState, reason))
 	a.mu.Unlock()
-	if err := a.saveAgentSessionEvents(); err != nil {
-		log.Printf("save agent handoff event: %v", err)
-	}
+	return err
 }
 
-func (a *app) appendAgentBashApprovalEvent(approval ResidentBashApproval, state string) {
+func (a *app) appendAgentBashApprovalEvent(approval ResidentBashApproval, state string) error {
 	if strings.TrimSpace(approval.ID) == "" || strings.TrimSpace(approval.Subject.ProjectID) == "" || strings.TrimSpace(approval.Subject.AgentID) == "" || strings.TrimSpace(state) == "" {
-		return
+		return fmt.Errorf("approval event requires approval, project, agent, and state")
 	}
 	a.mu.Lock()
-	a.appendAgentBashApprovalEventLocked(approval, state)
+	err := a.appendAgentBashApprovalEventLocked(approval, state)
 	a.mu.Unlock()
-	if err := a.saveAgentSessionEvents(); err != nil {
-		log.Printf("save resident Bash approval event: %v", err)
-	}
+	return err
 }
 
-func (a *app) appendAgentBashApprovalEventLocked(approval ResidentBashApproval, state string) {
-	session := a.ensureAgentSessionLocked(approval.Subject.ProjectID, approval.Subject.AgentID)
-	a.appendAgentSessionEventLocked(newAgentBashApprovalSessionEvent(session, approval, state))
+func (a *app) appendAgentBashApprovalEventLocked(approval ResidentBashApproval, state string) error {
+	session := a.agentSessionForEventLocked(approval.Subject.ProjectID, approval.Subject.AgentID)
+	return a.commitAgentSessionEventsLocked(newAgentBashApprovalSessionEvent(session, approval, state))
 }
 
-func (a *app) appendAgentMonitorProbeApprovalEventLocked(challenge monitorProbeChallenge, state string) {
-	session := a.ensureAgentSessionLocked(challenge.ProjectID, challenge.AgentID)
-	a.appendAgentSessionEventLocked(newAgentMonitorProbeApprovalSessionEvent(session, challenge, state))
+func (a *app) appendAgentMonitorProbeApprovalEventLocked(challenge monitorProbeChallenge, state string) error {
+	session := a.agentSessionForEventLocked(challenge.ProjectID, challenge.AgentID)
+	return a.commitAgentSessionEventsLocked(newAgentMonitorProbeApprovalSessionEvent(session, challenge, state))
 }
 
 func (a *app) applyAgentSessionEventProjectionLocked(event AgentSessionEvent) {
@@ -360,16 +381,12 @@ func (a *app) loadAgentSessionEvents() error {
 		return err
 	}
 	loaded := map[string][]AgentSessionEvent{}
-	found, err := a.loadJSON("agent-session-events.json", &loaded)
+	found, err := persistenceadapter.NewJSONStore(a.settings.DataDir).LoadStrict("agent-session-events.json", &loaded)
 	if err != nil {
 		return err
 	}
-	a.conversationServiceLocked().Reset()
-	a.conversationServiceLocked().ResetMessages()
-	a.conversationServiceLocked().ResetTranscripts()
-	a.conversationServiceLocked().ResetSessions()
-	if !found {
-		return nil
+	if found && loaded == nil {
+		return fmt.Errorf("agent session event store must be a JSON object")
 	}
 	for key, events := range loaded {
 		var previousEventSeq, previousConversationSeq int64
@@ -390,6 +407,15 @@ func (a *app) loadAgentSessionEvents() error {
 				}
 				previousConversationSeq = event.Seq
 			}
+		}
+	}
+	// Validate the entire authority before replacing any existing projection.
+	a.conversationServiceLocked().Reset()
+	a.conversationServiceLocked().ResetMessages()
+	a.conversationServiceLocked().ResetTranscripts()
+	a.conversationServiceLocked().ResetSessions()
+	for _, events := range loaded {
+		for _, event := range events {
 			a.appendAgentSessionEventLocked(event)
 		}
 	}
@@ -421,5 +447,5 @@ func (a *app) saveAgentSessionEvents() error {
 }
 
 func (a *app) saveAgentSessionEventsLocked() error {
-	return a.saveJSON("agent-session-events.json", a.conversationServiceLocked().Snapshot(), 0644)
+	return a.saveJSONCompact("agent-session-events.json", a.conversationServiceLocked().Snapshot(), 0644)
 }

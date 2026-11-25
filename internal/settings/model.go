@@ -10,6 +10,7 @@ type Settings struct {
 	DataDir            string                     `json:"data_dir"`
 	ProjectsRoot       string                     `json:"projects_root"`
 	ExtraProjectsRoots []string                   `json:"extra_projects_roots"`
+	ExcludedProjectIDs []string                   `json:"excluded_project_ids,omitempty"`
 	MCPServers         map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
 }
 

@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -58,4 +59,23 @@ func (UnsupportedSandboxEnforcer) Enforce(policy SandboxPolicy) error {
 		return nil
 	}
 	return SandboxUnavailableError{Policy: policy}
+}
+
+// FailClosedEnforcer rejects a required policy unless Check reports the
+// isolating runtime is available. It never falls back to host execution.
+type FailClosedEnforcer struct {
+	Check func(context.Context) error
+}
+
+func (enforcer FailClosedEnforcer) Enforce(policy SandboxPolicy) error {
+	if !policy.Required() {
+		return nil
+	}
+	if enforcer.Check == nil {
+		return SandboxUnavailableError{Policy: policy}
+	}
+	if err := enforcer.Check(context.Background()); err != nil {
+		return SandboxUnavailableError{Policy: policy, Reason: err.Error()}
+	}
+	return nil
 }

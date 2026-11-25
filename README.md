@@ -76,7 +76,7 @@ Already using the Codex CLI? When `$HOME/.codex/auth.json` exists, `auto` mode r
 
 Chat and task execution are two separate paths. The resident agent handles conversation and coordination. When real code needs to change, Karoz hands the work to a **native coding agent** — the `codex` or `claude` CLI already installed on your machine — inside an isolated worktree:
 
-1. **Isolate** — Karoz creates a Git worktree on a dedicated `karoz/task-…` branch (initializing a base snapshot first if the repo has no commits yet).
+1. **Isolate** — Karoz creates a Git worktree on a dedicated `karoz/task-…` branch. The repository must already have an initial commit and a checked-out base branch.
 2. **Develop** — it invokes `codex exec` or `claude` with full workspace access. That agent runs its own internal loop — reading files, editing, running commands, iterating — until the task is done. Karoz delegates the coding loop rather than reimplementing it.
 3. **Detect** — if the agent produced no repository changes, the task fails fast instead of reporting false success.
 4. **Verify** — when `KAROZ_VERIFY_COMMAND` is set, Karoz runs it in the worktree; a failure marks the task failed with the captured output.
@@ -84,7 +84,9 @@ Chat and task execution are two separate paths. The resident agent handles conve
 
 Every step streams to a live task log, and each terminal state notifies the resident agent so it can decide the next move. Interrupted tasks are recovered on restart.
 
-The worktree is the safety boundary: because the code lives on its own branch behind that boundary, the native agent can run with full permissions inside it while your main checkout and remote stay untouched.
+The worktree isolates Git changes during development; it is not an operating-system sandbox. Native coding agents run with host permissions and can access files outside the worktree. Karoz merges completed task commits into the local base branch after checking that the primary checkout is clean and on the recorded branch. Nothing is pushed automatically. Tasks requesting an OS sandbox fail before execution when enforcement is unavailable; the default installation has no enforcing sandbox adapter.
+
+The task's `max_runtime_ms` controls its full execution: omitted defaults to one hour, a positive value sets the limit, and `0` allows execution until completion or explicit cancellation. Native task executors inherit that policy without an additional 30-minute CLI timeout. `KAROZ_TASK_TIMEOUT` retains its request-level behavior for standalone CLI model requests.
 
 ## Multi-Agent Collaboration
 
